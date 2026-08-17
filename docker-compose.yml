@@ -1,0 +1,44 @@
+# air-platform local stack.
+#
+# This file starts *only* air-platform. Redis, Postgres, Mongo and the model
+# gateway belong to air-infra, which owns them for the whole estate — duplicating
+# them here would give a developer two Redises and two sources of truth about which
+# one holds their sessions.
+#
+#   cd ../air-infra && make up     # redis, postgres, mongo, ollama, gateway :8080
+#   cd ../air-platform && make up  # this service                            :8081
+#
+# `air-infra_default` is air-infra's compose network (its project is named
+# `air-infra`). Joining it is what lets `http://gateway:8080` resolve; without it
+# this container would have to reach the gateway back out through the host.
+
+name: air-platform
+
+services:
+  platform:
+    build: .
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      AIR_PLATFORM__APP__ENV: development
+      # Container-to-container, so the service name rather than localhost.
+      AIR_PLATFORM__INFRA__BASE_URL: http://gateway:8080
+      AIR_PLATFORM__SESSION__BACKEND: redis
+      AIR_PLATFORM__SESSION__REDIS_URL: redis://:localdevpass@redis:6379/1
+      AIR_PLATFORM__OBS__LOG_FORMAT: json
+    ports: ["8081:8081"]
+    networks: [default, infra]
+    healthcheck:
+      # Liveness only — /v1/ready would report unready whenever air-infra blinked,
+      # and compose would then restart a container that is working correctly.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/v1/health').read()"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+networks:
+  default:
+  infra:
+    external: true
+    name: air-infra_default

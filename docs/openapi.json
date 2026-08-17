@@ -1,0 +1,407 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AIR Platform",
+    "description": "The AIR estate's conversational front door.\n\nSend a message; the platform decides what it needs, gathers it from the specialist\nservices, and streams back a grounded answer. It orchestrates and owns no\ncapability of its own \u2014 retrieval is `air-rag`'s, classification\n`air-classifier`'s, read-only calls `air-tools`', mutations `air-action`'s, and\nmodels and stores `air-infra`'s.\n\n**Two channels, one engine.** `POST /v1/chat` serves public conversational traffic\nthrough the customer gateway; `POST /v1/query` serves internal business queries\nthrough the corporate one, returning schema-validated structured output. They share\nthe pipeline and differ only by profile \u2014 guardrails, output contract, audit sink,\nquota bucket, tool allow-list. The channel comes from your API key, not from a\nheader.\n\n**Mutations are proposed, never performed.** A turn that warrants a write returns a\n`proposal` and changes nothing. Executing it takes a second turn carrying\n`confirm.proposal_id`; prose that merely reads as agreement executes nothing.\n\n**Streaming.** Responses are Server-Sent Events, content-negotiated: send\n`Accept: text/event-stream` to stream, anything else to receive the terminal result\nas one JSON body. Every pipeline stage emits as it completes, bracketed by\n`turn.start` and `turn.end`. Ignore event names you do not recognise \u2014 that is what\nlets token deltas arrive later without a contract change.\n\nErrors are RFC 9457 `application/problem+json`.",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Liveness",
+        "description": "Process is up. Consults nothing; never fails while the process can respond.",
+        "operationId": "health_v1_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/ready": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Readiness",
+        "description": "Whether this replica can serve a turn. Gates on air-infra, which is the one dependency without which no answer can be synthesised. Other services are reported for operator visibility but do not affect readiness.",
+        "operationId": "ready_v1_ready_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/capabilities": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "What this deployment can do for you",
+        "description": "Reported per principal: routes, guardrail profile, stream shapes, session and turn ceilings as they apply to the calling key's channel.",
+        "operationId": "capabilities_v1_capabilities_get",
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilitiesResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CapabilitiesResponse": {
+        "properties": {
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "env": {
+            "type": "string",
+            "title": "Env"
+          },
+          "channel": {
+            "$ref": "#/components/schemas/Channel"
+          },
+          "routes": {
+            "items": {
+              "$ref": "#/components/schemas/Route"
+            },
+            "type": "array",
+            "title": "Routes",
+            "description": "Routes whose backing service is configured."
+          },
+          "guardrails": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "type": "object",
+            "title": "Guardrails",
+            "description": "Rules active for this caller's channel."
+          },
+          "streaming": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "type": "object",
+            "title": "Streaming",
+            "description": "Which stream shapes this build emits. `token_deltas` is false until air-infra grows a streaming endpoint (docs/01-hld.md \u00a75, \u00a79)."
+          },
+          "session": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "object",
+            "title": "Session",
+            "description": "Backend and TTLs in force."
+          },
+          "turn": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "object",
+            "title": "Turn",
+            "description": "Ceilings applied to every turn."
+          }
+        },
+        "type": "object",
+        "required": [
+          "service",
+          "version",
+          "env",
+          "channel",
+          "routes",
+          "guardrails",
+          "streaming",
+          "session",
+          "turn"
+        ],
+        "title": "CapabilitiesResponse",
+        "description": "What this deployment can actually do, for the caller in front of it.\n\nReported per principal: a customer key and a business key see different\nroutes and a different guardrail profile from the same process, and a QA\nresult only means something next to the capabilities that produced it."
+      },
+      "Channel": {
+        "type": "string",
+        "enum": [
+          "customer",
+          "business"
+        ],
+        "title": "Channel",
+        "description": "Which gateway a turn arrived through.\n\nThis is the platform's central distinction \u2014 see docs/01-hld.md \u00a73. It is\nresolved from the authenticated principal, never from a request header: a\nclient that could name its own channel could select the weaker guardrail\nprofile, which is the whole thing the split exists to prevent."
+      },
+      "DependencyStatus": {
+        "properties": {
+          "service": {
+            "$ref": "#/components/schemas/DownstreamService"
+          },
+          "configured": {
+            "type": "boolean",
+            "title": "Configured"
+          },
+          "reachable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reachable",
+            "description": "None when not probed \u2014 either unconfigured, or the probe is not run here."
+          },
+          "latency_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail",
+            "description": "Operator-facing reason. Never carries a URL, key or upstream body."
+          }
+        },
+        "type": "object",
+        "required": [
+          "service",
+          "configured"
+        ],
+        "title": "DependencyStatus",
+        "description": "One dependency's contribution to readiness."
+      },
+      "DownstreamService": {
+        "type": "string",
+        "enum": [
+          "air-infra",
+          "air-classifier",
+          "air-rag",
+          "air-tools",
+          "air-action",
+          "air-recommender"
+        ],
+        "title": "DownstreamService",
+        "description": "The AIR services a turn may call.\n\nValues match the repository names so that a metric label, a config key and a\nlog line all say the same word."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status",
+            "default": "ok"
+          },
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service",
+          "version"
+        ],
+        "title": "HealthResponse",
+        "description": "Liveness. Deliberately dependency-free.\n\nA liveness probe that consults a downstream is a restart loop waiting to\nhappen: air-infra having a bad minute would make every replica of this\nservice look dead and get killed, which is precisely when you need them up."
+      },
+      "ReadyResponse": {
+        "properties": {
+          "ready": {
+            "type": "boolean",
+            "title": "Ready"
+          },
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Checked At"
+          },
+          "dependencies": {
+            "items": {
+              "$ref": "#/components/schemas/DependencyStatus"
+            },
+            "type": "array",
+            "title": "Dependencies"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ready",
+          "service",
+          "version",
+          "checked_at"
+        ],
+        "title": "ReadyResponse",
+        "description": "Readiness: can this replica serve a turn at all?\n\n``ready`` tracks air-infra alone. Every other service being down is a\nnarrower answer, not an unservable one (docs/01-hld.md \u00a77), so listing them\nhere is reporting, not gating \u2014 and conflating the two would take the\nservice out of rotation for a degradation it is designed to absorb."
+      },
+      "Route": {
+        "type": "string",
+        "enum": [
+          "direct",
+          "rag",
+          "tools",
+          "recommend",
+          "action"
+        ],
+        "title": "Route",
+        "description": "What the planner may decide a turn needs.\n\nA route is *available* only when the service behind it is reachable and\nadvertises the capability, so this enum is the vocabulary, not the inventory\n\u2014 `/v1/capabilities` reports which of these are live right now."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}
