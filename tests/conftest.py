@@ -4,9 +4,15 @@ Every test builds its app through :func:`air_platform.main.create_app` with expl
 settings rather than importing ``main.app``. That keeps a test from depending on the
 ambient environment, and keeps two tests from sharing one app's state.
 
-No test in this suite touches the network. The air-infra probe is either stubbed or
-allowed to fail — a readiness check that reports "unreachable" is a perfectly good
-result to assert on, and is what a fresh checkout genuinely produces.
+**No test may depend on what is running on the developer's machine.** The air-infra
+probe is always stubbed, in both directions: ``reachable_infra`` and
+``unreachable_infra``. An earlier version of this file let the "unreachable" case
+simply *happen*, on the reasoning that a fresh checkout has no gateway running — and
+those tests duly broke the first time air-infra was started locally. A test whose
+result depends on the ambient environment is not testing what it claims to.
+
+``INFRA_BASE_URL`` is deliberately not localhost, so that a probe escaping the stubs
+fails loudly rather than quietly reaching a real service.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from typing import Any
 
 import httpx
 import pytest
+import respx
 from fastapi import FastAPI
 
 from air_platform.config import Settings
@@ -32,6 +39,8 @@ from air_platform.main import create_app
 from air_platform.schemas.common import DependencyStatus
 
 TEST_SALT = "test-salt"
+#: Not localhost: a probe that escapes the stubs must fail, not reach a real gateway.
+INFRA_BASE_URL = "http://air-infra.invalid:8080"
 CUSTOMER_KEY = "airp_test_customer"
 BUSINESS_KEY = "airp_test_business"
 NO_SCOPE_KEY = "airp_test_noscope"
@@ -77,6 +86,7 @@ def settings() -> Settings:
     return Settings.model_validate(
         {
             "app": {"env": "test", "port": 8081},
+            "infra": {"base_url": INFRA_BASE_URL},
             "security": {
                 "hash_salt": TEST_SALT,
                 "api_keys_inline": json.dumps(key_records()),
@@ -131,6 +141,21 @@ def reachable_infra(app: FastAPI) -> Iterator[None]:
         yield
     finally:
         state.infra.probe = original  # type: ignore[method-assign]
+
+
+@pytest.fixture
+def unreachable_infra() -> Iterator[None]:
+    """Make the air-infra probe fail, deterministically.
+
+    Mocks the transport rather than patching :meth:`InfraClient.probe`, so the real
+    error handling runs — the reason a route-level test can still assert that no URL
+    leaks into the readiness body.
+    """
+    with respx.mock:
+        respx.get(f"{INFRA_BASE_URL}/v1/health").mock(
+            side_effect=httpx.ConnectError("connection refused")
+        )
+        yield
 
 
 def auth(key: str) -> dict[str, str]:

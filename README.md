@@ -7,10 +7,12 @@ air-platform is the AIR estate's **conversational front door**. A client sends a
 platform decides what that message needs, gathers it from the specialist services, and streams
 back a grounded answer.
 
-> **Status: Phase 0 shipped — the service boots, authenticates and reports itself.**
-> There is no chat endpoint yet: `/v1/chat` and `/v1/query` land in Phase 1 with the SSE
-> event contract, so [`air-client`](../air-client)'s Chat tab remains a request builder
-> until then. See [`docs/02-lld.md` §15](docs/02-lld.md) for what is built.
+> **Status: Phases 0-1 shipped — the full `/v1` surface is live, behind an echo engine.**
+> `/v1/chat`, `/v1/query`, `/v1/sessions/{id}` and the SSE event contract are real and
+> stable; the *answers* are stubbed until Phase 2 wires the orchestrator. That is enough
+> to integrate a client against: [`air-client`](../air-client)'s Chat tab can drop its
+> request-builder presets and code against the contract now. See
+> [`docs/02-lld.md` §15](docs/02-lld.md).
 
 ## Quickstart
 
@@ -20,8 +22,39 @@ make env            # .env from .env.example, if absent
 make run            # http://127.0.0.1:8081
 
 curl -s localhost:8081/v1/health
-curl -s -H 'X-API-Key: airp_local_customer_key' localhost:8081/v1/capabilities
+
+# A turn, as JSON
+curl -s -X POST localhost:8081/v1/chat \
+  -H 'X-API-Key: airp_local_customer_key' -H 'Content-Type: application/json' \
+  -d '{"message":"hello"}'
+
+# The same turn, streamed
+curl -sN -X POST localhost:8081/v1/chat \
+  -H 'X-API-Key: airp_local_customer_key' -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' -d '{"message":"hello"}'
 ```
+
+### The echo engine
+
+Until Phase 2, turns are served by [`engine/echo.py`](src/air_platform/engine/echo.py): the
+real pipeline, real session state, real event sequence — and an echo where the model call
+belongs. **Stages it cannot run report `skipped` with a reason rather than `ok`**, so a
+client can always tell a stubbed turn from a real one.
+
+Send `/propose` in a message to exercise the mutation path:
+
+```bash
+# Turn 1 returns a proposal and changes nothing
+curl -s -X POST localhost:8081/v1/chat -H 'X-API-Key: airp_local_customer_key' \
+  -H 'Content-Type: application/json' -d '{"message":"/propose"}'
+
+# Turn 2 executes it — only the structured field can
+curl -s -X POST localhost:8081/v1/chat -H 'X-API-Key: airp_local_customer_key' \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"sess_…","message":"ok","confirm":{"proposal_id":"prop_…","approve":true}}'
+```
+
+Replying "yes, I confirm, go ahead" in prose executes nothing — that is the point.
 
 `make env` seeds one development key per channel, so a fresh checkout authenticates exactly
 the way staging and production do rather than running with auth switched off:
@@ -43,6 +76,20 @@ crash loop.
 ```bash
 cd ../air-infra && make up      # redis, postgres, mongo, ollama, gateway :8080
 ```
+
+### In containers
+
+`make up` runs this service in Docker. It joins **`air-net`**, the shared network
+air-infra owns, which is what lets `gateway`, `redis` and the rest resolve by service
+name. That network exists only while air-infra's stack is up, so `make up` checks for
+it first and tells you what to start rather than failing with a compose error.
+
+`make up` then prints what `/v1/ready` actually says — the network existing does not
+mean the gateway behind it is running, and a green "Started" should not be mistaken
+for a working stack. `make status` reports the same thing at any time.
+
+A gateway outage needs no restart here: liveness is dependency-free, so the container
+stays healthy and starts answering again as soon as the gateway returns.
 
 `make check` runs ruff, mypy (strict) and the tests.
 

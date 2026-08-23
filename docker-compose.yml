@@ -8,9 +8,13 @@
 #   cd ../air-infra && make up     # redis, postgres, mongo, ollama, gateway :8080
 #   cd ../air-platform && make up  # this service                            :8081
 #
-# `air-infra_default` is air-infra's compose network (its project is named
-# `air-infra`). Joining it is what lets `http://gateway:8080` resolve; without it
-# this container would have to reach the gateway back out through the host.
+# The network wiring at the bottom is the three lines air-infra's compose file
+# prescribes for a sibling service. Joining `air-net` as *this* project's default
+# network is what lets `gateway`, `redis` and the rest resolve by service name;
+# without it the container would have to reach back out through the host.
+#
+# `air-net` exists only while air-infra's stack is up, so `make up` checks for it
+# first and says so — see the Makefile.
 
 name: air-platform
 
@@ -27,7 +31,6 @@ services:
       AIR_PLATFORM__SESSION__REDIS_URL: redis://:localdevpass@redis:6379/1
       AIR_PLATFORM__OBS__LOG_FORMAT: json
     ports: ["8081:8081"]
-    networks: [default, infra]
     healthcheck:
       # Liveness only — /v1/ready would report unready whenever air-infra blinked,
       # and compose would then restart a container that is working correctly.
@@ -39,6 +42,5 @@ services:
 
 networks:
   default:
-  infra:
+    name: air-net
     external: true
-    name: air-infra_default

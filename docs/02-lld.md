@@ -5,9 +5,10 @@
 This document is the implementation contract. Code follows it; where it turns out to be
 wrong, the document is amended rather than silently diverged from.
 
-**Shipped so far: Phase 0.** Config, auth, middleware, errors, `/v1/health`, `/v1/ready`,
-`/v1/capabilities`, metrics, Dockerfile, compose, Makefile, 70 tests. `make check` is green.
-Sections below describe the whole contract; §16 records what is built and what is not.
+**Shipped so far: Phases 0 and 1.** The full `/v1` surface is live — `/v1/chat`,
+`/v1/query`, `/v1/sessions/{id}` and the SSE event contract — served by a scripted **echo
+engine** that walks the real pipeline and stubs the work. 109 tests; `make check` is green.
+Sections below describe the whole contract; §15 records what is built and what is not.
 
 ---
 
@@ -391,22 +392,39 @@ downstream is a degradation, not an error (HLD §7).
 
 | Phase | State |
 | --- | --- |
-| 0 — Skeleton | **Shipped.** config · auth (channel + tenant on the key record) · middleware · RFC 9457 errors · `/v1/health` `/v1/ready` `/v1/capabilities` · metrics · air-infra probe · Dockerfile · compose · Makefile · 70 tests |
-| 1 — Contracts | Not started. `/v1/chat`, `/v1/query`, `/v1/sessions/{id}`, the §4 event contract, `api/sse.py` |
-| 2 — Orchestrator core + guardrails | Not started |
+| 0 — Skeleton | **Shipped.** config · auth (channel + tenant on the key record) · middleware · RFC 9457 errors · `/v1/health` `/v1/ready` `/v1/capabilities` · metrics · air-infra probe · Dockerfile · compose · Makefile |
+| 1 — Contracts | **Shipped.** `/v1/chat` · `/v1/query` · `/v1/sessions/{id}` · the §4 event contract (`api/sse.py`) · every §5 schema · session store with tenant-namespaced keys · the propose → confirm → execute gate · **echo engine** (`engine/echo.py`) |
+| 2 — Orchestrator core + guardrails | Not started. Replaces `EchoEngine._answer` and turns the skipped stages real; **the event contract does not change** |
 | 3 — Read path | Not started. **Blocked on §16's tool-calling question** for the native-tool-calling variant |
 | 4 — Write path | Not started |
 | 5 — Semantic cache + business channel | Not started |
 | 6 — Evaluation, hardening & ops | Not started |
 
-Two things Phase 0 deliberately proves, because they are the claims most expensive to get
-wrong later:
+### What the echo engine is for
+
+`engine/echo.py` exists so a client can be integrated against the **real** contract before
+the orchestrator is written. It walks the §4 pipeline in order, emits the true event
+sequence, and keeps real session state — then echoes instead of calling air-classifier,
+air-rag and the gateway.
+
+Stages it cannot really run report `skipped` with a reason, never `ok`. That is deliberate:
+a client must be able to tell a stubbed turn from a real one, and this engine must never be
+mistaken for working software in a demo. Sending `/propose` in a message exercises the
+mutation path — a literal trigger, because a stub must not appear to understand intent it
+does not.
+
+### Claims proved by tests, not by assertion
 
 - **A fresh checkout with nothing else running boots, serves, and reports itself unready** —
   air-infra down is a 503 on `/v1/ready` with a named cause, not a crash loop.
 - **Two keys in one process describe the service differently.** `/v1/capabilities` returns a
-  different channel and guardrail profile per credential, and no header or query parameter can
-  change which one you get. Covered by `tests/unit/test_channels.py`.
+  different channel and guardrail profile per credential, and no header or query parameter
+  can change which one you get (`test_channels.py`).
+- **Prose that reads as consent executes nothing.** Only the structured `confirm` field can,
+  a proposal is single-use, and any unrelated turn cancels it (`test_turns.py`).
+- **`turn.start` and `turn.end` bracket every turn**, a mid-stream failure is an `error`
+  event rather than an HTTP status, and `answer.delta` is defined but never emitted
+  (`test_events.py`).
 
 ## 16. Marked TODOs (fill-in points for later phases)
 

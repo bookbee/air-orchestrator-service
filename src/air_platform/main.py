@@ -42,6 +42,7 @@ from air_platform.api.v1.router import build_v1_router
 from air_platform.api.v1.system import build_metrics_router
 from air_platform.clients.infra import InfraClient
 from air_platform.config import Settings, get_settings
+from air_platform.memory.session import build_session_store
 from air_platform.observability.logging import configure_logging, get_logger
 from air_platform.security.api_keys import ApiKeyStore
 
@@ -162,6 +163,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings=resolved,
         key_store=key_store,
         infra=InfraClient(resolved),
+        sessions=build_session_store(resolved),
     )
 
     app = FastAPI(

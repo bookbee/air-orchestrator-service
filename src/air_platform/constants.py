@@ -89,6 +89,29 @@ class TurnStatus(StrEnum):
     ERROR = "error"
 
 
+class EventType(StrEnum):
+    """Names on the SSE wire — docs/02-lld.md §4.
+
+    A client is told to **ignore event names it does not recognise**, which is what
+    lets ``ANSWER_DELTA`` start being emitted once air-infra can stream without a
+    contract version bump. That tolerance only works if these names never change
+    meaning, so renaming a member here is a breaking change even though nothing in
+    Python refers to the string.
+    """
+
+    TURN_START = "turn.start"
+    STAGE = "stage"
+    ROUTE = "route"
+    CITATION = "citation"
+    PROPOSAL = "proposal"
+    #: Reserved. Not emitted in v1 — see docs/01-hld.md §5.
+    ANSWER_DELTA = "answer.delta"
+    ANSWER = "answer"
+    USAGE = "usage"
+    ERROR = "error"
+    TURN_END = "turn.end"
+
+
 class DownstreamService(StrEnum):
     """The AIR services a turn may call.
 

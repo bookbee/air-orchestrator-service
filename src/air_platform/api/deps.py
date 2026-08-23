@@ -28,6 +28,7 @@ from air_platform.api.middleware import KEY_ID_ATTR
 from air_platform.clients.infra import InfraClient
 from air_platform.config import Settings
 from air_platform.constants import Channel
+from air_platform.memory.session import InMemorySessionStore
 from air_platform.observability.logging import bind_request_context, get_logger
 from air_platform.schemas.common import Principal
 from air_platform.security.api_keys import ApiKeyStore
@@ -60,6 +61,7 @@ class AppState:
     settings: Settings
     key_store: ApiKeyStore
     infra: InfraClient
+    sessions: InMemorySessionStore
 
 
 def get_app_state(request: Request) -> AppState:

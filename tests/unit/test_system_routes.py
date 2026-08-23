@@ -23,6 +23,7 @@ async def test_health_needs_no_auth_and_no_dependencies(client: httpx.AsyncClien
     assert body["service"] == "air-platform"
 
 
+@pytest.mark.usefixtures("unreachable_infra")
 async def test_ready_is_503_when_infra_is_unreachable(client: httpx.AsyncClient) -> None:
     """No gateway means no synthesis, so this replica must take itself out of rotation.
 
@@ -66,6 +67,7 @@ async def test_ready_ignores_optional_downstreams(client: httpx.AsyncClient) -> 
         assert reported[service]["reachable"] is None
 
 
+@pytest.mark.usefixtures("unreachable_infra")
 async def test_ready_never_leaks_upstream_detail(client: httpx.AsyncClient) -> None:
     """The failure reason names a condition, never a URL, key or upstream body.
 
@@ -77,7 +79,7 @@ async def test_ready_never_leaks_upstream_detail(client: httpx.AsyncClient) -> N
         d["detail"] for d in response.json()["dependencies"] if d["service"] == "air-infra"
     )
     assert "http://" not in detail
-    assert "localhost" not in detail
+    assert "air-infra.invalid" not in detail
     assert "8080" not in detail
 
 

@@ -109,6 +109,275 @@
           }
         }
       }
+    },
+    "/v1/chat": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Send a conversational turn",
+        "description": "Customer channel. Send `Accept: text/event-stream` to receive the turn as it happens; any other Accept returns the completed result as JSON.\n\nA turn that warrants a mutation returns a `proposal` and changes nothing \u2014 execute it by sending the next turn with `confirm.proposal_id`.",
+        "operationId": "chat_v1_chat_post",
+        "parameters": [
+          {
+            "name": "accept",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Accept"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnResult"
+                }
+              },
+              "text/event-stream": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/query": {
+      "post": {
+        "tags": [
+          "query"
+        ],
+        "summary": "Run a business query",
+        "description": "Business channel. Answers as structured output alongside the prose. Send `Accept: text/event-stream` to receive the turn as it happens.\n\n`output_schema` is a JSON Schema the answer must satisfy; it is enforced by the output guardrail.",
+        "operationId": "query_v1_query_post",
+        "parameters": [
+          {
+            "name": "accept",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Accept"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnResult"
+                }
+              },
+              "text/event-stream": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions/{session_id}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Read a session's history",
+        "description": "Yours only. Someone else's session is indistinguishable from a missing one.",
+        "operationId": "get_session_v1_sessions__session_id__get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "description": "The id returned on `turn.start`.",
+              "title": "Session Id"
+            },
+            "description": "The id returned on `turn.start`."
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Clear a session",
+        "description": "Drops the history and any proposal awaiting confirmation.",
+        "operationId": "delete_session_v1_sessions__session_id__delete",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "description": "The id returned on `turn.start`.",
+              "title": "Session Id"
+            },
+            "description": "The id returned on `turn.start`."
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -208,6 +477,119 @@
         ],
         "title": "Channel",
         "description": "Which gateway a turn arrived through.\n\nThis is the platform's central distinction \u2014 see docs/01-hld.md \u00a73. It is\nresolved from the authenticated principal, never from a request header: a\nclient that could name its own channel could select the weaker guardrail\nprofile, which is the whole thing the split exists to prevent."
+      },
+      "ChatRequest": {
+        "properties": {
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id",
+            "description": "Absent starts a new session, whose id is returned on `turn.start`."
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 32000,
+            "minLength": 1,
+            "title": "Message"
+          },
+          "confirm": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Confirmation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "options": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnOptions"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "title": "ChatRequest",
+        "description": "A conversational turn on the customer channel."
+      },
+      "Citation": {
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "title": "Source Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uri"
+          },
+          "snippet": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snippet"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source_id",
+          "title"
+        ],
+        "title": "Citation",
+        "description": "One retrieved source the answer actually used.\n\nOnly sources that contributed are cited. Listing everything retrieved would make\nthe citation list a measure of recall rather than of grounding."
+      },
+      "Confirmation": {
+        "properties": {
+          "proposal_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Proposal Id"
+          },
+          "approve": {
+            "type": "boolean",
+            "title": "Approve"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "proposal_id",
+          "approve"
+        ],
+        "title": "Confirmation",
+        "description": "The only way to execute a proposed mutation \u2014 docs/02-lld.md \u00a78.\n\nA structured field rather than free text on purpose. Prose that reads as\nagreement, in any language or phrasing, cannot produce this object, which is what\nmakes a successful prompt injection in the proposing turn a dead end rather than\na write."
       },
       "DependencyStatus": {
         "properties": {
@@ -313,6 +695,100 @@
         "title": "HealthResponse",
         "description": "Liveness. Deliberately dependency-free.\n\nA liveness probe that consults a downstream is a restart loop waiting to\nhappen: air-infra having a bad minute would make every replica of this\nservice look dead and get killed, which is precisely when you need them up."
       },
+      "Proposal": {
+        "properties": {
+          "proposal_id": {
+            "type": "string",
+            "title": "Proposal Id"
+          },
+          "action": {
+            "type": "string",
+            "title": "Action"
+          },
+          "arguments": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Arguments"
+          },
+          "risk": {
+            "type": "string",
+            "title": "Risk",
+            "description": "air-action's own assessment: low | medium | high."
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary",
+            "description": "What executing this would do, in the user's terms."
+          },
+          "expires_at": {
+            "type": "string",
+            "title": "Expires At",
+            "description": "ISO-8601. After this the proposal cannot be confirmed."
+          }
+        },
+        "type": "object",
+        "required": [
+          "proposal_id",
+          "action",
+          "risk",
+          "summary",
+          "expires_at"
+        ],
+        "title": "Proposal",
+        "description": "A mutation air-action has validated and priced but **not** performed."
+      },
+      "QueryRequest": {
+        "properties": {
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 32000,
+            "minLength": 1,
+            "title": "Query"
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Schema",
+            "description": "JSON Schema the answer must satisfy; enforced by the output guardrail."
+          },
+          "options": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnOptions"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "QueryRequest",
+        "description": "A business-channel query. Answers as validated structured output."
+      },
       "ReadyResponse": {
         "properties": {
           "ready": {
@@ -361,6 +837,366 @@
         ],
         "title": "Route",
         "description": "What the planner may decide a turn needs.\n\nA route is *available* only when the service behind it is reachable and\nadvertises the capability, so this enum is the vocabulary, not the inventory\n\u2014 `/v1/capabilities` reports which of these are live right now."
+      },
+      "SessionView": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "channel": {
+            "$ref": "#/components/schemas/Channel"
+          },
+          "turns": {
+            "items": {
+              "$ref": "#/components/schemas/Turn"
+            },
+            "type": "array",
+            "title": "Turns"
+          },
+          "has_pending_proposal": {
+            "type": "boolean",
+            "title": "Has Pending Proposal",
+            "description": "Whether a mutation is awaiting confirmation. The id is not repeated here."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "channel",
+          "turns",
+          "has_pending_proposal",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SessionView",
+        "description": "What ``GET /v1/sessions/{id}`` returns.\n\nCarries no owner key id and no tenant: the caller already knows both, and putting\nthem on the wire would leak the isolation key into logs and browser histories."
+      },
+      "Stage": {
+        "type": "string",
+        "enum": [
+          "guardrails_in",
+          "context",
+          "cache",
+          "classify",
+          "plan",
+          "gather",
+          "synthesise",
+          "guardrails_out",
+          "persist"
+        ],
+        "title": "Stage",
+        "description": "The turn pipeline's steps, in the order docs/01-hld.md \u00a74 runs them.\n\nEmitted as `stage` events and as a metric label, so the order here is the\norder a client sees."
+      },
+      "StageRecord": {
+        "properties": {
+          "stage": {
+            "$ref": "#/components/schemas/Stage"
+          },
+          "status": {
+            "$ref": "#/components/schemas/StageStatus"
+          },
+          "latency_ms": {
+            "type": "number",
+            "title": "Latency Ms"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "stage",
+          "status",
+          "latency_ms"
+        ],
+        "title": "StageRecord",
+        "description": "One pipeline step's outcome, for the optional trace."
+      },
+      "StageStatus": {
+        "type": "string",
+        "enum": [
+          "ok",
+          "skipped",
+          "degraded",
+          "blocked"
+        ],
+        "title": "StageStatus",
+        "description": "How a stage finished.\n\n`blocked` is distinct from `degraded` on purpose: a guardrail refusing a turn\nis the system working, while a downstream being unreachable is the system\ncoping. Collapsing them would make a refusal spike look like an outage."
+      },
+      "Turn": {
+        "properties": {
+          "turn_id": {
+            "type": "string",
+            "title": "Turn Id"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "assistant"
+            ],
+            "title": "Role"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "turn_id",
+          "role",
+          "content"
+        ],
+        "title": "Turn",
+        "description": "One exchange, as it will be replayed into a later prompt.\n\nStores the **redacted** text, never the raw input. The guardrail stage redacts\non the way in, and persisting the original afterwards would put back exactly what\nredaction removed."
+      },
+      "TurnOptions": {
+        "properties": {
+          "deadline_ms": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 300000.0,
+                "minimum": 100.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadline Ms"
+          },
+          "max_cost_usd": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Cost Usd"
+          },
+          "allow_routes": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/Route"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allow Routes",
+            "description": "Restrict the planner to these routes. Cannot add a route that is not live."
+          },
+          "use_cache": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Use Cache"
+          },
+          "redact_pii": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Redact Pii",
+            "description": "Business channel only. A customer-channel request setting this is refused rather than ignored, so a caller cannot believe they turned it off."
+          },
+          "include_trace": {
+            "type": "boolean",
+            "title": "Include Trace",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "TurnOptions",
+        "description": "Per-request narrowing. Never widening \u2014 see the module docstring."
+      },
+      "TurnResult": {
+        "properties": {
+          "turn_id": {
+            "type": "string",
+            "title": "Turn Id"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "answer": {
+            "type": "string",
+            "title": "Answer"
+          },
+          "structured": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Structured"
+          },
+          "citations": {
+            "items": {
+              "$ref": "#/components/schemas/Citation"
+            },
+            "type": "array",
+            "title": "Citations"
+          },
+          "proposal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Proposal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "routes": {
+            "items": {
+              "$ref": "#/components/schemas/Route"
+            },
+            "type": "array",
+            "title": "Routes"
+          },
+          "grounded": {
+            "type": "boolean",
+            "title": "Grounded",
+            "default": false
+          },
+          "refusal": {
+            "type": "boolean",
+            "title": "Refusal",
+            "default": false
+          },
+          "degraded": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Degraded",
+            "description": "Downstreams that were unavailable, so a caller can see what was missing."
+          },
+          "status": {
+            "$ref": "#/components/schemas/TurnStatus",
+            "default": "ok"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/Usage"
+          },
+          "trace": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/StageRecord"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace"
+          }
+        },
+        "type": "object",
+        "required": [
+          "turn_id",
+          "session_id",
+          "answer"
+        ],
+        "title": "TurnResult",
+        "description": "The non-streaming envelope.\n\nCollected from the same event sequence a streaming caller receives, so the two\nsurfaces cannot drift: there is one engine, and this is what you get if you\ndecline to watch it work."
+      },
+      "TurnStatus": {
+        "type": "string",
+        "enum": [
+          "ok",
+          "refused",
+          "degraded",
+          "error"
+        ],
+        "title": "TurnStatus",
+        "description": "A turn's terminal outcome, carried on `turn.end`.\n\nNote this is not the HTTP status. A streaming response commits to 200 before\nthe pipeline runs, so this is the only honest report of what happened \u2014 which\nis why the access log records both (docs/02-lld.md \u00a711)."
+      },
+      "Usage": {
+        "properties": {
+          "model_calls": {
+            "type": "integer",
+            "title": "Model Calls",
+            "default": 0
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "title": "Prompt Tokens",
+            "default": 0
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "title": "Completion Tokens",
+            "default": 0
+          },
+          "total_tokens": {
+            "type": "integer",
+            "title": "Total Tokens",
+            "default": 0
+          },
+          "cost_usd": {
+            "type": "number",
+            "title": "Cost Usd",
+            "default": 0.0
+          },
+          "cache_hit": {
+            "type": "boolean",
+            "title": "Cache Hit",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "Usage",
+        "description": "What a turn consumed. Costs are read back from air-infra's own accounting\nrather than recomputed here, so the two can never disagree."
       },
       "ValidationError": {
         "properties": {
