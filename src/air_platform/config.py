@@ -37,7 +37,8 @@ class AppSettings(BaseModel):
     env: Literal["development", "staging", "production", "test"] = "development"
     host: str = "0.0.0.0"  # noqa: S104 — containers bind all interfaces by design
     #: 8081 is this service's slot in the AIR port map (air-infra/README.md).
-    #: 8080 belongs to the air-infra gateway, which this service calls.
+    #: 8080 is air-infra, the store/secrets broker this service calls for
+    #: Redis/Postgres/Mongo credentials; 8083 is air-llm, the model gateway.
     port: int = Field(default=8081, ge=1, le=65535)
     workers: int = Field(default=2, ge=1, le=64)
     root_path: str = ""
@@ -54,12 +55,12 @@ class AppSettings(BaseModel):
 
 
 class InfraSettings(BaseModel):
-    """The air-infra gateway: models, and the broker for Redis/Postgres.
+    """The air-infra broker: Redis/Postgres/Mongo credentials and secrets.
 
-    This is the one downstream whose absence is fatal to a turn — no synthesis is
-    possible without it (docs/01-hld.md §7) — so unlike the services in
-    :class:`DownstreamSettings` it has no ``enabled`` flag. It is either
-    reachable or the service reports itself unready.
+    Not the model path — that moved to air-llm (:class:`LlmSettings`) when air-llm
+    was split out of air-infra. Kept mandatory (no ``enabled`` flag, unlike
+    :class:`DownstreamSettings`) because Phase 2's Redis-backed session store will
+    depend on it; today nothing in this service actually calls it yet.
     """
 
     base_url: str = "http://localhost:8080"
@@ -70,7 +71,33 @@ class InfraSettings(BaseModel):
     #: turns a health check into an outage detector that fires too late.
     health_timeout_s: float = Field(default=2.0, gt=0)
     max_retries: int = Field(default=2, ge=0, le=8)
-    #: Model alias asked of the gateway. ``None`` takes the gateway's default,
+
+    @property
+    def configured(self) -> bool:
+        return self.api_key is not None
+
+
+# ── air-llm ───────────────────────────────────────────────────────────────────
+
+
+class LlmSettings(BaseModel):
+    """The air-llm gateway: the only model path (docs/01-hld.md §7, as amended).
+
+    This is the one downstream whose absence is fatal to a turn — no synthesis is
+    possible without it — so unlike the services in :class:`DownstreamSettings` it
+    has no ``enabled`` flag. It is either reachable or the service reports itself
+    unready.
+    """
+
+    base_url: str = "http://localhost:8083"
+    #: air-llm service token, sent as ``X-API-Key``.
+    api_key: SecretStr | None = None
+    timeout_s: float = Field(default=30.0, gt=0)
+    #: Readiness probes must not inherit the generous turn timeout: a slow probe
+    #: turns a health check into an outage detector that fires too late.
+    health_timeout_s: float = Field(default=2.0, gt=0)
+    max_retries: int = Field(default=2, ge=0, le=8)
+    #: Model/routing alias asked of air-llm. ``None`` takes air-llm's own default,
     #: which is the right choice locally where only Ollama is configured.
     default_model: str | None = None
 
@@ -113,7 +140,7 @@ class DownstreamSettings(BaseModel):
         default_factory=lambda: ServiceSettings(base_url="http://localhost:8082")
     )
     rag: ServiceSettings = Field(
-        default_factory=lambda: ServiceSettings(base_url="http://localhost:8083")
+        default_factory=lambda: ServiceSettings(base_url="http://localhost:8087")
     )
     tools: ServiceSettings = Field(
         default_factory=lambda: ServiceSettings(base_url="http://localhost:8084")
@@ -126,7 +153,12 @@ class DownstreamSettings(BaseModel):
     )
 
     def for_service(self, service: DownstreamService) -> ServiceSettings | None:
-        """Settings for a service, or ``None`` for air-infra (see :class:`InfraSettings`)."""
+        """Settings for a service, or ``None`` for air-infra/air-llm.
+
+        Those two are mandatory dependencies configured on their own settings
+        objects (:class:`InfraSettings`, :class:`LlmSettings`), not this optional
+        group.
+        """
         attr = _SERVICE_ATTR.get(service)
         if attr is None:
             return None
@@ -141,7 +173,7 @@ class DownstreamSettings(BaseModel):
         (Phase 3); this is the configuration half, and it is what
         ``/v1/capabilities`` can report before any probe has run.
         """
-        live: set[Route] = {Route.DIRECT}  # always available: air-infra alone answers it
+        live: set[Route] = {Route.DIRECT}  # always available: air-llm alone answers it
         if self.rag.configured:
             live.add(Route.RAG)
         if self.tools.configured:
@@ -153,8 +185,8 @@ class DownstreamSettings(BaseModel):
         return frozenset(live)
 
 
-#: Service → attribute name on :class:`DownstreamSettings`. air-infra is absent
-#: deliberately: it is not optional and does not live in this group.
+#: Service → attribute name on :class:`DownstreamSettings`. air-infra and air-llm
+#: are absent deliberately: neither is optional, and neither lives in this group.
 _SERVICE_ATTR: dict[DownstreamService, str] = {
     DownstreamService.CLASSIFIER: "classifier",
     DownstreamService.RAG: "rag",
@@ -302,6 +334,7 @@ class Settings(BaseSettings):
 
     app: AppSettings = Field(default_factory=AppSettings)
     infra: InfraSettings = Field(default_factory=InfraSettings)
+    llm: LlmSettings = Field(default_factory=LlmSettings)
     downstream: DownstreamSettings = Field(default_factory=DownstreamSettings)
     turn: TurnSettings = Field(default_factory=TurnSettings)
     guardrails: GuardrailSettings = Field(default_factory=GuardrailSettings)

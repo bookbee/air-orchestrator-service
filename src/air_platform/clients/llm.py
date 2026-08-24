@@ -1,18 +1,22 @@
-"""air-infra client — the broker for Redis/Postgres/Mongo and secrets.
+"""air-llm client — the model gateway. The only model path (G7).
 
-Not the model path: that's `air-llm` (see `clients/llm.py`), a separate service
-air-infra's own model gateway was extracted into. air-infra is a **service**
-dependency, reached over HTTP, not a package one — following air-classifier's
-precedent for air-llm (`providers/air_llm_provider.py` talks over httpx rather
-than importing a client package) and keeping the two repos free of the
-build-time coupling a path dependency would create. The contract is air-infra's
-published API; httpx is the transport.
+Reached over HTTP, not imported as a package — the same shape as
+`clients/infra.py`, following air-classifier's precedent for talking to air-llm
+(`providers/air_llm_provider.py`).
 
-Nothing in this service calls air-infra yet — Phase 0 implements the probe only,
-reported on ``/v1/ready`` for operator visibility but not gating it (that's
-air-llm's job). The store brokering arrives with the session engine in Phase 2,
-at which point air-infra becomes a real dependency again and its readiness
-weight should be revisited.
+This is the one downstream whose absence is fatal to a turn — no synthesis is
+possible without it — so it has no ``enabled`` flag and its probe is what
+``/v1/ready`` gates on.
+
+The probe hits ``/v1/ready``, not ``/v1/health``: air-llm's own health route is
+dependency-free liveness and never reflects whether a provider actually answers,
+while its ready route is explicitly gated on "at least one provider reachable"
+(air-llm's `api/v1/system.py`) — the one signal that actually answers "can a turn
+be synthesised right now." air-classifier's own air-llm adapter probes the same
+path for the same reason.
+
+Phase 0 implements the probe only. ``chat`` arrives with the turn engine in
+Phase 2.
 """
 
 from __future__ import annotations
@@ -29,15 +33,15 @@ from air_platform.observability import metrics
 from air_platform.observability.logging import get_logger
 from air_platform.schemas.common import DependencyStatus
 
-__all__ = ["InfraClient"]
+__all__ = ["LlmClient"]
 
 logger = get_logger(__name__)
 
-_HEALTH_PATH: Final[str] = "/v1/health"
+_READY_PATH: Final[str] = "/v1/ready"
 
 
-class InfraClient:
-    """Thin async client for the air-infra gateway.
+class LlmClient:
+    """Thin async client for the air-llm gateway.
 
     The ``httpx.AsyncClient`` is created lazily and behind a lock. Creating it in
     ``__init__`` would bind it to whichever event loop happened to be running at
@@ -47,7 +51,7 @@ class InfraClient:
     """
 
     def __init__(self, settings: Settings) -> None:
-        self._config = settings.infra
+        self._config = settings.llm
         self._client: httpx.AsyncClient | None = None
         self._lock = asyncio.Lock()
         self._closed = False
@@ -69,7 +73,7 @@ class InfraClient:
         return self._client
 
     async def probe(self) -> DependencyStatus:
-        """Liveness of the gateway, for ``/v1/ready``.
+        """Whether air-llm itself reports ready, for ``/v1/ready``.
 
         Uses ``health_timeout_s`` rather than the turn timeout: a probe that waits as
         long as a real request would turns a health check into an outage detector
@@ -82,38 +86,38 @@ class InfraClient:
         client = await self._http()
         started = time.perf_counter()
         try:
-            response = await client.get(_HEALTH_PATH, timeout=self._config.health_timeout_s)
+            response = await client.get(_READY_PATH, timeout=self._config.health_timeout_s)
             elapsed_ms = (time.perf_counter() - started) * 1000
             ok = response.status_code == httpx.codes.OK
             metrics.record_downstream_call(
-                service=DownstreamService.INFRA, outcome="ok" if ok else "error"
+                service=DownstreamService.LLM, outcome="ok" if ok else "error"
             )
             return DependencyStatus(
-                service=DownstreamService.INFRA,
+                service=DownstreamService.LLM,
                 configured=True,
                 reachable=ok,
                 latency_ms=round(elapsed_ms, 3),
                 # The status code, not the body: an upstream error body can carry a
                 # stack trace or an internal hostname, and this response is
                 # unauthenticated.
-                detail=None if ok else f"gateway returned HTTP {response.status_code}",
+                detail=None if ok else f"air-llm returned HTTP {response.status_code}",
             )
         except httpx.TimeoutException:
-            metrics.record_downstream_call(service=DownstreamService.INFRA, outcome="timeout")
+            metrics.record_downstream_call(service=DownstreamService.LLM, outcome="timeout")
             return DependencyStatus(
-                service=DownstreamService.INFRA,
+                service=DownstreamService.LLM,
                 configured=True,
                 reachable=False,
                 latency_ms=round((time.perf_counter() - started) * 1000, 3),
                 detail=f"no response within {self._config.health_timeout_s}s",
             )
         except httpx.HTTPError as exc:
-            metrics.record_downstream_call(service=DownstreamService.INFRA, outcome="unavailable")
+            metrics.record_downstream_call(service=DownstreamService.LLM, outcome="unavailable")
             # The exception type, never ``str(exc)``: httpx renders the full URL into
             # its message, and the base URL can embed credentials.
-            logger.warning("infra.probe_failed", error=type(exc).__name__)
+            logger.warning("llm.probe_failed", error=type(exc).__name__)
             return DependencyStatus(
-                service=DownstreamService.INFRA,
+                service=DownstreamService.LLM,
                 configured=True,
                 reachable=False,
                 latency_ms=round((time.perf_counter() - started) * 1000, 3),

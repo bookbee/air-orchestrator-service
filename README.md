@@ -68,13 +68,18 @@ Both are stored as `sha256(AIR_PLATFORM__SECURITY__HASH_SALT + raw key)`, are va
 against the development salt, and grant no `allow_actions` — proposing a mutation takes a
 deliberately configured key. Any real deployment overrides both halves.
 
-**air-infra is required.** Without it `/v1/ready` is a 503 naming the gateway as the cause, by
-design — no answer can be synthesised without a model. The service still boots and serves
-`/v1/health`, because refusing to start would turn a recoverable dependency outage into a
-crash loop.
+**air-infra is required; air-llm will be too, once Phase 2 wires model calls.** Model
+inference moved out of air-infra into [`air-llm`](../air-llm), its own standalone gateway —
+air-infra now only brokers Redis/Postgres/Mongo credentials and secrets (see air-infra's
+[port map](../air-infra/README.md#port-map)). Today's `/v1/ready` still gates on air-infra
+alone and calls it "the gateway" — a Phase 0 holdover from before air-llm was split out.
+Wiring a real readiness probe against air-llm, and an `LlmClient` alongside `InfraClient`,
+is Phase 2 work, not done yet. The service still boots and serves `/v1/health` either way,
+because refusing to start would turn a recoverable dependency outage into a crash loop.
 
 ```bash
-cd ../air-infra && make up      # redis, postgres, mongo, ollama, gateway :8080
+cd ../air-infra && make up      # redis, postgres, mongo — no model gateway here anymore
+cd ../air-llm   && make up      # the model gateway :8083, needed once Phase 2 calls it
 ```
 
 ### In containers
@@ -107,13 +112,14 @@ retrieve, classify, host models, or write to business systems.
 
 | Service | Port | air-platform's relationship |
 | --- | --- | --- |
-| `air-infra` | 8080 | Models, brokered Redis/Postgres, secrets. **The only model path** |
+| `air-infra` | 8080 | Brokered Redis/Postgres/Mongo, secrets. **Not** the model path — see Quickstart |
+| **`air-platform`** | **8081** | This service |
 | `air-classifier` | 8082 | Sentiment and topic for a turn |
-| `air-rag` | 8083 | Retrieval, reranking, citations |
+| `air-llm` | 8083 | Model gateway, reached directly, never via air-infra. **The only model path** (G7) |
 | `air-tools` | 8084 | **Read-only** capability calls |
 | `air-action` | 8085 | **Mutations**, behind idempotency keys and approval gates |
 | `air-recommender` | 8086 | A read-path capability the planner may select |
-| **`air-platform`** | **8081** | This service |
+| `air-rag` | 8087 | Retrieval, reranking, citations |
 
 ## The two invariants
 
@@ -141,12 +147,23 @@ v1 streams the **turn lifecycle** rather than tokens — a recorded deviation fr
 
 ## Open before code starts
 
-Two gaps this design opens in `air-infra`, tracked in [HLD §9](docs/01-hld.md):
+Two gaps this design opens in **`air-llm`** — the model gateway air-platform actually calls
+(see Quickstart above), tracked as `air-infra` in [HLD §9](docs/01-hld.md) pending the same
+correction:
 
-1. **Tool calling** — the unified `ChatRequest` has no `tools` field. Native tool-calling is
-   the recommended planner mechanism and is blocked on this. *Required before Phase 3*, or the
-   planner ships as schema-constrained JSON decomposition and migrates later.
-2. **Streaming** — no `ModelProvider.stream()` and no SSE endpoint. *Not required before
-   Phase 5.*
+1. **Tool calling** — the unified inference contract has no `tools` field. Native tool-calling
+   is the recommended planner mechanism and is blocked on this. *Required before Phase 3*, or
+   the planner ships as schema-constrained JSON decomposition and migrates later.
+2. **Streaming** — no `ModelProvider.stream()` and no SSE endpoint on air-llm. *Not required
+   before Phase 5.*
 
-The review checklist is [`docs/00-plan.md` §8](docs/00-plan.md).
+The review checklist is [`docs/00-plan.md` §8](docs/00-plan.md) — also still written against
+air-infra as the Model Gateway.
+
+**Doc debt.** `docs/00-plan.md` and `docs/01-hld.md` predate air-llm's split from air-infra
+and still name `air-infra` as the Model Gateway, `air_infra_client` as the model transport,
+and `/v1/models/chat` / `/v1/models/embeddings` as live endpoints — none of which exist in
+air-infra any more (its `api/v1/router.py` has no `models` route today). `src/air_platform`
+has no air-llm client yet either. This README is corrected; the plan/HLD/LLD and the client
+code are not — that correction is Phase 2 work, done alongside the orchestrator rather than
+as a docs-only pass.

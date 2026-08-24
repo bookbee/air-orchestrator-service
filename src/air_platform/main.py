@@ -16,9 +16,9 @@ still unbuilt, that is the normal case rather than the degraded one.
 
 The only things that can stop this service from starting are the ones no turn could
 survive: settings that will not validate, or an API key file that will not parse.
-Notably **air-infra being down is not one of them** — the service starts, reports
-itself unready, and becomes ready when the gateway returns. Refusing to boot would
-turn a recoverable dependency outage into a crash loop.
+Notably **neither air-infra nor air-llm being down is one of them** — the service
+starts, reports itself unready, and becomes ready when the model gateway returns.
+Refusing to boot would turn a recoverable dependency outage into a crash loop.
 
 Startup order is not arbitrary: logging comes up before anything that logs its own
 status line, and the key store before the routes that authenticate against it.
@@ -41,6 +41,7 @@ from air_platform.api.middleware import install_middleware
 from air_platform.api.v1.router import build_v1_router
 from air_platform.api.v1.system import build_metrics_router
 from air_platform.clients.infra import InfraClient
+from air_platform.clients.llm import LlmClient
 from air_platform.config import Settings, get_settings
 from air_platform.memory.session import build_session_store
 from air_platform.observability.logging import configure_logging, get_logger
@@ -58,8 +59,8 @@ The AIR estate's conversational front door.
 Send a message; the platform decides what it needs, gathers it from the specialist
 services, and streams back a grounded answer. It orchestrates and owns no
 capability of its own — retrieval is `air-rag`'s, classification
-`air-classifier`'s, read-only calls `air-tools`', mutations `air-action`'s, and
-models and stores `air-infra`'s.
+`air-classifier`'s, read-only calls `air-tools`', mutations `air-action`'s, models
+`air-llm`'s, and stores `air-infra`'s.
 
 **Two channels, one engine.** `POST /v1/chat` serves public conversational traffic
 through the customer gateway; `POST /v1/query` serves internal business queries
@@ -139,6 +140,7 @@ def _build_lifespan(state: AppState) -> Any:
             # hook's job to close it; leaving it open logs an "unclosed client"
             # warning on every reload and leaks sockets in tests.
             await state.infra.aclose()
+            await state.llm.aclose()
             _log.info("shutdown.complete")
 
     return lifespan
@@ -163,6 +165,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings=resolved,
         key_store=key_store,
         infra=InfraClient(resolved),
+        llm=LlmClient(resolved),
         sessions=build_session_store(resolved),
     )
 

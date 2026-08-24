@@ -103,37 +103,71 @@ selecting the profile — see [HLD §3](01-hld.md).
 | Port | **8081** | Already reserved for air-platform in air-infra's port map |
 | Config | `pydantic-settings`, `AIR_PLATFORM__*`, `__` nesting | House convention |
 
-### Open questions for review
+### Resolved decisions (formerly "open questions")
 
-1. **Routing mechanism.** LLM-based intent decomposition (as `shopassist-service` does), or
-   native tool-calling with the downstream capabilities advertised as tool schemas?
-   Recommendation: **tool-calling**, with the tool list assembled at runtime from each
-   service's `/v1/capabilities`, so a new tool in air-tools needs no release here. This
-   depends on the gateway exposing tool-use through its unified schema, which it does not
-   yet — worth confirming before it becomes a dependency.
-2. ~~**Where PII masking belongs.**~~ *Resolved by the diagram.* Guardrails — injection
-   defence, PII redaction, policy and safety filters — sit **inside air-platform and run on
-   both directions** (review item 01). `shopassist-service` masked inside the orchestrator and
-   flagged that as the wrong place; the correction is a guardrail stage at the platform edge,
-   not a gateway filter, because only the platform can see the assembled prompt. Redaction is
-   configurable on the business channel, where internal analysts legitimately query customer
-   records — configurable, never absent.
-3. **Confirmation lifetime.** How long does a pending mutation stay confirmable, and does a
-   new unrelated turn cancel it? Recommendation: **short TTL on the session, cancelled by
-   any turn that does not answer it**, so a stale "yes" cannot execute an hour-old proposal.
-4. **Turn transcript retention.** Sessions in Redis are ephemeral by nature. If turns are
-   needed for evaluation or audit beyond the session TTL, that is a Postgres table and it
-   should be decided now rather than retrofitted. The business channel's immutable compliance
-   audit log (review item 05) probably forces this — confirm whether it is in scope for v1.
-5. **Semantic cache correctness.** An embedding-similarity hit is a *guess* that two questions
-   are the same one. "Where is order 123" and "where is order 456" are near-identical
-   vectors. Recommendation: **never cache a turn whose answer depended on tool output,
-   retrieval, or any per-user data** — cache only the direct-answer route, and require a
-   high similarity threshold plus an exact match on the extracted entities. This is the
-   difference between item 04's cost win and a wrong-answer incident.
-6. **`air-recommender`'s place.** Not on the diagram. Read as a *Tools / Live Data*
-   capability — a fourth read-path client the planner may select ([HLD §1](01-hld.md)).
-   Confirm, or give it a distinct role.
+Resolved against two real inputs, not just review discussion: `shopassist-service`
+(`~/git/iisc-genai/shopassist-service`) — a working capstone predecessor whose retrospective
+and known-gaps history this section cites directly — and an enterprise reference diagram the
+user supplied for review. Where the two disagreed, shopassist's evidence won: it is proven,
+running code, not an aspiration.
+
+1. **Routing mechanism — resolved as LLM-based decomposition, reversing the earlier
+   tool-calling recommendation.** `shopassist-service`'s `call_task_decomposer()` is exactly
+   this shape, proven in production use, and air-llm confirmed still has no `tools` field on
+   its unified inference contract (checked against its actual source, not assumed) — so
+   tool-calling remains blocked on a change in a repo this one doesn't own. Decomposition needs
+   nothing further to ship. Migrate to native tool-calling once air-llm grows it; the tool list
+   still assembles at runtime from each service's `/v1/capabilities`, so that migration is a
+   planner-internal change, not a contract change.
+2. ~~**Where PII masking belongs.**~~ *Resolved by the diagram — and re-confirmed against
+   shopassist's actual code, not just its diagram.* Guardrails — injection defence, PII
+   redaction, policy and safety filters — sit **inside air-platform and run on both
+   directions** (review item 01). The enterprise diagram reviewed alongside this decision
+   places PII masking *before* the API gateway, ahead of authentication; that placement is
+   **rejected** — even `shopassist-service` itself masks inside the orchestrator, after auth,
+   never ahead of the gateway. `shopassist-service` masking inside the orchestrator was
+   originally flagged as a placement to revisit; the correction is a guardrail stage at the
+   platform edge (still behind auth), not a gateway filter, because only the platform can see
+   the assembled prompt. Redaction is configurable on the business channel, where internal
+   analysts legitimately query customer records — configurable, never absent.
+3. **Confirmation lifetime — resolved.** Short TTL on the session, cancelled by any turn that
+   does not answer it, so a stale "yes" cannot execute an hour-old proposal
+   (`SessionSettings.proposal_ttl_seconds`). The confirmation match itself is a **deterministic
+   keyword check on the next turn, never a second LLM call** — shopassist's own reasoning
+   applies directly: routing a confirmation through an LLM would let a prompt injection talk
+   its way into confirming its own proposal.
+4. **Turn transcript retention — deferred, not resolved.** shopassist never needed a Postgres
+   transcript table in practice; its retrospective names other gaps but never this one. Left
+   out of v1 scope; revisit only if the business channel's audit log (review item 05) forces it.
+5. **Semantic cache correctness — resolved as designed, plus one addition.** Never cache a turn
+   whose answer depended on tool output, retrieval, or any per-user data; cache only the
+   direct-answer route, with a high similarity threshold and an exact match on extracted
+   entities. **Addition, adopted from the reference diagram:** a separate, cheap routing/intent
+   cache (known intents/routes, TTL-based) sits *ahead* of this semantic answer cache — lower
+   risk than the answer cache, since a wrong routing-cache hit costs an extra step rather than
+   serving a wrong fact, and it stays useful even for turns the answer cache's eligibility rules
+   exclude.
+6. **`air-recommender`'s place — resolved.** Not on the diagram. A fourth read-path capability,
+   same shape as air-tools, not architecturally distinct ([HLD §1](01-hld.md)).
+
+### New decision: agent placement inside air-tools/air-rag
+
+`shopassist-service`'s five agents (`OrderTrackingAgent` et al.) each run **reason → tool call
+→ interpret** — two LLM calls plus a data call, per agent, per sub-task. Externalising RAG and
+tools into their own repos (`air-rag`, `air-tools`) forced a decision this section's original
+scope didn't cover: where does that reasoning loop live once it's not all one process?
+
+**Decided: inside air-tools and air-rag, not air-platform.** Each hosts its own air-llm client
+and does its own reason/interpret calls; air-platform sends **one coarse request per sub-task**
+(`POST /v1/agents/{name}` on air-tools) and folds the structured result into synthesis. This
+keeps the non-goal already on record — "a tool added there must not require a code change
+here" — true for agent logic as well as flat capability calls, and matches the per-role
+fine-tuned LLM endpoints on the reference diagram (`agent_reason`, `agent_interpret`), realised
+as air-llm `routing.yaml` aliases rather than new services. air-tools' read-only boundary is
+unchanged: an agent that finds a mutation warranted returns a description for air-platform to
+route to air-action, and never executes anything itself — the same structural gap that closes
+the highest-severity issue in shopassist's own retrospective (no ownership/confirmation check
+on `cancel_order`/`delete_order`).
 
 ## 5. Phased delivery
 
@@ -219,17 +253,27 @@ load test, runbook, image published.
 
 ## 8. Review checklist
 
-Please confirm or push back on each before the LLD is treated as settled:
+Status against each, as of this review round:
 
-- [ ] The diagram-to-repo mapping in [HLD §1](01-hld.md) — especially that the *Model Gateway*
-      box is air-infra and is not rebuilt here, and that *Intent & Sentiment* is air-classifier
-- [ ] Two channels on one engine, with the channel derived from the principal (HLD §3)
-- [ ] The read/write split as stated in §1, and G3's "enforced by the client layer"
-- [ ] Propose → confirm → execute as the only mutation path
-- [ ] **SSE stage events for v1, with token-by-token deferred to an air-infra change** —
+- [x] The diagram-to-repo mapping in [HLD §1](01-hld.md) — corrected: the *Model Gateway* box
+      is **air-llm**, not air-infra (air-llm split out of air-infra after this plan was first
+      drafted; air-infra now brokers only Redis/Postgres/Mongo and secrets — see the README's
+      "Doc debt" note for what in this doc still needs the same correction). *Intent &
+      Sentiment* remains air-classifier.
+- [x] Two channels on one engine, with the channel derived from the principal (HLD §3)
+- [x] The read/write split as stated in §1, and G3's "enforced by the client layer" — and now
+      independently evidenced: shopassist-service's retrospective names skipping exactly this
+      check as its highest-severity gap
+- [x] Propose → confirm → execute as the only mutation path, confirmation by deterministic
+      keyword match on the next turn, never a second LLM call (§4 item 3)
+- [ ] **SSE stage events for v1, with token-by-token deferred to an air-llm change** —
       this is a recorded deviation from the diagram's *Response Streamer* (HLD §5)
-- [ ] Sessions on brokered Redis rather than in-process
-- [ ] Semantic cache placed before classification and fan-out, with the eligibility rules in §4 Q5
+- [ ] Sessions on brokered Redis rather than in-process — still Phase 2 work, not started
+- [x] Semantic cache placed before classification and fan-out, with the eligibility rules in
+      §4 item 5, plus a routing/intent cache ahead of it (adopted from the reference diagram)
 - [ ] The phase ordering — specifically Phase 2 landing before any downstream integration
-- [ ] The six open questions in §4, especially **Q1 (routing mechanism)**, which is blocked on
-      air-infra gaining tool-calling support ([HLD §9](01-hld.md))
+- [x] The six items in §4 are resolved (item 4, transcript retention, deferred rather than
+      decided) — **Q1 (routing mechanism) is resolved as LLM-based decomposition**, reversing
+      the earlier tool-calling recommendation, since air-llm still has no `tools` field
+- [x] **New:** agent placement — reason/tool/interpret loops live inside air-tools/air-rag,
+      each with its own air-llm client; air-platform sends one coarse request per sub-task

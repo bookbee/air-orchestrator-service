@@ -98,9 +98,32 @@ def test_air_infra_is_not_in_the_optional_group() -> None:
     assert _settings().downstream.for_service(DownstreamService.INFRA) is None
 
 
+def test_air_llm_is_not_in_the_optional_group() -> None:
+    """Same reasoning as air-infra: air-llm is mandatory, not one of the optional five."""
+    assert _settings().downstream.for_service(DownstreamService.LLM) is None
+
+
 def test_direct_is_always_available() -> None:
-    """air-infra alone can answer a direct turn, so the route never disappears."""
+    """air-llm alone can answer a direct turn, so the route never disappears."""
     assert _settings().downstream.routes() == frozenset({Route.DIRECT})
+
+
+def test_air_rag_defaults_to_its_port_map_slot() -> None:
+    """8083 now belongs to air-llm; air-rag was bumped to 8087 (air-infra/README.md)."""
+    assert _settings().downstream.rag.base_url == "http://localhost:8087"
+
+
+# ── air-llm ──────────────────────────────────────────────────────────────────
+
+
+def test_llm_defaults_to_its_port_map_slot() -> None:
+    assert _settings().llm.base_url == "http://localhost:8083"
+
+
+def test_llm_is_unconfigured_without_an_api_key() -> None:
+    """Same shape as air-infra: configured means an api_key is set, nothing else."""
+    assert _settings().llm.configured is False
+    assert _settings(llm={"api_key": "secret"}).llm.configured is True
 
 
 def test_enabling_a_service_adds_exactly_its_route() -> None:

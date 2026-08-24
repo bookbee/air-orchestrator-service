@@ -26,6 +26,7 @@ from air_platform.api.errors import (
 )
 from air_platform.api.middleware import KEY_ID_ATTR
 from air_platform.clients.infra import InfraClient
+from air_platform.clients.llm import LlmClient
 from air_platform.config import Settings
 from air_platform.constants import Channel
 from air_platform.memory.session import InMemorySessionStore
@@ -61,6 +62,7 @@ class AppState:
     settings: Settings
     key_store: ApiKeyStore
     infra: InfraClient
+    llm: LlmClient
     sessions: InMemorySessionStore
 
 

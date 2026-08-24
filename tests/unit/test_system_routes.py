@@ -10,10 +10,10 @@ from tests.conftest import BUSINESS_KEY, CUSTOMER_KEY, NO_SCOPE_KEY, auth
 
 
 async def test_health_needs_no_auth_and_no_dependencies(client: httpx.AsyncClient) -> None:
-    """Liveness must answer with no key and with air-infra unreachable.
+    """Liveness must answer with no key and with every downstream unreachable.
 
     This is the property that stops a dependency outage from becoming a restart
-    loop, so it is asserted without the ``reachable_infra`` fixture on purpose.
+    loop, so it is asserted without any of the ``reachable_*`` fixtures on purpose.
     """
     response = await client.get("/v1/health")
 
@@ -23,9 +23,9 @@ async def test_health_needs_no_auth_and_no_dependencies(client: httpx.AsyncClien
     assert body["service"] == "air-platform"
 
 
-@pytest.mark.usefixtures("unreachable_infra")
-async def test_ready_is_503_when_infra_is_unreachable(client: httpx.AsyncClient) -> None:
-    """No gateway means no synthesis, so this replica must take itself out of rotation.
+@pytest.mark.usefixtures("unreachable_llm", "reachable_infra")
+async def test_ready_is_503_when_llm_is_unreachable(client: httpx.AsyncClient) -> None:
+    """No model gateway means no synthesis, so this replica must take itself out of rotation.
 
     The body is asserted alongside the status: a bare 503 sends whoever was paged to
     the logs to find out which dependency failed.
@@ -35,20 +35,47 @@ async def test_ready_is_503_when_infra_is_unreachable(client: httpx.AsyncClient)
     assert response.status_code == httpx.codes.SERVICE_UNAVAILABLE
     body = response.json()
     assert body["ready"] is False
-    infra = next(d for d in body["dependencies"] if d["service"] == "air-infra")
-    assert infra["reachable"] is False
-    assert infra["detail"]
+    llm = next(d for d in body["dependencies"] if d["service"] == "air-llm")
+    assert llm["reachable"] is False
+    assert llm["detail"]
 
 
-@pytest.mark.usefixtures("reachable_infra")
-async def test_ready_is_200_when_infra_is_reachable(client: httpx.AsyncClient) -> None:
+@pytest.mark.usefixtures("reachable_llm", "reachable_infra")
+async def test_ready_is_200_when_llm_is_reachable(client: httpx.AsyncClient) -> None:
     response = await client.get("/v1/ready")
 
     assert response.status_code == httpx.codes.OK
     assert response.json()["ready"] is True
 
 
-@pytest.mark.usefixtures("reachable_infra")
+@pytest.mark.usefixtures("reachable_llm", "unreachable_infra")
+async def test_ready_ignores_infra_when_llm_is_reachable(client: httpx.AsyncClient) -> None:
+    """air-infra does not gate readiness: nothing in this service calls it yet.
+
+    The behavior-changing case this migration exists for — readiness used to gate
+    on air-infra alone, back when it was believed to be the model gateway. It never
+    served models, so that never actually measured whether a turn could be
+    answered; air-llm does.
+    """
+    response = await client.get("/v1/ready")
+
+    assert response.status_code == httpx.codes.OK
+    body = response.json()
+    assert body["ready"] is True
+    infra = next(d for d in body["dependencies"] if d["service"] == "air-infra")
+    assert infra["reachable"] is False
+
+
+@pytest.mark.usefixtures("unreachable_llm", "reachable_infra")
+async def test_ready_is_503_even_when_infra_alone_is_reachable(client: httpx.AsyncClient) -> None:
+    """air-infra being up must not paper over air-llm being down."""
+    response = await client.get("/v1/ready")
+
+    assert response.status_code == httpx.codes.SERVICE_UNAVAILABLE
+    assert response.json()["ready"] is False
+
+
+@pytest.mark.usefixtures("reachable_llm", "reachable_infra")
 async def test_ready_ignores_optional_downstreams(client: httpx.AsyncClient) -> None:
     """Every optional service is disabled in the test settings, and readiness holds.
 
@@ -67,7 +94,7 @@ async def test_ready_ignores_optional_downstreams(client: httpx.AsyncClient) -> 
         assert reported[service]["reachable"] is None
 
 
-@pytest.mark.usefixtures("unreachable_infra")
+@pytest.mark.usefixtures("unreachable_llm", "unreachable_infra")
 async def test_ready_never_leaks_upstream_detail(client: httpx.AsyncClient) -> None:
     """The failure reason names a condition, never a URL, key or upstream body.
 
@@ -75,12 +102,16 @@ async def test_ready_never_leaks_upstream_detail(client: httpx.AsyncClient) -> N
     """
     response = await client.get("/v1/ready")
 
-    detail = next(
-        d["detail"] for d in response.json()["dependencies"] if d["service"] == "air-infra"
+    reported = {d["service"]: d for d in response.json()["dependencies"]}
+    unreachable = (
+        ("air-llm", "air-llm.invalid", "8083"),
+        ("air-infra", "air-infra.invalid", "8080"),
     )
-    assert "http://" not in detail
-    assert "air-infra.invalid" not in detail
-    assert "8080" not in detail
+    for service, host, port in unreachable:
+        detail = reported[service]["detail"]
+        assert "http://" not in detail
+        assert host not in detail
+        assert port not in detail
 
 
 # ── Capabilities ──────────────────────────────────────────────────────────────
@@ -127,7 +158,7 @@ async def test_capabilities_reports_the_callers_own_channel(client: httpx.AsyncC
 async def test_capabilities_reports_only_configured_routes(client: httpx.AsyncClient) -> None:
     """With every downstream off, `direct` is the only route.
 
-    air-infra alone can answer directly, which is why it is unconditional while the
+    air-llm alone can answer directly, which is why it is unconditional while the
     rest appear as their services are enabled.
     """
     response = await client.get("/v1/capabilities", headers=auth(CUSTOMER_KEY))
@@ -138,7 +169,7 @@ async def test_capabilities_reports_only_configured_routes(client: httpx.AsyncCl
 async def test_capabilities_admits_it_cannot_stream_tokens(client: httpx.AsyncClient) -> None:
     """The recorded deviation from the diagram, reported rather than implied.
 
-    docs/01-hld.md §5: v1 streams stage events because air-infra's gateway returns
+    docs/01-hld.md §5: v1 streams stage events because air-llm's gateway returns
     complete responses. A client must be able to tell a build that *cannot* stream
     tokens from one that merely did not this time.
     """

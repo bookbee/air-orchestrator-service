@@ -120,6 +120,7 @@ class DownstreamService(StrEnum):
     """
 
     INFRA = "air-infra"
+    LLM = "air-llm"
     CLASSIFIER = "air-classifier"
     RAG = "air-rag"
     TOOLS = "air-tools"

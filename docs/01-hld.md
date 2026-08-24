@@ -28,8 +28,8 @@ the escalation ladder across two repos.
 | Router / Planner | air-platform module | The core of this repo |
 | Model Gateway | **`air-infra` :8080** | **Already built.** Multi-provider routing, fallback, cost, cache, prompt caching, structured output. air-platform consumes it via `air_infra_client`; it does not rebuild it. Satisfies review item 02 |
 | Semantic Cache | air-platform module | **New.** Embeddings from air-infra's `/v1/models/embeddings`, vectors in brokered Redis. Review item 04 |
-| Retrieval Client (RAG) | air-platform client → **`air-rag` :8083** | Reranking, grounding and citation shape are air-rag's; air-platform asks and cites |
-| Tool Executor | air-platform client → **`air-tools` :8084** | **Read-only by construction** |
+| Retrieval Client (RAG) | air-platform client → **`air-rag` :8087** | Reranking, grounding and citation shape are air-rag's; air-platform asks and cites. **air-rag hosts its own air-llm client for embeddings** — air-platform never embeds a query itself |
+| Tool Executor | air-platform client → **`air-tools` :8084** | **Read-only by construction.** Each domain agent's reason → tool-call → interpret loop (Plan's new "agent placement" decision) runs *inside* air-tools, with its own air-llm client — air-platform sends one coarse request per sub-task and never sees the intermediate reasoning |
 | Conversation Memory | Redis (turns) + Postgres (profile), brokered by air-infra | Review item 03 |
 | Response Streamer | air-platform module | SSE, §5 |
 | External RAG / Knowledge | Behind `air-rag` | Vector DB, embedding service, ingestion — not air-platform's concern |
@@ -45,6 +45,13 @@ the escalation ladder across two repos.
 **Not on the diagram:** `air-recommender` :8086. It fits the *Tools / Live Data* role — a
 read-only capability the planner may select — and is treated as a fourth read-path client
 rather than a new architectural element. Confirm this reading.
+
+**The enterprise reference diagram's per-role LLM Inference layer** (separate Router /
+AgentReason / AgentInterpret / AgentGenerate / Generative / Embeddings endpoints) needs no new
+service to realise. It's air-llm's `routing.yaml` alias table, given a role-scoped alias per
+caller — `agent_reason`/`agent_interpret` for air-tools' agents (Plan's agent-placement
+decision), `embeddings` for air-rag, whatever this repo's own synthesis step ends up using.
+Each alias is a config edit in air-llm, not a deployment.
 
 ## 2. System context
 
@@ -128,6 +135,12 @@ POST /v1/chat  {session_id?, message, options?}
   ├─ 10. PERSIST ── turn to Redis, cache entry, usage and cost
   └─ 11. STREAM ── SSE throughout; every step above emits as it completes
 ```
+
+**Step 7's `air-tools` call may itself be a multi-step agent turn**, invisible from here: the
+domain agent's own reason → tool-call → interpret loop runs inside air-tools, against its own
+air-llm client (Plan's agent-placement decision). air-platform's per-call budget covers the
+whole thing as one deadline; the intermediate reasoning is air-tools' concern, not this
+pipeline's.
 
 Steps 2 and 9 are the diagram's bidirectional guardrail box, and review item 01's point is
 that they belong *here* rather than at the gateway: a gateway filter sees a request, not a
