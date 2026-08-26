@@ -15,17 +15,21 @@ while its ready route is explicitly gated on "at least one provider reachable"
 be synthesised right now." air-classifier's own air-llm adapter probes the same
 path for the same reason.
 
-Phase 0 implements the probe only. ``chat`` arrives with the turn engine in
-Phase 2.
+Phase 0 implemented the probe only; ``chat`` arrives with the turn engine in
+Phase 2, wire-shaped exactly like the ``chat()``/``embed()`` methods already
+built for air-tools/air-rag this session (``POST /v1/inference``,
+``task="chat"``, a role/routing alias as ``model``, an optional
+``json_schema`` for schema-constrained generation).
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from typing import Final
+from typing import Any, Final
 
 import httpx
+from pydantic import BaseModel, ConfigDict, Field
 
 from air_platform.config import Settings
 from air_platform.constants import HEADER_API_KEY, DownstreamService
@@ -33,11 +37,56 @@ from air_platform.observability import metrics
 from air_platform.observability.logging import get_logger
 from air_platform.schemas.common import DependencyStatus
 
-__all__ = ["LlmClient"]
+__all__ = ["ChatResult", "ChatUsage", "LlmClient"]
 
 logger = get_logger(__name__)
 
 _READY_PATH: Final[str] = "/v1/ready"
+_INFERENCE_PATH: Final[str] = "/v1/inference"
+
+
+class _ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class _ChatBody(BaseModel):
+    task: str = "chat"
+    model: str
+    messages: list[_ChatMessage]
+    max_tokens: int
+    json_schema: dict[str, Any] | None = None
+    schema_name: str | None = None
+    cache_prefix: bool = True
+
+
+class ChatUsage(BaseModel):
+    """Wire-shaped token counters — air-llm's own field names, not this
+    repo's `schemas.common.Usage`. The turn engine maps one to the other;
+    keeping them separate here is what lets each drift independently if
+    air-llm's accounting ever adds a field this repo doesn't care about."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+
+
+class ChatResult(BaseModel):
+    """air-llm's `/v1/inference` response, trimmed to what the turn engine
+    needs. Every field is defaulted: a missing or malformed field degrades to
+    an absent value rather than failing the call — whether the *answer* is
+    usable is `TurnEngine`'s call, not this envelope's."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    refusal: bool = False
+    finish_reason: str | None = None
+    content: str = ""
+    cost_usd: float = 0.0
+    usage: ChatUsage = Field(default_factory=ChatUsage)
 
 
 class LlmClient:
@@ -123,6 +172,32 @@ class LlmClient:
                 latency_ms=round((time.perf_counter() - started) * 1000, 3),
                 detail=f"connection failed ({type(exc).__name__})",
             )
+
+    async def chat(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        max_tokens: int = 1024,
+        json_schema: dict[str, Any] | None = None,
+        schema_name: str | None = None,
+    ) -> ChatResult:
+        """One synthesis call. Raises `httpx.HTTPError` on failure — the turn
+        engine decides its own fallback (a refusal answer, `TurnStatus.ERROR`);
+        unlike `probe()`, this does not swallow the error, because a caller
+        that actually needs the answer must be able to tell "no answer" from
+        "an empty one"."""
+        client = await self._http()
+        body = _ChatBody(
+            model=model,
+            messages=[_ChatMessage(**m) for m in messages],
+            max_tokens=max_tokens,
+            json_schema=json_schema,
+            schema_name=schema_name,
+        ).model_dump(exclude_none=True)
+        response = await client.post(_INFERENCE_PATH, json=body, timeout=self._config.timeout_s)
+        response.raise_for_status()
+        return ChatResult.model_validate(response.json())
 
     async def aclose(self) -> None:
         """Release the connection pool. Idempotent, so a double shutdown is safe."""

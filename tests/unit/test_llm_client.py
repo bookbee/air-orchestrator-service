@@ -6,6 +6,8 @@ so every failure mode has to become a `reachable=False` plus a short reason.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 import respx
@@ -126,3 +128,48 @@ def test_a_zero_health_timeout_is_rejected() -> None:
 
     with pytest.raises(ValidationError):
         Settings.model_validate({"app": {"env": "test"}, "llm": {"health_timeout_s": 0}})
+
+
+# ── chat() ────────────────────────────────────────────────────────────────────
+
+
+@respx.mock
+async def test_chat_returns_the_content_field() -> None:
+    respx.post("http://gateway:8083/v1/inference").mock(
+        return_value=httpx.Response(200, json={"content": "hello", "cost_usd": 0.002})
+    )
+    client = _client()
+
+    result = await client.chat(model="generative", messages=[{"role": "user", "content": "hi"}])
+
+    assert result.content == "hello"
+    assert result.cost_usd == 0.002
+    await client.aclose()
+
+
+@respx.mock
+async def test_chat_sends_the_role_alias_as_model() -> None:
+    route = respx.post("http://gateway:8083/v1/inference").mock(
+        return_value=httpx.Response(200, json={"content": "ok"})
+    )
+    client = _client()
+
+    await client.chat(model="generative", messages=[{"role": "user", "content": "hi"}])
+
+    assert route.calls.last.request.content
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["model"] == "generative"
+    assert sent["task"] == "chat"
+    await client.aclose()
+
+
+@respx.mock
+async def test_chat_raises_rather_than_swallowing_a_failure() -> None:
+    """Unlike `probe()`, a caller here actually needs the answer — it must be
+    able to tell "no answer" from "an empty one"."""
+    respx.post("http://gateway:8083/v1/inference").mock(side_effect=httpx.ConnectError("boom"))
+    client = _client()
+
+    with pytest.raises(httpx.HTTPError):
+        await client.chat(model="generative", messages=[{"role": "user", "content": "hi"}])
+    await client.aclose()

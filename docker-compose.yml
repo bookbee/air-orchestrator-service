@@ -1,20 +1,31 @@
 # air-platform local stack.
 #
-# This file starts *only* air-platform. Redis, Postgres, Mongo and the model
-# gateway belong to air-infra, which owns them for the whole estate — duplicating
-# them here would give a developer two Redises and two sources of truth about which
-# one holds their sessions.
+# This file starts *only* air-platform. Redis, Postgres and Mongo belong to
+# air-infra, which owns them for the whole estate — duplicating them here
+# would give a developer two Redises and two sources of truth about which one
+# holds their sessions. The model gateway is air-llm, its own standalone
+# compose stack on its own network — not air-infra's, since air-llm split out
+# of it (see README.md's Quickstart) — reached over the host exactly like
+# air-classifier reaches it.
 #
-#   cd ../air-infra && make up     # redis, postgres, mongo, ollama, gateway :8080
-#   cd ../air-platform && make up  # this service                            :8081
+#   cd ../air-infra && make up     # redis, postgres, mongo             :8080
+#   cd ../air-llm   && make up     # the model gateway                  :8083
+#   cd ../air-platform && make up  # this service                      :8081
 #
-# The network wiring at the bottom is the three lines air-infra's compose file
+# The air-net wiring at the bottom is the three lines air-infra's compose file
 # prescribes for a sibling service. Joining `air-net` as *this* project's default
 # network is what lets `gateway`, `redis` and the rest resolve by service name;
-# without it the container would have to reach back out through the host.
+# without it the container would have to reach back out through the host — which
+# is exactly what the `extra_hosts` entry below does for air-llm, since air-llm
+# is never on air-net.
 #
 # `air-net` exists only while air-infra's stack is up, so `make up` checks for it
 # first and says so — see the Makefile.
+#
+# Session backend defaults to `memory` here, same as the host default — Redis
+# session storage is Phase 2b (docs/00-plan.md), not implemented yet
+# (`memory/session.py`'s `build_session_store` falls back and logs a warning if
+# asked for `redis` today).
 
 name: air-platform
 
@@ -23,16 +34,26 @@ services:
     build: .
     restart: unless-stopped
     env_file: [.env]
+    # Lets the container reach air-llm on the host — the same pattern
+    # air-classifier uses, since air-llm is never on air-net.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       AIR_PLATFORM__APP__ENV: development
       # Container-to-container, so the service name rather than localhost.
       AIR_PLATFORM__INFRA__BASE_URL: http://gateway:8080
-      AIR_PLATFORM__SESSION__BACKEND: redis
-      AIR_PLATFORM__SESSION__REDIS_URL: redis://:localdevpass@redis:6379/1
+      # air-llm is reached over the host — see the module docstring above.
+      AIR_PLATFORM__LLM__BASE_URL: http://host.docker.internal:8083
+      # air-llm's own .env.example provisions this exact token for
+      # air-platform (AIR_LLM_SECURITY__SERVICE_TOKENS=...,air-platform-dev:
+      # air-platform), so a local checkout of both projects authenticates
+      # with no edits on either side — the same convention air-client's
+      # config.py documents for its own air-llm token.
+      AIR_PLATFORM__LLM__API_KEY: air-platform-dev
       AIR_PLATFORM__OBS__LOG_FORMAT: json
     ports: ["8081:8081"]
     healthcheck:
-      # Liveness only — /v1/ready would report unready whenever air-infra blinked,
+      # Liveness only — /v1/ready would report unready whenever air-llm blinked,
       # and compose would then restart a container that is working correctly.
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/v1/health').read()"]
       interval: 15s

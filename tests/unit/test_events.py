@@ -115,12 +115,12 @@ async def test_engine_failure_becomes_an_error_event_then_turn_end(
     client: httpx.AsyncClient, app: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Headers are already on the wire, so there is no status left to change."""
-    from air_platform.engine.echo import EchoEngine
+    from air_platform.engine.turn import TurnEngine
 
     def boom(*_: object, **__: object) -> None:
         raise RuntimeError("stage exploded")
 
-    monkeypatch.setattr(EchoEngine, "_answer", boom)
+    monkeypatch.setattr(TurnEngine, "_answer", boom)
 
     events = await _stream(client, CUSTOMER_KEY, message="hello")
     names = [name for name, _ in events]
@@ -134,12 +134,12 @@ async def test_engine_failure_becomes_an_error_event_then_turn_end(
 async def test_an_error_event_never_leaks_internals(
     client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from air_platform.engine.echo import EchoEngine
+    from air_platform.engine.turn import TurnEngine
 
     def boom(*_: object, **__: object) -> None:
         raise RuntimeError("connection string postgres://user:hunter2@db/air")
 
-    monkeypatch.setattr(EchoEngine, "_answer", boom)
+    monkeypatch.setattr(TurnEngine, "_answer", boom)
 
     events = await _stream(client, CUSTOMER_KEY, message="hello")
     error = next(payload for name, payload in events if name == EventType.ERROR)

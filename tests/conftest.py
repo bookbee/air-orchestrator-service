@@ -103,7 +103,21 @@ def settings() -> Settings:
 
 @pytest.fixture
 def app(settings: Settings) -> FastAPI:
-    return create_app(settings)
+    """The app, with a deterministic synthesis call already patched in.
+
+    Every route test that reaches ``TurnEngine`` needs a working
+    ``LlmClient.chat`` to get a 200 at all — patched here, once, rather than
+    as a fixture every turn-test file has to remember to request, the same
+    reasoning that put ``reachable_infra``/``reachable_llm`` one level up
+    from the tests that need them. A test that wants the real failure path
+    reassigns ``state.llm.chat`` again itself.
+    """
+    from air_platform.api.deps import STATE_ATTR
+
+    built = create_app(settings)
+    state = getattr(built.state, STATE_ATTR)
+    state.llm.chat = _canned_chat  # type: ignore[method-assign]
+    return built
 
 
 @pytest.fixture
@@ -203,6 +217,39 @@ def unreachable_llm() -> Iterator[None]:
             side_effect=httpx.ConnectError("connection refused")
         )
         yield
+
+
+#: The turn engine's default answer, whenever a test does not override the
+#: synthesis mock itself. Tests that care what the text says (the mutation
+#: gate, the proposal flow) assert on their own canned strings from
+#: `TurnEngine._answer` — none of those ever reach the model — so this value
+#: only has to be stable, not meaningful.
+CANNED_ANSWER = "This is a mocked answer from air-llm."
+
+
+async def _canned_chat(
+    *,
+    model: str,
+    messages: list[dict[str, str]],
+    max_tokens: int = 1024,
+    json_schema: dict[str, Any] | None = None,
+    schema_name: str | None = None,
+) -> Any:
+    """A deterministic stand-in for ``LlmClient.chat`` — see the ``app``
+    fixture. A schema-constrained call (``json_schema`` set) gets one
+    placeholder value per declared property rather than the plain canned
+    string, so ``TurnEngine._structured_answer`` has real JSON to parse.
+    """
+    from air_platform.clients.llm import ChatResult, ChatUsage
+
+    if json_schema is not None:
+        properties = json_schema.get("properties") or {}
+        content = json.dumps(dict.fromkeys(properties, "mock"))
+    else:
+        content = CANNED_ANSWER
+    return ChatResult(
+        content=content, cost_usd=0.001, usage=ChatUsage(prompt_tokens=10, completion_tokens=5)
+    )
 
 
 def auth(key: str) -> dict[str, str]:

@@ -1,9 +1,9 @@
 """``POST /v1/query`` — the business channel's structured query.
 
 Same engine and same event contract as ``/v1/chat``; what differs is the profile.
-A business answer carries ``structured``, validated against the caller's
-``output_schema`` by the output guardrail (Phase 2 — the echo engine reports the
-schema it was given rather than pretending to enforce it).
+A business answer carries ``structured``, generated against the caller's
+``output_schema`` via a schema-constrained air-llm call rather than validated
+after the fact and rejected (``engine/turn.py``'s ``_structured_answer``).
 
 Pinned to the business channel by declaration, for the reason given in ``chat.py``.
 """
@@ -20,7 +20,7 @@ from air_platform.api.errors import InsufficientScopeError
 from air_platform.api.middleware import TURN_STATUS_ATTR
 from air_platform.api.sse import SSE_MEDIA_TYPE, event_stream_response, wants_stream
 from air_platform.constants import SCOPE_QUERY_WRITE
-from air_platform.engine.echo import EchoEngine, TurnRequest, collect
+from air_platform.engine.turn import TurnEngine, TurnRequest, collect
 from air_platform.schemas.chat import QueryRequest, TurnResult
 from air_platform.schemas.common import Principal
 
@@ -50,7 +50,7 @@ async def query(
     if not principal.has_scope(SCOPE_QUERY_WRITE):
         raise InsufficientScopeError(f"This key lacks the '{SCOPE_QUERY_WRITE}' scope.")
 
-    engine = EchoEngine(state.settings, state.sessions)
+    engine = TurnEngine(state.settings, state.sessions, state.llm)
     events = engine.run(TurnRequest.from_query(body), principal)
 
     if wants_stream(accept):

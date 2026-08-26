@@ -20,7 +20,7 @@ from air_platform.api.errors import InsufficientScopeError, MalformedRequestErro
 from air_platform.api.middleware import TURN_STATUS_ATTR
 from air_platform.api.sse import SSE_MEDIA_TYPE, event_stream_response, wants_stream
 from air_platform.constants import SCOPE_CHAT_WRITE, Channel
-from air_platform.engine.echo import EchoEngine, TurnRequest, collect
+from air_platform.engine.turn import TurnEngine, TurnRequest, collect
 from air_platform.schemas.chat import ChatRequest, TurnResult
 from air_platform.schemas.common import Principal
 
@@ -69,7 +69,7 @@ async def chat(
         raise InsufficientScopeError(f"This key lacks the '{SCOPE_CHAT_WRITE}' scope.")
     reject_privileged_options(body.options, principal)
 
-    engine = EchoEngine(state.settings, state.sessions)
+    engine = TurnEngine(state.settings, state.sessions, state.llm)
     events = engine.run(TurnRequest.from_chat(body), principal)
 
     if wants_stream(accept):
