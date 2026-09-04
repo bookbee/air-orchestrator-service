@@ -1,18 +1,31 @@
-"""The Phase 2a engine: guardrails, prompt registry and synthesis made real.
+"""The Phase 2a engine: guardrails, prompt registry and synthesis made real —
+hardened against two design reviews this session (a platform-conventions
+review and a milestone-requirements review), both checked against this file
+directly rather than assumed. What that hardening added, concretely:
 
-Replaces `engine/echo.py` (deleted alongside this). Same event contract, same
-stage order, same session/proposal mechanics — `EchoEngine`'s own docstring
-said this was the whole point of shipping the stubbed version first. What
-changes is `GUARDRAILS_IN` (real injection screen + PII masking),
-`SYNTHESISE` (a real air-llm call through the prompt registry) and
-`GUARDRAILS_OUT` (real output PII/secret scan).
+* A turn-level deadline, actually enforced: computed once, decremented before
+  the synthesis call, bound to that call's own timeout rather than a fixed
+  configured one, and checked *before* a call is made at all so an
+  already-exhausted budget skips the call rather than starting it.
+* A provider failure degrades (`TurnStatus.DEGRADED`, already in the enum and
+  previously dead code) instead of erroring — `TurnStatus.ERROR` is now
+  reserved for genuinely unexpected exceptions, not "air-llm was slow".
+* A scope guard (abuse, discount negotiation, competitor mentions) alongside
+  the injection screen, and an escalation path for an explicit request to
+  reach a human — the one escalation trigger this milestone can build for
+  real; the other three (`constants.EscalationReason`) need capabilities this
+  service doesn't have yet and are reserved, not faked.
+* Per-turn and per-session cost ceilings, actually checked — both existed as
+  settings before and were never read.
+* Content crossing into a prompt is demarcated (`guardrails/boundary.py`) as
+  data to describe, never an instruction — and the prompt version used is
+  logged with the turn.
 
-Still stubbed, deliberately, per this session's Phase 2a scoping — see
-air-platform's `docs/00-plan.md`: `CACHE` (Phase 5), `CLASSIFY` and `GATHER`
-(Phase 3, once air-classifier/air-rag/air-tools have clients here). Routing
-stays the existing `/propose`-trigger stand-in for the same reason — with
-`GATHER` still stubbed, there is nothing real to route to besides a direct
-answer.
+Still stubbed, deliberately, per this session's Phase 2a/hardening scoping —
+see `docs/00-plan.md`: `CACHE` (Phase 5), `CLASSIFY` and `GATHER` (Phase 3,
+once air-classifier/air-rag/air-tools have clients here). Routing stays the
+existing `/propose`-trigger stand-in for the same reason — with `GATHER`
+still stubbed, there is nothing real to route to besides a direct answer.
 """
 
 from __future__ import annotations
@@ -23,20 +36,22 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any, Final
 
-import httpx
-
-from air_platform.clients.llm import LlmClient
+from air_platform.clients.llm import LlmCallError, LlmClient
 from air_platform.config import Settings
 from air_platform.constants import (
     Channel,
+    EscalationReason,
     EventType,
     Route,
     Stage,
     StageStatus,
     TurnStatus,
 )
+from air_platform.guardrails.boundary import delimit
+from air_platform.guardrails.escalation import wants_human
 from air_platform.guardrails.injection import screen_input
 from air_platform.guardrails.pii import mask_input, scan_output
+from air_platform.guardrails.scope import screen_scope
 from air_platform.memory.session import InMemorySessionStore
 from air_platform.observability import metrics
 from air_platform.observability.logging import get_logger, safe_text_fields
@@ -69,6 +84,7 @@ _log = get_logger(__name__)
 
 _TURN_ID_PREFIX: Final[str] = "turn_"
 _PROPOSAL_ID_PREFIX: Final[str] = "prop_"
+_ESCALATION_ID_PREFIX: Final[str] = "esc_"
 
 #: Saying this in a message asks the engine to propose a mutation, so the
 #: propose -> confirm -> execute path can be exercised end to end before
@@ -91,6 +107,20 @@ _STUBBED: Final[dict[Stage, str]] = {
 _SYNTHESIS_MODEL: Final[str] = "generative"
 
 _SYNTHESIS_MAX_TOKENS: Final[int] = 800
+
+_INJECTION_REFUSAL: Final[str] = (
+    "I can't help with that request — it looked like an attempt to change "
+    "how I'm instructed to behave, rather than a question. Rephrase it and "
+    "I'll try again."
+)
+_DEGRADED_ANSWER: Final[str] = (
+    "I'm having trouble putting together a full answer right now. Please try "
+    "again in a moment — nothing about your account or order has changed."
+)
+_SESSION_BUDGET_EXHAUSTED: Final[str] = (
+    "This conversation has reached its budget for now. Please start a new "
+    "session, or reach out to support if you need to continue this one."
+)
 
 
 class TurnRequest:
@@ -143,6 +173,13 @@ class TurnEngine:
         self._sessions = sessions
         self._llm = llm
         self._prompts = PromptRegistry(settings)
+        #: Set by `_pipeline` when it degrades a turn — an async generator has
+        #: no return value, so this is how `run()` learns the outcome once
+        #: iteration finishes, the same way it already reads `refusal` off
+        #: the `AnswerEvent` for `TurnStatus.REFUSED`. One `TurnEngine` is
+        #: built fresh per request (`api/v1/chat.py`), so there is no
+        #: cross-request state here to worry about.
+        self._last_status: TurnStatus = TurnStatus.OK
 
     async def run(self, request: TurnRequest, principal: Principal) -> AsyncIterator[Event]:
         turn_id = f"{_TURN_ID_PREFIX}{uuid.uuid4().hex}"
@@ -163,13 +200,19 @@ class TurnEngine:
         )
 
         try:
-            async for event in self._pipeline(turn_id, request, principal, session):
+            async for event in self._pipeline(turn_id, request, principal, session, started):
                 if isinstance(event, TurnEndEvent):  # pragma: no cover — defensive
                     continue
                 if event.event is EventType.ANSWER and event.refusal:
                     status = TurnStatus.REFUSED
                 yield event
+            if status is TurnStatus.OK:
+                status = self._last_status
         except Exception as exc:
+            # Genuinely unexpected — anything this engine anticipates (a slow
+            # or unavailable model, an exhausted budget) is handled inside
+            # `_pipeline` and degrades instead of raising. Reaching here means
+            # something outside that anticipated set broke.
             _log.error("turn.failed", turn_id=turn_id, exc_info=exc)
             status = TurnStatus.ERROR
             yield ErrorEvent(
@@ -198,27 +241,102 @@ class TurnEngine:
         request: TurnRequest,
         principal: Principal,
         session: Session,
+        turn_started: float,
     ) -> AsyncIterator[Event]:
+        self._last_status = TurnStatus.OK
+        deadline_s = self._deadline_seconds(request)
+
         redact = self._should_redact(request, principal)
         mask = mask_input(request.text) if redact else None
         masked_text = mask.masked_text if mask is not None else request.text
 
-        verdict = screen_input(masked_text)
-        blocked_start = time.perf_counter()
-        if verdict.blocked:
+        # ── GUARDRAILS_IN: injection, then scope (only checked if the first
+        # already passed — no need to classify scope on text already refused) ──
+        guard_started = time.perf_counter()
+        injection_verdict = screen_input(masked_text)
+        scope_verdict = None if injection_verdict.blocked else screen_scope(
+            masked_text, competitor_names=self._settings.guardrails.competitor_names
+        )
+        blocked = injection_verdict.blocked or bool(scope_verdict and scope_verdict.blocked)
+
+        detail: str | None = None
+        if injection_verdict.blocked:
+            detail = f"prompt_injection: {injection_verdict.matched_text!r}"
             metrics.record_guardrail_block(
-                direction="in", rule=verdict.category or "unknown", channel=principal.channel
+                direction="in", rule="prompt_injection", channel=principal.channel
+            )
+        elif scope_verdict and scope_verdict.blocked:
+            detail = f"{scope_verdict.category}: {scope_verdict.matched_text!r}"
+            metrics.record_guardrail_block(
+                direction="in", rule=scope_verdict.category or "scope", channel=principal.channel
             )
         yield StageEvent(
             stage=Stage.GUARDRAILS_IN,
-            status=StageStatus.BLOCKED if verdict.blocked else StageStatus.OK,
-            latency_ms=round((time.perf_counter() - blocked_start) * 1000, 3),
-            detail=f"prompt_injection: {verdict.matched_text!r}" if verdict.blocked else None,
+            status=StageStatus.BLOCKED if blocked else StageStatus.OK,
+            latency_ms=round((time.perf_counter() - guard_started) * 1000, 3),
+            detail=detail,
         )
 
-        if verdict.blocked:
-            blocked = self._blocked_turn(turn_id, request, masked_text, principal, session)
-            async for event in blocked:
+        if injection_verdict.blocked:
+            # No `self._last_status` assignment here: `run()` already derives
+            # `TurnStatus.REFUSED` from the `AnswerEvent.refusal` flag below.
+            async for event in self._skip_to_answer(
+                turn_id, masked_text, principal, session,
+                text=_INJECTION_REFUSAL, refusal=True,
+                route_reason="blocked before routing", skip_detail="turn blocked upstream",
+            ):
+                yield event
+            return
+        if scope_verdict and scope_verdict.blocked:
+            async for event in self._skip_to_answer(
+                turn_id, masked_text, principal, session,
+                # `response` is always set when `blocked` is True (every
+                # branch in `screen_scope` sets it) — the fallback is for
+                # the type checker, not a reachable case.
+                text=scope_verdict.response or "I'm not able to help with that.",
+                route_reason=f"scope guard: {scope_verdict.category}",
+                skip_detail="turn blocked upstream",
+            ):
+                yield event
+            return
+
+        # ── Escalation: the one trigger buildable today. The other three
+        # (constants.EscalationReason) need Phase 3 capabilities. ──
+        if wants_human(masked_text):
+            ref = f"{_ESCALATION_ID_PREFIX}{uuid.uuid4().hex[:12]}"
+            _log.info(
+                "escalation.created",
+                turn_id=turn_id,
+                session_id=session.session_id,
+                reason=EscalationReason.EXPLICIT_REQUEST.value,
+                escalation_ref=ref,
+            )
+            metrics.record_escalation(reason=EscalationReason.EXPLICIT_REQUEST)
+            text = (
+                "I'm not able to fully help with that myself, so I'm connecting you "
+                f"with a team member — reference {ref}. They'll be able to see this "
+                "conversation and pick up from here rather than starting over."
+            )
+            async for event in self._skip_to_answer(
+                turn_id, masked_text, principal, session,
+                text=text, escalated=True, escalation_ref=ref,
+                route_reason="escalated to a human", skip_detail="turn escalated",
+            ):
+                yield event
+            return
+
+        # ── Session cost ceiling: checked before any more work, same reason
+        # the guardrails above are — no point running stages for a turn that
+        # cannot be answered. ──
+        ceiling = self._settings.session.max_cost_usd
+        if ceiling is not None and session.total_cost_usd >= ceiling:
+            self._last_status = TurnStatus.DEGRADED
+            async for event in self._skip_to_answer(
+                turn_id, masked_text, principal, session,
+                text=_SESSION_BUDGET_EXHAUSTED,
+                route_reason="session cost ceiling reached",
+                skip_detail="session budget exhausted",
+            ):
                 yield event
             return
 
@@ -254,16 +372,108 @@ class TurnEngine:
         if propose:
             yield ProposalEvent(proposal=await self._propose(session))
 
+        # ── Deadline check, right before the expensive part. A canned
+        # confirm/propose reply never calls the model, so the deadline is
+        # irrelevant to it — only a real synthesis call is bounded. ──
+        needs_model = confirmed is None and not propose
+        elapsed_s = time.perf_counter() - turn_started
+        remaining_s = deadline_s - elapsed_s
+
+        if needs_model and remaining_s <= 0:
+            self._last_status = TurnStatus.DEGRADED
+            yield StageEvent(
+                stage=Stage.SYNTHESISE,
+                status=StageStatus.DEGRADED,
+                latency_ms=0.0,
+                detail="turn deadline exceeded before the model call",
+            )
+            async for event in self._finish_with_answer(
+                turn_id, masked_text, principal, session, text=_DEGRADED_ANSWER
+            ):
+                yield event
+            return
+
         synth_started = time.perf_counter()
-        text, structured, usage = await self._answer(
-            request, masked_text, principal, session, confirmed, propose
-        )
+        try:
+            text, structured, usage, prompt_version = await self._answer(
+                request, masked_text, principal, session, confirmed, propose,
+                timeout_s=remaining_s if needs_model else None,
+            )
+        except LlmCallError as exc:
+            self._last_status = TurnStatus.DEGRADED
+            yield StageEvent(
+                stage=Stage.SYNTHESISE,
+                status=StageStatus.DEGRADED,
+                latency_ms=round((time.perf_counter() - synth_started) * 1000, 3),
+                detail=f"air-llm unavailable (retryable={exc.retryable}): {exc}",
+            )
+            async for event in self._finish_with_answer(
+                turn_id, masked_text, principal, session, text=_DEGRADED_ANSWER
+            ):
+                yield event
+            return
+
         yield StageEvent(
             stage=Stage.SYNTHESISE,
             status=StageStatus.OK,
             latency_ms=round((time.perf_counter() - synth_started) * 1000, 3),
+            detail=f"prompt={prompt_version}" if prompt_version else None,
         )
+        async for event in self._finish_with_answer(
+            turn_id, masked_text, principal, session, text=text, structured=structured, usage=usage
+        ):
+            yield event
 
+    async def _skip_to_answer(
+        self,
+        turn_id: str,
+        masked_text: str,
+        principal: Principal,
+        session: Session,
+        *,
+        text: str,
+        refusal: bool = False,
+        escalated: bool = False,
+        escalation_ref: str | None = None,
+        route_reason: str,
+        skip_detail: str,
+    ) -> AsyncIterator[Event]:
+        """The shared shape behind a blocked, escalated, or budget-exhausted
+        turn: skip `CONTEXT`..`GATHER`, route to nothing, skip `SYNTHESISE`,
+        then the normal answer tail. `GUARDRAILS_IN` is emitted by the
+        caller, since its status differs by circumstance (`BLOCKED` vs `OK`).
+        """
+        for stage in (Stage.CONTEXT, Stage.CACHE, Stage.CLASSIFY, Stage.PLAN, Stage.GATHER):
+            yield StageEvent(
+                stage=stage, status=StageStatus.SKIPPED, latency_ms=0.0, detail=skip_detail
+            )
+        yield RouteEvent(routes=[], reason=route_reason, capabilities=[])
+        yield StageEvent(
+            stage=Stage.SYNTHESISE, status=StageStatus.SKIPPED, latency_ms=0.0, detail=skip_detail
+        )
+        async for event in self._finish_with_answer(
+            turn_id, masked_text, principal, session,
+            text=text, refusal=refusal, escalated=escalated, escalation_ref=escalation_ref,
+        ):
+            yield event
+
+    async def _finish_with_answer(
+        self,
+        turn_id: str,
+        masked_text: str,
+        principal: Principal,
+        session: Session,
+        *,
+        text: str,
+        structured: dict[str, Any] | None = None,
+        refusal: bool = False,
+        escalated: bool = False,
+        escalation_ref: str | None = None,
+        usage: Usage | None = None,
+    ) -> AsyncIterator[Event]:
+        """`GUARDRAILS_OUT` -> `ANSWER` -> `PERSIST` -> `USAGE`: the shared tail
+        every turn shape ends with, whichever path produced `text` — a real
+        synthesis, a canned refusal, an escalation, or a degraded fallback."""
         out_verdict = scan_output(text)
         if out_verdict.flagged:
             metrics.record_guardrail_block(
@@ -276,61 +486,28 @@ class TurnEngine:
         )
         text = out_verdict.safe_text
 
-        yield AnswerEvent(text=text, structured=structured, grounded=False, refusal=False)
+        yield AnswerEvent(
+            text=text,
+            structured=structured,
+            grounded=False,
+            refusal=refusal,
+            escalated=escalated,
+            escalation_ref=escalation_ref,
+        )
 
         started = time.perf_counter()
         window = self._settings.turn.window_turns
         session.append(Turn(turn_id=turn_id, role="user", content=masked_text), window=window)
         session.append(Turn(turn_id=turn_id, role="assistant", content=text), window=window)
+        resolved_usage = usage or Usage(model_calls=0, cost_usd=0.0, cache_hit=False)
+        session.total_cost_usd += resolved_usage.cost_usd
         await self._sessions.save(session)
         yield StageEvent(
             stage=Stage.PERSIST,
             status=StageStatus.OK,
             latency_ms=round((time.perf_counter() - started) * 1000, 3),
         )
-
-        yield UsageEvent(usage=usage)
-
-    async def _blocked_turn(
-        self,
-        turn_id: str,
-        request: TurnRequest,
-        masked_text: str,
-        principal: Principal,
-        session: Session,
-    ) -> AsyncIterator[Event]:
-        """The guardrail-blocked path. Every later stage still emits — a client
-        relies on the fixed stage sequence (docs/02-lld.md §4) — but reports
-        why it did not run, and the turn ends with a refusal rather than a 5xx
-        (docs/01-hld.md §4)."""
-        skipped: Final = "turn blocked upstream"
-        for stage in (Stage.CONTEXT, Stage.CACHE, Stage.CLASSIFY, Stage.PLAN, Stage.GATHER):
-            yield StageEvent(
-                stage=stage, status=StageStatus.SKIPPED, latency_ms=0.0, detail=skipped
-            )
-        yield RouteEvent(routes=[], reason="blocked before routing", capabilities=[])
-        text = (
-            "I can't help with that request — it looked like an attempt to change "
-            "how I'm instructed to behave, rather than a question. Rephrase it and "
-            "I'll try again."
-        )
-        yield StageEvent(
-            stage=Stage.SYNTHESISE, status=StageStatus.SKIPPED, latency_ms=0.0, detail=skipped
-        )
-        yield StageEvent(stage=Stage.GUARDRAILS_OUT, status=StageStatus.OK, latency_ms=0.0)
-        yield AnswerEvent(text=text, structured=None, grounded=False, refusal=True)
-
-        started = time.perf_counter()
-        window = self._settings.turn.window_turns
-        session.append(Turn(turn_id=turn_id, role="user", content=masked_text), window=window)
-        session.append(Turn(turn_id=turn_id, role="assistant", content=text), window=window)
-        await self._sessions.save(session)
-        yield StageEvent(
-            stage=Stage.PERSIST,
-            status=StageStatus.OK,
-            latency_ms=round((time.perf_counter() - started) * 1000, 3),
-        )
-        yield UsageEvent(usage=Usage(model_calls=0, cost_usd=0.0, cache_hit=False))
+        yield UsageEvent(usage=resolved_usage)
 
     async def _stage(self, stage: Stage) -> AsyncIterator[Event]:
         """Emit one stage's outcome, skipping what this engine still cannot do."""
@@ -351,6 +528,15 @@ class TurnEngine:
         if request.options.redact_pii is not None:
             return request.options.redact_pii
         return profile.redact_pii
+
+    def _deadline_seconds(self, request: TurnRequest) -> float:
+        """The effective per-turn deadline: the configured ceiling, narrowed
+        (never widened) by the caller's own `options.deadline_ms` — the same
+        rule every other `TurnOptions` field already follows."""
+        ceiling_ms = self._settings.turn.deadline_ms
+        requested_ms = request.options.deadline_ms
+        effective_ms = ceiling_ms if requested_ms is None else min(requested_ms, ceiling_ms)
+        return effective_ms / 1000
 
     # ── Pieces ────────────────────────────────────────────────────────────────
 
@@ -412,32 +598,47 @@ class TurnEngine:
         session: Session,
         confirmed: PendingProposal | None,
         proposed: bool,
-    ) -> tuple[str, dict[str, Any] | None, Usage]:
+        *,
+        timeout_s: float | None,
+    ) -> tuple[str, dict[str, Any] | None, Usage, str | None]:
         """The real thing `EchoEngine._answer` stubbed. Confirmation/proposal
         replies stay canned — there is no model call to make for a scripted
-        stand-in mutation that touches nothing real."""
+        stand-in mutation that touches nothing real, so `timeout_s` and the
+        prompt registry are irrelevant to those two branches.
+
+        Raises `LlmCallError` on a real synthesis failure — the caller
+        decides the degraded fallback; this method's job is only to try.
+        """
         if confirmed is not None:
             text = (
                 f"Executed {confirmed.action} "
                 "(no air-action client exists yet — nothing actually changed)."
             )
-            return text, None, Usage(model_calls=0, cost_usd=0.0, cache_hit=False)
+            return text, None, Usage(model_calls=0, cost_usd=0.0, cache_hit=False), None
         if proposed:
             text = (
                 "That would change something, so here is a proposal rather than an action. "
                 "Confirm it by sending the next turn with "
                 '`"confirm": {"proposal_id": "…", "approve": true}`.'
             )
-            return text, None, Usage(model_calls=0, cost_usd=0.0, cache_hit=False)
+            return text, None, Usage(model_calls=0, cost_usd=0.0, cache_hit=False), None
 
         prompt = self._prompts.get("direct")
         messages = [{"role": "system", "content": prompt.system}]
         for turn in session.turns:
             messages.append({"role": turn.role, "content": turn.content})
-        messages.append({"role": "user", "content": masked_text})
+        # Only the newest turn is demarcated, not replayed history: prior
+        # assistant turns are this service's own output, and prior user turns
+        # already went through this same boundary once when they were new.
+        messages.append(
+            {"role": "user", "content": delimit(masked_text, source="customer_message")}
+        )
 
         result = await self._llm.chat(
-            model=_SYNTHESIS_MODEL, messages=messages, max_tokens=_SYNTHESIS_MAX_TOKENS
+            model=_SYNTHESIS_MODEL,
+            messages=messages,
+            max_tokens=_SYNTHESIS_MAX_TOKENS,
+            timeout=timeout_s,
         )
         text = result.content or "I don't have an answer for that."
         usage = Usage(
@@ -448,17 +649,31 @@ class TurnEngine:
             cost_usd=result.cost_usd,
             cache_hit=result.usage.cache_read_tokens > 0,
         )
+        prompt_version = f"{prompt.route}:{prompt.version}"
 
         structured: dict[str, Any] | None = None
         if principal.channel is Channel.BUSINESS:
+            turn_ceiling = request.options.max_cost_usd or self._settings.turn.max_cost_usd
             if request.output_schema is None:
                 # The business channel's contract is structured output, so it
                 # gets a body shaped like one even without a caller-supplied
                 # schema — no second model call needed to wrap the same answer.
                 structured = {"answer": text}
+            elif usage.cost_usd >= turn_ceiling:
+                # The per-turn ceiling is already met by the first call — cost
+                # can only be known after a call completes, so enforcement is
+                # of the *next* one: skip it and degrade to the free fallback
+                # rather than spending further, uncontrolled.
+                structured = {"answer": text}
+                _log.info(
+                    "turn.cost_ceiling_reached",
+                    session_id=session.session_id,
+                    cost_usd=usage.cost_usd,
+                    ceiling_usd=turn_ceiling,
+                )
             else:
                 structured, schema_usage = await self._structured_answer(
-                    masked_text, request.output_schema
+                    masked_text, request.output_schema, timeout_s=timeout_s
                 )
                 usage.model_calls += schema_usage.model_calls
                 usage.prompt_tokens += schema_usage.prompt_tokens
@@ -466,10 +681,10 @@ class TurnEngine:
                 usage.total_tokens += schema_usage.total_tokens
                 usage.cost_usd += schema_usage.cost_usd
 
-        return text, structured, usage
+        return text, structured, usage, prompt_version
 
     async def _structured_answer(
-        self, masked_text: str, output_schema: dict[str, Any]
+        self, masked_text: str, output_schema: dict[str, Any], *, timeout_s: float | None
     ) -> tuple[dict[str, Any] | None, Usage]:
         """A second, schema-constrained call for the business channel's
         `structured` field — air-llm is asked to conform via `json_schema`
@@ -484,13 +699,19 @@ class TurnEngine:
                         "role": "system",
                         "content": "Answer as JSON matching the given schema exactly.",
                     },
-                    {"role": "user", "content": masked_text},
+                    {
+                        "role": "user",
+                        "content": delimit(masked_text, source="customer_message"),
+                    },
                 ],
                 max_tokens=_SYNTHESIS_MAX_TOKENS,
                 json_schema=output_schema,
                 schema_name="business_query",
+                timeout=timeout_s,
             )
-        except httpx.HTTPError:
+        except LlmCallError:
+            # A failure here degrades this one field, not the whole turn —
+            # the prose answer already succeeded, so the turn still answers.
             return None, Usage(model_calls=0, cost_usd=0.0, cache_hit=False)
 
         try:
@@ -540,6 +761,8 @@ async def collect(events: AsyncIterator[Event], *, include_trace: bool) -> TurnR
                 result.structured = event.structured
                 result.grounded = event.grounded
                 result.refusal = event.refusal
+                result.escalated = event.escalated
+                result.escalation_ref = event.escalation_ref
             case EventType.USAGE:
                 result.usage = event.usage
             case EventType.ERROR:

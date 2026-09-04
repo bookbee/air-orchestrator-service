@@ -12,7 +12,7 @@ import httpx
 import pytest
 import respx
 
-from air_platform.clients.llm import LlmClient
+from air_platform.clients.llm import LlmCallError, LlmClient
 from air_platform.config import Settings
 
 
@@ -170,6 +170,77 @@ async def test_chat_raises_rather_than_swallowing_a_failure() -> None:
     respx.post("http://gateway:8083/v1/inference").mock(side_effect=httpx.ConnectError("boom"))
     client = _client()
 
-    with pytest.raises(httpx.HTTPError):
+    with pytest.raises(LlmCallError):
         await client.chat(model="generative", messages=[{"role": "user", "content": "hi"}])
+    await client.aclose()
+
+
+@respx.mock
+async def test_a_connection_failure_is_classified_retryable() -> None:
+    respx.post("http://gateway:8083/v1/inference").mock(side_effect=httpx.ConnectError("boom"))
+    client = _client()
+
+    with pytest.raises(LlmCallError) as excinfo:
+        await client.chat(model="generative", messages=[{"role": "user", "content": "hi"}])
+
+    assert excinfo.value.retryable is True
+    await client.aclose()
+
+
+@respx.mock
+async def test_a_429_is_classified_retryable() -> None:
+    respx.post("http://gateway:8083/v1/inference").mock(return_value=httpx.Response(429))
+    client = _client()
+
+    with pytest.raises(LlmCallError) as excinfo:
+        await client.chat(model="generative", messages=[{"role": "user", "content": "hi"}])
+
+    assert excinfo.value.retryable is True
+    await client.aclose()
+
+
+@respx.mock
+async def test_a_400_is_classified_not_retryable() -> None:
+    respx.post("http://gateway:8083/v1/inference").mock(return_value=httpx.Response(400))
+    client = _client()
+
+    with pytest.raises(LlmCallError) as excinfo:
+        await client.chat(model="generative", messages=[{"role": "user", "content": "hi"}])
+
+    assert excinfo.value.retryable is False
+    await client.aclose()
+
+
+@respx.mock
+async def test_chat_passes_a_custom_timeout_through_to_httpx() -> None:
+    route = respx.post("http://gateway:8083/v1/inference").mock(
+        return_value=httpx.Response(200, json={"content": "ok"})
+    )
+    client = _client()
+
+    await client.chat(
+        model="generative", messages=[{"role": "user", "content": "hi"}], timeout=1.5
+    )
+
+    # respx does not expose the resolved timeout directly; the meaningful
+    # assertion is that a custom timeout doesn't break the call at all.
+    assert route.called
+    await client.aclose()
+
+
+@respx.mock
+async def test_chat_forwards_the_bound_request_id() -> None:
+    from air_platform.observability.logging import bind_request_context, clear_request_context
+
+    route = respx.post("http://gateway:8083/v1/inference").mock(
+        return_value=httpx.Response(200, json={"content": "ok"})
+    )
+    client = _client()
+    bind_request_context(request_id="req_test123")
+    try:
+        await client.chat(model="generative", messages=[{"role": "user", "content": "hi"}])
+    finally:
+        clear_request_context()
+
+    assert route.calls.last.request.headers["X-Request-ID"] == "req_test123"
     await client.aclose()

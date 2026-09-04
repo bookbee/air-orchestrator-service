@@ -186,6 +186,17 @@ def clear_request_context() -> None:
     structlog.contextvars.clear_contextvars()
 
 
+def current_request_id() -> str | None:
+    """The id :func:`bind_request_context` bound for this request, if any.
+
+    Lets an outbound client (``clients/llm.py``) forward the same id downstream
+    without threading it through every call signature — a trace that stops at
+    the first hop is not a trace, it is one log line.
+    """
+    value = structlog.contextvars.get_contextvars().get("request_id")
+    return value if isinstance(value, str) else None
+
+
 def text_fingerprint(text: str) -> str:
     """Short, stable digest of user text, safe for a log line."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:_FINGERPRINT_CHARS]

@@ -139,6 +139,8 @@ class TurnResult(BaseModel):
     routes: list[Route] = Field(default_factory=list)
     grounded: bool = False
     refusal: bool = False
+    escalated: bool = False
+    escalation_ref: str | None = None
     degraded: list[str] = Field(
         default_factory=list,
         description="Downstreams that were unavailable, so a caller can see what was missing.",

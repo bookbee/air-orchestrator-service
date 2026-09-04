@@ -206,3 +206,19 @@ def test_proposal_ttl_is_short_and_bounded() -> None:
     assert session.proposal_ttl_seconds == 300
     with pytest.raises(ValidationError):
         Settings.model_validate({"app": {"env": "test"}, "session": {"proposal_ttl_seconds": 7200}})
+
+
+def test_session_cost_ceiling_is_unlimited_by_default() -> None:
+    """Opt-in: a deployment that never sets this sees no behaviour change."""
+    assert _settings().session.max_cost_usd is None
+
+
+def test_session_cost_ceiling_can_be_configured() -> None:
+    settings = _settings(session={"max_cost_usd": 2.5})
+
+    assert settings.session.max_cost_usd == 2.5
+
+
+def test_competitor_names_default_to_empty() -> None:
+    """No fixed vertical to hardcode names for — a deployment's own config."""
+    assert _settings().guardrails.competitor_names == []

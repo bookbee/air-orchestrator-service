@@ -88,6 +88,7 @@ class Session:
         "pending",
         "session_id",
         "tenant",
+        "total_cost_usd",
         "turns",
         "updated_at",
     )
@@ -108,6 +109,12 @@ class Session:
         self.pending: PendingProposal | None = None
         self.created_at = _now()
         self.updated_at = self.created_at
+        #: Cumulative spend across every turn this session has made, checked
+        #: against `SessionSettings.max_cost_usd` before the next turn
+        #: attempts synthesis (`TurnEngine`). "Log the cost of each
+        #: conversation" made checkable per-session, not just aggregated in
+        #: Prometheus by tenant.
+        self.total_cost_usd: float = 0.0
 
     def append(self, turn: Turn, *, window: int) -> None:
         """Add a turn and keep the history bounded.
@@ -143,6 +150,7 @@ class SessionView(BaseModel):
     has_pending_proposal: bool = Field(
         description="Whether a mutation is awaiting confirmation. The id is not repeated here."
     )
+    total_cost_usd: float
     created_at: datetime
     updated_at: datetime
 
@@ -153,6 +161,7 @@ class SessionView(BaseModel):
             channel=session.channel,
             turns=list(session.turns),
             has_pending_proposal=session.pending is not None and not session.pending.is_expired(),
+            total_cost_usd=session.total_cost_usd,
             created_at=session.created_at,
             updated_at=session.updated_at,
         )

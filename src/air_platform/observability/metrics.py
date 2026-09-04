@@ -19,6 +19,7 @@ from prometheus_client import CollectorRegistry, Counter, Histogram, generate_la
 from air_platform.constants import (
     Channel,
     DownstreamService,
+    EscalationReason,
     Route,
     Stage,
     StageStatus,
@@ -29,6 +30,7 @@ __all__ = [
     "CONTENT_TYPE",
     "REGISTRY",
     "record_downstream_call",
+    "record_escalation",
     "record_guardrail_block",
     "record_request",
     "record_stage",
@@ -123,6 +125,13 @@ _PROPOSALS = Counter(
     registry=REGISTRY,
 )
 
+_ESCALATIONS = Counter(
+    "air_platform_escalations_total",
+    "Turns handed off to a human, by reason.",
+    ["reason"],
+    registry=REGISTRY,
+)
+
 
 def record_request(*, endpoint: str, status: int, key_id: str, duration_s: float) -> None:
     """One HTTP request. ``endpoint`` must be a route template, never a live path."""
@@ -176,6 +185,10 @@ def record_downstream_call(*, service: DownstreamService, outcome: str) -> None:
 def record_proposal(*, outcome: str) -> None:
     """``created`` | ``confirmed`` | ``rejected`` | ``expired`` | ``cancelled``."""
     _PROPOSALS.labels(outcome).inc()
+
+
+def record_escalation(*, reason: EscalationReason) -> None:
+    _ESCALATIONS.labels(reason.value).inc()
 
 
 def render() -> bytes:

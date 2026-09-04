@@ -32,12 +32,12 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from air_platform.config import Settings
-from air_platform.constants import HEADER_API_KEY, DownstreamService
+from air_platform.constants import HEADER_API_KEY, HEADER_REQUEST_ID, DownstreamService
 from air_platform.observability import metrics
-from air_platform.observability.logging import get_logger
+from air_platform.observability.logging import current_request_id, get_logger
 from air_platform.schemas.common import DependencyStatus
 
-__all__ = ["ChatResult", "ChatUsage", "LlmClient"]
+__all__ = ["ChatResult", "ChatUsage", "LlmCallError", "LlmClient"]
 
 logger = get_logger(__name__)
 
@@ -87,6 +87,23 @@ class ChatResult(BaseModel):
     content: str = ""
     cost_usd: float = 0.0
     usage: ChatUsage = Field(default_factory=ChatUsage)
+
+
+class LlmCallError(Exception):
+    """A classified failure from `chat()`.
+
+    `retryable` says whether trying again could plausibly succeed —
+    connection failures, timeouts, and 5xx/429 responses are; any other 4xx
+    is not, since the same request would just fail the same way again. This
+    repo does not retry on its own (that is real machinery — backoff,
+    idempotency — not built here); the flag exists so `TurnEngine` can
+    distinguish "the model is momentarily unavailable" from "this call was
+    wrong" when it degrades.
+    """
+
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class LlmClient:
@@ -181,12 +198,22 @@ class LlmClient:
         max_tokens: int = 1024,
         json_schema: dict[str, Any] | None = None,
         schema_name: str | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109 — httpx's own per-call override
     ) -> ChatResult:
-        """One synthesis call. Raises `httpx.HTTPError` on failure — the turn
-        engine decides its own fallback (a refusal answer, `TurnStatus.ERROR`);
-        unlike `probe()`, this does not swallow the error, because a caller
-        that actually needs the answer must be able to tell "no answer" from
-        "an empty one"."""
+        """One synthesis call. Raises `LlmCallError` on failure — unlike
+        `probe()`, this does not swallow the error, because a caller that
+        actually needs the answer must be able to tell "no answer" from "an
+        empty one"; the turn engine decides its own degraded fallback.
+
+        `timeout` overrides the configured `timeout_s` when given — the turn
+        engine's own remaining deadline, not this client's fixed default, is
+        what should bound a call once a turn has already spent part of its
+        budget on earlier stages.
+
+        The caller's `X-Request-ID` is forwarded automatically (via
+        `current_request_id()`) so a trace survives this hop rather than
+        starting over at air-llm.
+        """
         client = await self._http()
         body = _ChatBody(
             model=model,
@@ -195,9 +222,36 @@ class LlmClient:
             json_schema=json_schema,
             schema_name=schema_name,
         ).model_dump(exclude_none=True)
-        response = await client.post(_INFERENCE_PATH, json=body, timeout=self._config.timeout_s)
-        response.raise_for_status()
-        return ChatResult.model_validate(response.json())
+        headers: dict[str, str] = {}
+        request_id = current_request_id()
+        if request_id is not None:
+            headers[HEADER_REQUEST_ID] = request_id
+        call_timeout = self._config.timeout_s if timeout is None else timeout
+
+        try:
+            response = await client.post(
+                _INFERENCE_PATH, json=body, timeout=call_timeout, headers=headers
+            )
+        except httpx.TimeoutException as exc:
+            metrics.record_downstream_call(service=DownstreamService.LLM, outcome="timeout")
+            raise LlmCallError(f"no response within {call_timeout}s", retryable=True) from exc
+        except httpx.HTTPError as exc:
+            metrics.record_downstream_call(service=DownstreamService.LLM, outcome="unavailable")
+            raise LlmCallError(
+                f"connection failed ({type(exc).__name__})", retryable=True
+            ) from exc
+
+        if response.status_code == httpx.codes.OK:
+            metrics.record_downstream_call(service=DownstreamService.LLM, outcome="ok")
+            return ChatResult.model_validate(response.json())
+
+        metrics.record_downstream_call(service=DownstreamService.LLM, outcome="error")
+        # 5xx and 429 are the model gateway or a provider having a bad moment;
+        # any other 4xx is this call itself being wrong, and retrying an
+        # unchanged request would just fail the same way again.
+        status = response.status_code
+        retryable = status >= 500 or status == httpx.codes.TOO_MANY_REQUESTS
+        raise LlmCallError(f"air-llm returned HTTP {response.status_code}", retryable=retryable)
 
     async def aclose(self) -> None:
         """Release the connection pool. Idempotent, so a double shutdown is safe."""

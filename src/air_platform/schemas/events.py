@@ -91,6 +91,13 @@ class AnswerEvent(BaseModel):
     structured: dict[str, Any] | None = None
     grounded: bool = False
     refusal: bool = False
+    #: True when this turn was handed off to a human rather than fully
+    #: answered — `escalation_ref` is the reference a human agent resumes
+    #: against (`guardrails/escalation.py`). Distinct from `refusal`: a
+    #: refusal is a guardrail declining; an escalation is this service
+    #: admitting it cannot fully help.
+    escalated: bool = False
+    escalation_ref: str | None = None
 
 
 class UsageEvent(BaseModel):

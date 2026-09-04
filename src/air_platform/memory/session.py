@@ -14,6 +14,7 @@ fact, so the namespace exists before the backend that needs it.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Final, Protocol
 
 from air_platform.config import Settings
@@ -72,8 +73,17 @@ class InMemorySessionStore:
         return f"{self._key_prefix}{tenant}:session:{session_id}"
 
     async def get(self, session_id: str, principal: Principal) -> Session | None:
-        session = self._sessions.get(self._key(principal.tenant, session_id))
+        key = self._key(principal.tenant, session_id)
+        session = self._sessions.get(key)
         if session is None:
+            return None
+        if session.updated_at + timedelta(seconds=self._ttl_seconds) < datetime.now(UTC):
+            # Expired reads exactly like absent — both are "start a new one"
+            # to the caller (`TurnEngine._resolve_session` already handles
+            # that path) — and dropping it here is what stops an in-memory
+            # process from holding stale sessions forever.
+            logger.info("session.expired", session_id=session_id)
+            del self._sessions[key]
             return None
         if not session.owned_by(principal.key_id, principal.tenant):
             # Reachable only if two principals in one tenant share a session id, which

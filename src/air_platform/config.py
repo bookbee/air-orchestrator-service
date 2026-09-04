@@ -236,6 +236,10 @@ class GuardrailSettings(BaseModel):
     business: GuardrailProfile = Field(
         default_factory=lambda: GuardrailProfile(validate_schema=True)
     )
+    #: Names the scope guard treats as a competitor mention (guardrails/scope.py).
+    #: Empty by default: air-platform has no fixed vertical to hardcode names
+    #: for, so this is a deployment's own configuration, not a code change.
+    competitor_names: list[str] = Field(default_factory=list)
 
     def for_channel(self, channel: Channel) -> GuardrailProfile:
         return self.customer if channel is Channel.CUSTOMER else self.business
@@ -254,6 +258,11 @@ class SessionSettings(BaseModel):
     #: A pending mutation stays confirmable only briefly, so a stale "yes" cannot
     #: execute an hour-old proposal (docs/00-plan.md §4 Q3).
     proposal_ttl_seconds: int = Field(default=300, ge=10, le=3600)
+    #: Cumulative spend ceiling across a whole conversation, distinct from
+    #: `TurnSettings.max_cost_usd`'s per-turn one. `None` (the default) is
+    #: unlimited — opt-in, so a deployment that never sets this sees no
+    #: behaviour change.
+    max_cost_usd: float | None = Field(default=None, gt=0)
 
 
 class CacheSettings(BaseModel):

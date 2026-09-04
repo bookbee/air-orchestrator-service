@@ -128,6 +128,26 @@ class DownstreamService(StrEnum):
     RECOMMENDER = "air-recommender"
 
 
+class EscalationReason(StrEnum):
+    """Closed set of reasons a turn hands off to a human — a Prometheus label,
+    so open-ended is not an option (the same rule air-classifier's own
+    `EscalationReason` documents for its tier-escalation reasons; this is a
+    distinct concept — customer-to-human, not tier-to-tier).
+
+    Only ``EXPLICIT_REQUEST`` is wired to a real detector today
+    (`guardrails/escalation.py`). The other three are reserved, matching the
+    ``_STUBBED`` convention `engine/turn.py` already uses elsewhere: each
+    depends on a capability that doesn't exist yet (classification confidence,
+    retrieval confidence, and tool-call tracking are all Phase 3) and gets
+    wired to a real check when that capability lands, not faked now.
+    """
+
+    EXPLICIT_REQUEST = "explicit_request"
+    LOW_CLASSIFIER_CONFIDENCE = "low_classifier_confidence"
+    LOW_RETRIEVAL_CONFIDENCE = "low_retrieval_confidence"
+    REPEATED_TOOL_FAILURE = "repeated_tool_failure"
+
+
 # ── Scopes ────────────────────────────────────────────────────────────────────
 
 #: Send a conversational turn on the customer channel.

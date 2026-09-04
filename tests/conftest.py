@@ -234,6 +234,7 @@ async def _canned_chat(
     max_tokens: int = 1024,
     json_schema: dict[str, Any] | None = None,
     schema_name: str | None = None,
+    timeout: float | None = None,
 ) -> Any:
     """A deterministic stand-in for ``LlmClient.chat`` — see the ``app``
     fixture. A schema-constrained call (``json_schema`` set) gets one
