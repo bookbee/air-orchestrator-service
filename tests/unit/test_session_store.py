@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from air_platform.constants import Channel
-from air_platform.memory.session import InMemorySessionStore
-from air_platform.schemas.common import Principal
+from air_orchestrator_service.constants import Channel
+from air_orchestrator_service.memory.session import InMemorySessionStore
+from air_orchestrator_service.schemas.common import Principal
 
 PRINCIPAL = Principal(key_id="k1", name="k1", channel=Channel.CUSTOMER, tenant="tenant-a")
 

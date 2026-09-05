@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from air_platform.guardrails.scope import screen_scope
+from air_orchestrator_service.guardrails.scope import screen_scope
 
 
 def test_abuse_is_blocked() -> None:
@@ -28,9 +28,7 @@ def test_a_coupon_code_request_is_blocked() -> None:
 
 
 def test_a_configured_competitor_name_is_blocked() -> None:
-    verdict = screen_scope(
-        "is this cheaper than Acme Corp?", competitor_names=["Acme Corp"]
-    )
+    verdict = screen_scope("is this cheaper than Acme Corp?", competitor_names=["Acme Corp"])
 
     assert verdict.blocked is True
     assert verdict.category == "competitor_mention"

@@ -105,9 +105,7 @@ async def test_session_view_never_exposes_the_isolation_key(
     and browser histories for no benefit."""
     mine = await _chat(client, message="hello")
 
-    response = await client.get(
-        f"/v1/sessions/{mine['session_id']}", headers=auth(CUSTOMER_KEY)
-    )
+    response = await client.get(f"/v1/sessions/{mine['session_id']}", headers=auth(CUSTOMER_KEY))
     body = response.json()
 
     assert "tenant" not in body

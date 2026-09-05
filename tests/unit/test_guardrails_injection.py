@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from air_platform.guardrails.injection import screen_input
+from air_orchestrator_service.guardrails.injection import screen_input
 
 
 def test_a_blatant_override_attempt_is_blocked() -> None:

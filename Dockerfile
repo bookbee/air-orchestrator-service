@@ -1,4 +1,4 @@
-# air-platform — multi-stage, non-root runtime.
+# air-orchestrator-service — multi-stage, non-root runtime.
 #
 # The wheel is built in the first stage and installed into a clean second stage, so
 # the shipped image carries no build toolchain and no source tree.
@@ -34,7 +34,7 @@ RUN groupadd --gid 10001 air \
 WORKDIR /app
 
 COPY --from=build /wheels /wheels
-RUN pip install --no-cache-dir /wheels/*.whl "air-platform[all]" \
+RUN pip install --no-cache-dir /wheels/*.whl "air-orchestrator-service[all]" \
  && rm -rf /wheels
 
 USER air
@@ -48,5 +48,5 @@ EXPOSE 8081
 
 # Exec form, so the process receives SIGTERM directly and uvicorn's graceful
 # shutdown actually runs. The console script reads host/port/workers from
-# AIR_PLATFORM__APP__*.
-ENTRYPOINT ["air-platform"]
+# AIR_ORCHESTRATOR_SERVICE__APP__*.
+ENTRYPOINT ["air-orchestrator-service"]

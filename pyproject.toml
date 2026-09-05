@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "air-platform"
+name = "air-orchestrator-service"
 version = "0.1.0"
-description = "AIR Platform — the conversational front door: orchestration, RAG, tools and actions over a streaming API"
+description = "AIR Orchestrator Service — the conversational front door: orchestration, RAG, tools and actions over a streaming API"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
@@ -36,7 +36,7 @@ otel = [
     "opentelemetry-instrumentation-fastapi>=0.49b0",
 ]
 # Everything a production image needs.
-all = ["air-platform[redis,otel]"]
+all = ["air-orchestrator-service[redis,otel]"]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
@@ -48,13 +48,13 @@ dev = [
 ]
 
 [project.scripts]
-air-platform = "air_platform.__main__:main"
+air-orchestrator-service = "air_orchestrator_service.__main__:main"
 
 [project.urls]
-Repository = "https://github.com/air/air-platform"
+Repository = "https://github.com/air/air-orchestrator-service"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/air_platform"]
+packages = ["src/air_orchestrator_service"]
 
 # ── Ruff ──────────────────────────────────────────────────────────────────────
 [tool.ruff]

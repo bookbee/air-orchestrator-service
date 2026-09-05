@@ -6,9 +6,9 @@ import json
 
 import pytest
 
-from air_platform.config import Settings
-from air_platform.constants import Channel
-from air_platform.security.api_keys import (
+from air_orchestrator_service.config import Settings
+from air_orchestrator_service.constants import Channel
+from air_orchestrator_service.security.api_keys import (
     ANONYMOUS_KEY_ID,
     KEY_PREFIX,
     ApiKeyRecord,
@@ -50,7 +50,7 @@ def test_lookup_resolves_a_known_key() -> None:
 
 
 def test_lookup_rejects_an_unknown_key() -> None:
-    assert _store().lookup("airp_not_a_real_key") is None
+    assert _store().lookup("airo_not_a_real_key") is None
 
 
 def test_lookup_rejects_a_disabled_key() -> None:
@@ -83,7 +83,7 @@ def test_a_malformed_hash_is_dropped_rather_than_indexed() -> None:
             ApiKeyRecord(
                 id="typo",
                 name="Raw key pasted as a hash",
-                key_hash="airp_this_is_a_raw_key_not_a_digest",
+                key_hash="airo_this_is_a_raw_key_not_a_digest",
                 channel=Channel.CUSTOMER,
                 tenant="t",
             )

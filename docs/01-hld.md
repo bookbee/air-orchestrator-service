@@ -1,4 +1,4 @@
-# AIR Platform — High-Level Design
+# AIR Orchestrator Service — High-Level Design
 
 **Status:** Draft for review · **Companion docs:** [Plan](00-plan.md) · [LLD](02-lld.md)
 **Source:** *AIR-PLATFORM — High-Level Architecture, Rev A*, including its independent-review
@@ -11,35 +11,35 @@ items 01–08. This document reconciles that diagram with the AIR repositories a
 The architecture diagram is drawn as a **standalone reference architecture** — every
 capability a conversational platform needs, in one frame. The AIR estate has already built
 several of those capabilities as independent services. So the diagram's internal boxes are
-not all air-platform modules; some are clients onto something that exists.
+not all air-orchestrator-service modules; some are clients onto something that exists.
 
 Getting this mapping wrong is the expensive mistake available here, because two of the boxes
 — **Model Gateway** and **Intent & Sentiment Analysis** — describe services that are running
-today. Reimplementing them inside air-platform would fork provider keys, cost accounting and
+today. Reimplementing them inside air-orchestrator-service would fork provider keys, cost accounting and
 the escalation ladder across two repos.
 
 | Diagram element | Realised as | Note |
 | --- | --- | --- |
-| Customer API Gateway | **Edge infrastructure**, not this repo | air-platform serves the customer route behind it |
+| Customer API Gateway | **Edge infrastructure**, not this repo | air-orchestrator-service serves the customer route behind it |
 | Business API Gateway | **Edge infrastructure**, not this repo | Corp-VPN-only ingress to the same service, different route and profile (§3) |
-| Session & Context Manager | air-platform module | State in Redis, brokered by air-infra |
-| Intent & Sentiment Analysis | **`air-classifier` :8082** + a local intent step | `/v1/sentiment` and `/v1/feedback` are the four-rung ladder; air-platform calls, never classifies |
-| Guardrails — input / output | air-platform module | **New.** Review item 01 |
-| Router / Planner | air-platform module | The core of this repo |
-| Model Gateway | **`air-infra` :8080** | **Already built.** Multi-provider routing, fallback, cost, cache, prompt caching, structured output. air-platform consumes it via `air_infra_client`; it does not rebuild it. Satisfies review item 02 |
-| Semantic Cache | air-platform module | **New.** Embeddings from air-infra's `/v1/models/embeddings`, vectors in brokered Redis. Review item 04 |
-| Retrieval Client (RAG) | air-platform client → **`air-rag` :8087** | Reranking, grounding and citation shape are air-rag's; air-platform asks and cites. **air-rag hosts its own air-llm client for embeddings** — air-platform never embeds a query itself |
-| Tool Executor | air-platform client → **`air-tools` :8084** | **Read-only by construction.** Each domain agent's reason → tool-call → interpret loop (Plan's new "agent placement" decision) runs *inside* air-tools, with its own air-llm client — air-platform sends one coarse request per sub-task and never sees the intermediate reasoning |
-| Conversation Memory | Redis (turns) + Postgres (profile), brokered by air-infra | Review item 03 |
-| Response Streamer | air-platform module | SSE, §5 |
-| External RAG / Knowledge | Behind `air-rag` | Vector DB, embedding service, ingestion — not air-platform's concern |
+| Session & Context Manager | air-orchestrator-service module | Built; state is in-process until the Phase 2b Redis backend lands |
+| Intent & Sentiment Analysis | **`air-classifier` :8082** + a local intent step | `/v1/sentiment` and `/v1/feedback` are the four-rung ladder; air-orchestrator-service calls, never classifies |
+| Guardrails — input / output | air-orchestrator-service module | **New.** Review item 01 |
+| Router / Planner | air-orchestrator-service module | The core of this repo |
+| Model Gateway | **`air-llm` :8083** | **Already built**, and split out of air-infra after this design was first drafted. Multi-provider routing, fallback, cost, cache, prompt caching, structured output. This service consumes it over HTTP (`clients/llm.py`); it does not rebuild it. Satisfies review item 02 |
+| Semantic Cache | air-orchestrator-service module | **New, not built** (Phase 5). Embeddings from air-llm, vectors in Redis brokered by air-infra. Review item 04 |
+| Retrieval Client (RAG) | air-orchestrator-service client → **`air-rag` :8087** | Reranking, grounding and citation shape are air-rag's; air-orchestrator-service asks and cites. **air-rag hosts its own air-llm client for embeddings** — air-orchestrator-service never embeds a query itself |
+| Tool Executor | air-orchestrator-service client → **`air-tools` :8084** | **Read-only by construction.** Each domain agent's reason → tool-call → interpret loop (Plan's new "agent placement" decision) runs *inside* air-tools, with its own air-llm client — air-orchestrator-service sends one coarse request per sub-task and never sees the intermediate reasoning |
+| Conversation Memory | Redis (turns) + Postgres (profile), brokered by air-infra | Review item 03. **In-process today** — the Redis backend is Phase 2b |
+| Response Streamer | air-orchestrator-service module | SSE, §5 |
+| External RAG / Knowledge | Behind `air-rag` | Vector DB, embedding service, ingestion — not air-orchestrator-service's concern |
 | Tools / Live Data | Behind `air-tools` | |
 | Action Services | **`air-action` :8085** | **Mutations only**, idempotency keys and approval gates. Review item 07 |
 | MCP Server (optional) | Deferred | §8 |
-| Inference Backends (hybrid) | Behind `air-infra` | Ollama local, Anthropic/OpenAI cloud. Self-hosted vLLM/TGI is an air-infra provider, added there |
-| Cross-cutting: Security & Secrets | Mostly **`air-infra`** | Credential broker, policy engine, secret backend already exist |
-| Cross-cutting: Observability | Shared convention | Every service ships structlog + Prometheus; air-platform owns the per-turn trace that spans them |
-| Cross-cutting: Evaluation & Feedback | air-platform module + repo | **New.** Prompt registry, canary prompts, feedback capture. Review item 06 |
+| Inference Backends (hybrid) | Behind `air-llm` | Ollama local, Anthropic/OpenAI cloud. Self-hosted vLLM/TGI is an air-llm provider, added there |
+| Cross-cutting: Security & Secrets | Mostly **`air-infra`** | Credential broker, policy engine, secret backend already exist. This service holds its own API-key store (`security/api_keys.py`) |
+| Cross-cutting: Observability | Shared convention | Every service ships structlog + Prometheus; air-orchestrator-service owns the per-turn trace that spans them |
+| Cross-cutting: Evaluation & Feedback | air-orchestrator-service module + repo | **New.** Prompt registry, canary prompts, feedback capture. Review item 06 |
 | Cross-cutting: Scale & Resilience | Split | Circuit breakers here; async action queue in air-action |
 
 **Not on the diagram:** `air-recommender` :8086. It fits the *Tools / Live Data* role — a
@@ -68,21 +68,23 @@ Each alias is a config edit in air-llm, not a deployment.
             │  POST /v1/chat (SSE)                      │  POST /v1/query (SSE)
             └───────────────────┬───────────────────────┘
                                 ▼
-        ┌──────────────────────────────────────────────────────┐
-        │                   air-platform :8081                  │
-        │        stateless · autoscaled · one turn engine       │
-        │                                                       │
-        │  guardrails-in → context → classify → plan → gather   │
-        │        → synthesise → guardrails-out → stream         │
-        └──┬──────────┬──────────┬──────────┬──────────┬────────┘
-           │          │          │          │          │
-     air-infra   air-classifier air-rag  air-tools  air-action
-       :8080        :8082       :8083     :8084      :8085
-    models·stores   sentiment   retrieval  READ-ONLY  MUTATIONS
-    ·cache·secrets  ·intent     ·citations           ·approval gates
-           │
-    ┌──────┴───────┐
-    Ollama · Anthropic · OpenAI · self-hosted
+    ┌──────────────────────────────────────────────────────────┐
+    │              air-orchestrator-service :8081              │
+    │         stateless · autoscaled · one turn engine         │
+    │                                                          │
+    │    guardrails-in → context → cache → classify → plan     │
+    │     → gather → synthesise → guardrails-out → persist     │
+    └───────────────────────────┬──────────────────────────────┘
+                                │
+  ┌──────────────┬──────────────┴──────────────┬──────────────┬──────────────┐
+  ▼              ▼              ▼              ▼              ▼              ▼
+  air-llm        air-infra      air-classifier air-rag        air-tools      air-action
+  :8083          :8080          :8082          :8087          :8084          :8085
+  THE ONLY       stores ·       sentiment      retrieval      READ-ONLY      MUTATIONS
+  MODEL PATH     secrets        · intent       · citations    calls          · gates
+  │
+  ▼
+  Ollama · Anthropic · OpenAI · self-hosted
 ```
 
 One service, two ingress paths, one turn engine. The paths differ in profile, not in
@@ -95,7 +97,7 @@ business queries have different threat models, different answer shapes, and diff
 obligations. Modelling them as two deployments would duplicate the orchestrator; modelling
 them as one undifferentiated endpoint would apply the weaker profile to both.
 
-So air-platform carries a **channel** on every turn, derived from the authenticated
+So air-orchestrator-service carries a **channel** on every turn, derived from the authenticated
 principal — never from a request header, which the client controls.
 
 | | `customer` | `business` |
@@ -130,7 +132,7 @@ POST /v1/chat  {session_id?, message, options?}
   │        ├─ air-tools    read-only calls
   │        ├─ air-recommender
   │        └─ air-action   ⇒ PROPOSE ONLY, never executes in this step
-  ├─ 8. SYNTHESISE ── air-infra gateway; grounded in step 7 only
+  ├─ 8. SYNTHESISE ── air-llm gateway; grounded in step 7 only
   ├─ 9. GUARDRAILS OUT ── grounding/citation check · PII · safety · schema validation
   ├─ 10. PERSIST ── turn to Redis, cache entry, usage and cost
   └─ 11. STREAM ── SSE throughout; every step above emits as it completes
@@ -138,7 +140,7 @@ POST /v1/chat  {session_id?, message, options?}
 
 **Step 7's `air-tools` call may itself be a multi-step agent turn**, invisible from here: the
 domain agent's own reason → tool-call → interpret loop runs inside air-tools, against its own
-air-llm client (Plan's agent-placement decision). air-platform's per-call budget covers the
+air-llm client (Plan's agent-placement decision). air-orchestrator-service's per-call budget covers the
 whole thing as one deadline; the intermediate reasoning is air-tools' concern, not this
 pipeline's.
 
@@ -160,17 +162,17 @@ Confirmation of a proposed mutation is a *new* turn citing a proposal id, not a 
 upstream on an open socket, so nothing needs a bidirectional channel.
 
 **What v1 streams — a deliberate, recorded deviation.** The diagram specifies
-*token-by-token* streaming. air-infra's gateway cannot do that today: `/v1/models/chat`
-returns a complete `ChatResponse`, the `stream` flag on its `ChatRequest` is unimplemented,
-and `ModelProvider` has no `stream()` method. Rather than fork a second model path — which
+*token-by-token* streaming. air-llm cannot do that today: `POST /v1/inference` returns a
+complete response, and `ModelProvider` has no `stream()` method. Rather than fork a second
+model path — which
 would cost the centralised routing, cost accounting and cache that review item 02 exists to
 protect — v1 streams the **turn lifecycle**: every stage in §4 emits as it completes, and the
 answer arrives as one `answer` event.
 
-This closes without a contract change. When air-infra grows a streaming endpoint,
-air-platform emits `answer.delta` events before the terminal `answer`; the event name is
-reserved in v1 and clients ignore unknown event types. **The gap is in air-infra, and it is
-tracked there** — this is the first of two (§9).
+This closes without a contract change. When air-llm grows a streaming endpoint, this service
+emits `answer.delta` events before the terminal `answer`; the event name is reserved in v1
+and clients ignore unknown event types. **The gap is in air-llm, and it is tracked there** —
+this is the first of two (§9).
 
 Perceptually this matters less than it sounds: on a turn that retrieves and calls tools, the
 first stage event lands within ~250 ms while a token-streamed answer could not begin until
@@ -199,12 +201,12 @@ Three properties do the work:
 1. **A confirmation cannot be inferred.** It must cite a `proposal_id` the session is holding.
    Text that merely reads as agreement does not execute anything, which is what makes a
    successful prompt injection in turn N a dead end rather than a write.
-2. **air-action re-validates independently.** It never trusts that air-platform checked;
-   air-platform's confirmation is evidence, not authority.
+2. **air-action re-validates independently.** It never trusts that air-orchestrator-service checked;
+   air-orchestrator-service's confirmation is evidence, not authority.
 3. **Every execution is idempotent and audited.** The idempotency key is derived from the
    proposal id, so a retried stream cannot double-execute.
 
-Review item 07's async queue and approval gates live inside air-action. air-platform's
+Review item 07's async queue and approval gates live inside air-action. air-orchestrator-service's
 obligation is to surface queue state as stage events rather than block the turn on it.
 
 ## 7. Degradation
@@ -219,8 +221,9 @@ makes absence tractable: a missing service removes a *route*, not the service.
 | air-tools | Affected capabilities leave the tool list; the planner cannot select what is not advertised |
 | air-action | Proposals refused with a clear reason. **Never** a fallback direct write |
 | air-recommender | Recommendation capability drops out |
+| air-infra | Store credentials unavailable. No effect on the turn path today; from Phase 2b, sessions degrade to single-turn |
 | Semantic cache / Redis | Cache disabled, sessions degrade to single-turn; the turn still answers |
-| **air-infra gateway** | **No synthesis is possible — the turn fails cleanly with a 503.** Accepted single point of failure; mitigated by provider failover inside air-infra, not by a bypass here |
+| **air-llm** | **No synthesis is possible.** The turn degrades to an honest "cannot answer right now" rather than erroring, and `/v1/ready` reports 503 so the replica is taken out of rotation. Accepted single point of failure; mitigated by provider failover inside air-llm, not by a bypass here |
 
 The rule: a downstream failure narrows what the answer can contain and says so. It never
 produces a confident answer built on nothing, and it never fails the turn — with the one
@@ -238,18 +241,16 @@ honest exception of the model gateway itself.
 - **Long-term profile store.** Short-term turns land in Redis in Phase 2; the Postgres profile
   half of the memory box waits until a consumer needs it (Plan §4 Q4).
 
-## 9. Gaps this design opens in air-infra
+## 9. Gaps this design opens in air-llm
 
-Both are in air-infra, both are needed for the diagram's full shape, and neither blocks the
+Both are in air-llm, both are needed for the diagram's full shape, and neither blocks the
 phases as ordered:
 
-1. **Streaming.** `ModelProvider.stream()` plus an SSE `/v1/models/chat/stream`. Unlocks
+1. **Streaming.** `ModelProvider.stream()` plus a streaming inference endpoint. Unlocks
    token-by-token (§5). *Not required before Phase 5.*
-2. **Tool calling.** The unified `ChatRequest` carries `messages` and `json_schema` but no
-   `tools`. Native tool-calling is the recommended planner mechanism (Plan §4 Q1) and cannot
-   be built until this exists. *Required before Phase 3* — or the planner ships as
-   schema-constrained JSON decomposition, which the gateway already supports today, and
-   migrates later.
-
-The second is a genuine fork in the road and is the single most important thing to settle in
-this review.
+2. **Tool calling.** The unified inference contract carries `messages` and `json_schema` but
+   no `tools`. Native tool-calling is the more direct planner mechanism, and cannot be built
+   until this exists. **Plan §4 Q1 resolves this in the meantime**: the planner ships as
+   schema-constrained JSON decomposition over the `json_schema` support air-llm already has,
+   behind the same interface, so adopting native tool-calling later is an implementation swap
+   rather than a contract change. *Wanted before Phase 3; not blocking.*

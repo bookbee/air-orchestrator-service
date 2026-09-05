@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 from fastapi import FastAPI
 
-from air_platform.api.errors import (
+from air_orchestrator_service.api.errors import (
     ChannelMismatchError,
     DependencyUnavailableError,
     InsufficientScopeError,
@@ -135,7 +135,7 @@ def test_an_unknown_status_still_gets_a_uri_safe_slug() -> None:
 def test_rate_limited_floors_retry_after_at_one_second() -> None:
     """RFC 9110 wants an integer, and a sub-second remainder rounded down to 0
     invites a client to retry immediately and get denied again."""
-    from air_platform.api.errors import RateLimitedError
+    from air_orchestrator_service.api.errors import RateLimitedError
 
     error = RateLimitedError("slow down", retry_after=0.2)
 

@@ -20,7 +20,7 @@ async def test_health_needs_no_auth_and_no_dependencies(client: httpx.AsyncClien
     assert response.status_code == httpx.codes.OK
     body = response.json()
     assert body["status"] == "ok"
-    assert body["service"] == "air-platform"
+    assert body["service"] == "air-orchestrator-service"
 
 
 @pytest.mark.usefixtures("unreachable_llm", "reachable_infra")
@@ -190,7 +190,7 @@ async def test_metrics_exposes_the_prometheus_payload(client: httpx.AsyncClient)
     assert response.status_code == httpx.codes.OK
     assert response.headers["content-type"].startswith("text/plain")
     # Registered eagerly at import, so the family is present before any turn has run.
-    assert "air_platform_requests_total" in response.text
+    assert "air_orchestrator_service_requests_total" in response.text
 
 
 async def test_metrics_is_outside_the_version_prefix(client: httpx.AsyncClient) -> None:

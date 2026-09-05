@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from air_platform.config import Settings
-from air_platform.prompts.registry import PromptNotFoundError, PromptRegistry
+from air_orchestrator_service.config import Settings
+from air_orchestrator_service.prompts.registry import PromptNotFoundError, PromptRegistry
 
 
 def test_the_direct_route_resolves_to_a_built_in_prompt() -> None:
@@ -34,9 +34,7 @@ def test_an_unknown_route_raises() -> None:
 
 def test_a_pin_to_a_version_that_does_not_exist_raises() -> None:
     registry = PromptRegistry(
-        Settings.model_validate(
-            {"app": {"env": "test"}, "prompts": {"pins": {"direct": "v99"}}}
-        )
+        Settings.model_validate({"app": {"env": "test"}, "prompts": {"pins": {"direct": "v99"}}})
     )
 
     with pytest.raises(PromptNotFoundError):

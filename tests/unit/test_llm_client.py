@@ -12,8 +12,8 @@ import httpx
 import pytest
 import respx
 
-from air_platform.clients.llm import LlmCallError, LlmClient
-from air_platform.config import Settings
+from air_orchestrator_service.clients.llm import LlmCallError, LlmClient
+from air_orchestrator_service.config import Settings
 
 
 def _client(**llm: object) -> LlmClient:
@@ -218,9 +218,7 @@ async def test_chat_passes_a_custom_timeout_through_to_httpx() -> None:
     )
     client = _client()
 
-    await client.chat(
-        model="generative", messages=[{"role": "user", "content": "hi"}], timeout=1.5
-    )
+    await client.chat(model="generative", messages=[{"role": "user", "content": "hi"}], timeout=1.5)
 
     # respx does not expose the resolved timeout directly; the meaningful
     # assertion is that a custom timeout doesn't break the call at all.
@@ -230,7 +228,10 @@ async def test_chat_passes_a_custom_timeout_through_to_httpx() -> None:
 
 @respx.mock
 async def test_chat_forwards_the_bound_request_id() -> None:
-    from air_platform.observability.logging import bind_request_context, clear_request_context
+    from air_orchestrator_service.observability.logging import (
+        bind_request_context,
+        clear_request_context,
+    )
 
     route = respx.post("http://gateway:8083/v1/inference").mock(
         return_value=httpx.Response(200, json={"content": "ok"})

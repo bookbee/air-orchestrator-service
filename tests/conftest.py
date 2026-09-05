@@ -1,6 +1,6 @@
 """Shared fixtures.
 
-Every test builds its app through :func:`air_platform.main.create_app` with explicit
+Every test builds its app through :func:`air_orchestrator_service.main.create_app` with explicit
 settings rather than importing ``main.app``. That keeps a test from depending on the
 ambient environment, and keeps two tests from sharing one app's state.
 
@@ -28,25 +28,25 @@ import pytest
 import respx
 from fastapi import FastAPI
 
-from air_platform.config import Settings
-from air_platform.constants import (
+from air_orchestrator_service.config import Settings
+from air_orchestrator_service.constants import (
     SCOPE_ADMIN_READ,
     SCOPE_CHAT_WRITE,
     SCOPE_QUERY_WRITE,
     SCOPE_SESSION_READ,
     DownstreamService,
 )
-from air_platform.main import create_app
-from air_platform.schemas.common import DependencyStatus
+from air_orchestrator_service.main import create_app
+from air_orchestrator_service.schemas.common import DependencyStatus
 
 TEST_SALT = "test-salt"
 #: Not localhost: a probe that escapes the stubs must fail, not reach a real gateway.
 INFRA_BASE_URL = "http://air-infra.invalid:8080"
 #: Not localhost, for the same reason: escaping the stub must fail loudly.
 LLM_BASE_URL = "http://air-llm.invalid:8083"
-CUSTOMER_KEY = "airp_test_customer"
-BUSINESS_KEY = "airp_test_business"
-NO_SCOPE_KEY = "airp_test_noscope"
+CUSTOMER_KEY = "airo_test_customer"
+BUSINESS_KEY = "airo_test_business"
+NO_SCOPE_KEY = "airo_test_noscope"
 
 
 def digest(raw: str, salt: str = TEST_SALT) -> str:
@@ -112,7 +112,7 @@ def app(settings: Settings) -> FastAPI:
     from the tests that need them. A test that wants the real failure path
     reassigns ``state.llm.chat`` again itself.
     """
-    from air_platform.api.deps import STATE_ATTR
+    from air_orchestrator_service.api.deps import STATE_ATTR
 
     built = create_app(settings)
     state = getattr(built.state, STATE_ATTR)
@@ -141,7 +141,7 @@ def reachable_infra(app: FastAPI) -> Iterator[None]:
     is tested directly in ``test_infra_client.py``, and here we only want readiness
     to see a healthy dependency.
     """
-    from air_platform.api.deps import STATE_ATTR
+    from air_orchestrator_service.api.deps import STATE_ATTR
 
     state = getattr(app.state, STATE_ATTR)
 
@@ -184,7 +184,7 @@ def reachable_llm(app: FastAPI) -> Iterator[None]:
     is tested directly in ``test_llm_client.py``, and here we only want readiness
     to see a healthy dependency.
     """
-    from air_platform.api.deps import STATE_ATTR
+    from air_orchestrator_service.api.deps import STATE_ATTR
 
     state = getattr(app.state, STATE_ATTR)
 
@@ -234,14 +234,14 @@ async def _canned_chat(
     max_tokens: int = 1024,
     json_schema: dict[str, Any] | None = None,
     schema_name: str | None = None,
-    timeout: float | None = None,
+    timeout: float | None = None,  # noqa: ASYNC109 — mirrors LlmClient.chat's signature
 ) -> Any:
     """A deterministic stand-in for ``LlmClient.chat`` — see the ``app``
     fixture. A schema-constrained call (``json_schema`` set) gets one
     placeholder value per declared property rather than the plain canned
     string, so ``TurnEngine._structured_answer`` has real JSON to parse.
     """
-    from air_platform.clients.llm import ChatResult, ChatUsage
+    from air_orchestrator_service.clients.llm import ChatResult, ChatUsage
 
     if json_schema is not None:
         properties = json_schema.get("properties") or {}

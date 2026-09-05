@@ -10,8 +10,8 @@ import httpx
 import pytest
 import respx
 
-from air_platform.clients.infra import InfraClient
-from air_platform.config import Settings
+from air_orchestrator_service.clients.infra import InfraClient
+from air_orchestrator_service.config import Settings
 
 
 def _client(**infra: object) -> InfraClient:

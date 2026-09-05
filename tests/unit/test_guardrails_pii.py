@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from air_platform.guardrails.pii import mask_input, scan_output
+from air_orchestrator_service.guardrails.pii import mask_input, scan_output
 
 # ── Input ─────────────────────────────────────────────────────────────────────
 

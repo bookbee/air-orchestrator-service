@@ -13,10 +13,10 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from air_platform.config import Settings
-from air_platform.constants import CHANNEL_SCOPES, Channel
-from air_platform.main import create_app
-from air_platform.security.api_keys import ApiKeyRecord, ApiKeyStore
+from air_orchestrator_service.config import Settings
+from air_orchestrator_service.constants import CHANNEL_SCOPES, Channel
+from air_orchestrator_service.main import create_app
+from air_orchestrator_service.security.api_keys import ApiKeyRecord, ApiKeyStore
 from tests.conftest import CUSTOMER_KEY, TEST_SALT, auth, digest, key_records
 
 

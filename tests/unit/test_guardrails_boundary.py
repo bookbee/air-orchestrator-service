@@ -3,7 +3,7 @@ system's own instructions."""
 
 from __future__ import annotations
 
-from air_platform.guardrails.boundary import delimit
+from air_orchestrator_service.guardrails.boundary import delimit
 
 
 def test_the_content_is_wrapped_in_a_labelled_tag() -> None:

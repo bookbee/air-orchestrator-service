@@ -1,8 +1,8 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "AIR Platform",
-    "description": "The AIR estate's conversational front door.\n\nSend a message; the platform decides what it needs, gathers it from the specialist\nservices, and streams back a grounded answer. It orchestrates and owns no\ncapability of its own \u2014 retrieval is `air-rag`'s, classification\n`air-classifier`'s, read-only calls `air-tools`', mutations `air-action`'s, and\nmodels and stores `air-infra`'s.\n\n**Two channels, one engine.** `POST /v1/chat` serves public conversational traffic\nthrough the customer gateway; `POST /v1/query` serves internal business queries\nthrough the corporate one, returning schema-validated structured output. They share\nthe pipeline and differ only by profile \u2014 guardrails, output contract, audit sink,\nquota bucket, tool allow-list. The channel comes from your API key, not from a\nheader.\n\n**Mutations are proposed, never performed.** A turn that warrants a write returns a\n`proposal` and changes nothing. Executing it takes a second turn carrying\n`confirm.proposal_id`; prose that merely reads as agreement executes nothing.\n\n**Streaming.** Responses are Server-Sent Events, content-negotiated: send\n`Accept: text/event-stream` to stream, anything else to receive the terminal result\nas one JSON body. Every pipeline stage emits as it completes, bracketed by\n`turn.start` and `turn.end`. Ignore event names you do not recognise \u2014 that is what\nlets token deltas arrive later without a contract change.\n\nErrors are RFC 9457 `application/problem+json`.",
+    "title": "AIR Orchestrator Service",
+    "description": "The AIR estate's conversational front door.\n\nSend a message; the platform decides what it needs, gathers it from the specialist\nservices, and streams back a grounded answer. It orchestrates and owns no\ncapability of its own \u2014 retrieval is `air-rag`'s, classification\n`air-classifier`'s, read-only calls `air-tools`', mutations `air-action`'s, models\n`air-llm`'s, and stores `air-infra`'s.\n\n**Two channels, one engine.** `POST /v1/chat` serves public conversational traffic\nthrough the customer gateway; `POST /v1/query` serves internal business queries\nthrough the corporate one, returning schema-validated structured output. They share\nthe pipeline and differ only by profile \u2014 guardrails, output contract, audit sink,\nquota bucket, tool allow-list. The channel comes from your API key, not from a\nheader.\n\n**Mutations are proposed, never performed.** A turn that warrants a write returns a\n`proposal` and changes nothing. Executing it takes a second turn carrying\n`confirm.proposal_id`; prose that merely reads as agreement executes nothing.\n\n**Streaming.** Responses are Server-Sent Events, content-negotiated: send\n`Accept: text/event-stream` to stream, anything else to receive the terminal result\nas one JSON body. Every pipeline stage emits as it completes, bracketed by\n`turn.start` and `turn.end`. Ignore event names you do not recognise \u2014 that is what\nlets token deltas arrive later without a contract change.\n\nErrors are RFC 9457 `application/problem+json`.",
     "version": "0.1.0"
   },
   "paths": {
@@ -34,7 +34,7 @@
           "system"
         ],
         "summary": "Readiness",
-        "description": "Whether this replica can serve a turn. Gates on air-infra, which is the one dependency without which no answer can be synthesised. Other services are reported for operator visibility but do not affect readiness.",
+        "description": "Whether this replica can serve a turn. Gates on air-llm, which is the one dependency without which no answer can be synthesised. Other services, including air-infra, are reported for operator visibility but do not affect readiness.",
         "operationId": "ready_v1_ready_get",
         "responses": {
           "200": {
@@ -648,6 +648,7 @@
         "type": "string",
         "enum": [
           "air-infra",
+          "air-llm",
           "air-classifier",
           "air-rag",
           "air-tools",
@@ -859,6 +860,10 @@
             "title": "Has Pending Proposal",
             "description": "Whether a mutation is awaiting confirmation. The id is not repeated here."
           },
+          "total_cost_usd": {
+            "type": "number",
+            "title": "Total Cost Usd"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -876,6 +881,7 @@
           "channel",
           "turns",
           "has_pending_proposal",
+          "total_cost_usd",
           "created_at",
           "updated_at"
         ],
@@ -1110,6 +1116,22 @@
             "type": "boolean",
             "title": "Refusal",
             "default": false
+          },
+          "escalated": {
+            "type": "boolean",
+            "title": "Escalated",
+            "default": false
+          },
+          "escalation_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Escalation Ref"
           },
           "degraded": {
             "items": {

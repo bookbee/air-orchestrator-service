@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from air_platform.guardrails.escalation import wants_human
+from air_orchestrator_service.guardrails.escalation import wants_human
 
 
 def test_an_explicit_request_for_a_human_is_detected() -> None:

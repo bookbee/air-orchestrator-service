@@ -7,8 +7,8 @@ import re
 import pytest
 from pydantic import ValidationError
 
-from air_platform.config import Settings
-from air_platform.constants import Channel, DownstreamService, Route
+from air_orchestrator_service.config import Settings
+from air_orchestrator_service.constants import Channel, DownstreamService, Route
 
 
 def _settings(**overrides: object) -> Settings:
@@ -16,7 +16,7 @@ def _settings(**overrides: object) -> Settings:
 
 
 def test_default_port_is_this_services_slot_in_the_port_map() -> None:
-    """8081 is allocated to air-platform in air-infra/README.md.
+    """8081 is allocated to air-orchestrator-service in air-infra/README.md.
 
     Asserted because the whole estate is expected to run at once on one laptop, and
     a drifted default is a collision that only shows up when everything is started.
@@ -190,7 +190,7 @@ def test_turn_ceilings_have_defaults_and_bounds() -> None:
 
 
 def test_semantic_cache_threshold_is_conservative_by_default() -> None:
-    """"Where is order 123" and "where is order 456" are near-identical vectors.
+    """ "Where is order 123" and "where is order 456" are near-identical vectors.
 
     A permissive threshold turns the cost win into a wrong-answer incident, so the
     default errs high (docs/00-plan.md §4 Q5).

@@ -1,6 +1,6 @@
-# air-platform local stack.
+# air-orchestrator-service local stack.
 #
-# This file starts *only* air-platform. Redis, Postgres and Mongo belong to
+# This file starts *only* air-orchestrator-service. Redis, Postgres and Mongo belong to
 # air-infra, which owns them for the whole estate — duplicating them here
 # would give a developer two Redises and two sources of truth about which one
 # holds their sessions. The model gateway is air-llm, its own standalone
@@ -10,7 +10,7 @@
 #
 #   cd ../air-infra && make up     # redis, postgres, mongo             :8080
 #   cd ../air-llm   && make up     # the model gateway                  :8083
-#   cd ../air-platform && make up  # this service                      :8081
+#   cd ../air-orchestrator-service && make up  # this service                      :8081
 #
 # The air-net wiring at the bottom is the three lines air-infra's compose file
 # prescribes for a sibling service. Joining `air-net` as *this* project's default
@@ -27,7 +27,7 @@
 # (`memory/session.py`'s `build_session_store` falls back and logs a warning if
 # asked for `redis` today).
 
-name: air-platform
+name: air-orchestrator-service
 
 services:
   platform:
@@ -39,18 +39,18 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      AIR_PLATFORM__APP__ENV: development
+      AIR_ORCHESTRATOR_SERVICE__APP__ENV: development
       # Container-to-container, so the service name rather than localhost.
-      AIR_PLATFORM__INFRA__BASE_URL: http://gateway:8080
+      AIR_ORCHESTRATOR_SERVICE__INFRA__BASE_URL: http://gateway:8080
       # air-llm is reached over the host — see the module docstring above.
-      AIR_PLATFORM__LLM__BASE_URL: http://host.docker.internal:8083
+      AIR_ORCHESTRATOR_SERVICE__LLM__BASE_URL: http://host.docker.internal:8083
       # air-llm's own .env.example provisions this exact token for
-      # air-platform (AIR_LLM_SECURITY__SERVICE_TOKENS=...,air-platform-dev:
-      # air-platform), so a local checkout of both projects authenticates
+      # air-orchestrator-service (AIR_LLM_SECURITY__SERVICE_TOKENS=...,air-orchestrator-service-dev:
+      # air-orchestrator-service), so a local checkout of both projects authenticates
       # with no edits on either side — the same convention air-client's
       # config.py documents for its own air-llm token.
-      AIR_PLATFORM__LLM__API_KEY: air-platform-dev
-      AIR_PLATFORM__OBS__LOG_FORMAT: json
+      AIR_ORCHESTRATOR_SERVICE__LLM__API_KEY: air-orchestrator-service-dev
+      AIR_ORCHESTRATOR_SERVICE__OBS__LOG_FORMAT: json
     ports: ["8081:8081"]
     healthcheck:
       # Liveness only — /v1/ready would report unready whenever air-llm blinked,

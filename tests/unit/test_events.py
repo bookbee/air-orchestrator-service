@@ -11,9 +11,9 @@ import json
 import httpx
 import pytest
 
-from air_platform.api.sse import format_event, wants_stream
-from air_platform.constants import Channel, EventType
-from air_platform.schemas.events import AnswerDeltaEvent, TurnStartEvent
+from air_orchestrator_service.api.sse import format_event, wants_stream
+from air_orchestrator_service.constants import Channel, EventType
+from air_orchestrator_service.schemas.events import AnswerDeltaEvent, TurnStartEvent
 from tests.conftest import BUSINESS_KEY, CUSTOMER_KEY, auth
 
 
@@ -115,7 +115,7 @@ async def test_engine_failure_becomes_an_error_event_then_turn_end(
     client: httpx.AsyncClient, app: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Headers are already on the wire, so there is no status left to change."""
-    from air_platform.engine.turn import TurnEngine
+    from air_orchestrator_service.engine.turn import TurnEngine
 
     def boom(*_: object, **__: object) -> None:
         raise RuntimeError("stage exploded")
@@ -134,7 +134,7 @@ async def test_engine_failure_becomes_an_error_event_then_turn_end(
 async def test_an_error_event_never_leaks_internals(
     client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from air_platform.engine.turn import TurnEngine
+    from air_orchestrator_service.engine.turn import TurnEngine
 
     def boom(*_: object, **__: object) -> None:
         raise RuntimeError("connection string postgres://user:hunter2@db/air")
