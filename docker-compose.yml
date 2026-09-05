@@ -8,9 +8,9 @@
 # of it (see README.md's Quickstart) — reached over the host exactly like
 # air-classifier reaches it.
 #
-#   cd ../air-infra && make up     # redis, postgres, mongo             :8080
-#   cd ../air-llm   && make up     # the model gateway                  :8083
-#   cd ../air-orchestrator-service && make up  # this service                      :8081
+#   cd ../air-infra && make up  # redis, postgres, mongo  :8080
+#   cd ../air-llm   && make up  # the model gateway       :8083
+#   make up                     # this service            :8081
 #
 # The air-net wiring at the bottom is the three lines air-infra's compose file
 # prescribes for a sibling service. Joining `air-net` as *this* project's default

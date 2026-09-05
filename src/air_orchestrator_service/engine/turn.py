@@ -108,8 +108,8 @@ _STUBBED: Final[dict[Stage, str]] = {
 
 #: air-llm routing alias for synthesis — a role-scoped alias
 #: (`routing.yaml`), not a literal model name, matching the per-role LLM
-#: endpoint pattern this session's design review adopted from the reference
-#: diagram (air-orchestrator-service/docs/01-hld.md's "LLM Inference Service" note).
+#: inference pattern in docs/01-hld.md §1 ("the enterprise reference diagram's
+#: per-role LLM Inference layer"). Each alias is a config edit in air-llm.
 _SYNTHESIS_MODEL: Final[str] = "generative"
 
 _SYNTHESIS_MAX_TOKENS: Final[int] = 800

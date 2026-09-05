@@ -1,6 +1,6 @@
 # AIR Orchestrator Service — Plan
 
-**Status:** Baseline · **Owner:** Vikas Roy · **Last reviewed:** 2026-09-05
+**Status:** Baseline · **Owner:** Vikas Roy · **Last reviewed:** 2026-09-06
 **Companion docs:** [HLD](01-hld.md) · [LLD](02-lld.md)
 **Source:** *AIR-PLATFORM — High-Level Architecture, Rev A*, and its independent-review
 items 01–08. The HLD reconciles that diagram against the AIR repositories.

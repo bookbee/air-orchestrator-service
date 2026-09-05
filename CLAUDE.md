@@ -34,8 +34,13 @@ metric namespace all match it literally:
 | metrics | `air_orchestrator_service_turns_total` |
 | API keys | `airo_` prefix (`airo_local_customer_key`) |
 
-This is the one service in the estate carrying a `-service` suffix — siblings are
-`air_classifier` / `AIR_CLASSIFIER__`, `air_rag` / `AIR_RAG__`. Don't "fix" it to match them.
+The estate is mid-migration to `<name>_service` package names: `air-classifier` already ships
+`air_classifier_service`, while `air-rag`, `air-tools`, `air-llm` and `air-infra` are still
+`air_<name>`. Our **package** name follows air-classifier.
+
+Where we differ from air-classifier is the env prefix and metric namespace: it keeps
+`AIR_CLASSIFIER__` / `air_classifier_*` (no `_service`), we spell the repo name in full. That
+is a deliberate choice, not drift — don't "align" it without asking.
 
 ## Architecture
 

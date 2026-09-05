@@ -1,6 +1,6 @@
 # AIR Orchestrator Service — Low-Level Design
 
-**Status:** Baseline · **Last reviewed:** 2026-09-05 · **Companion docs:** [Plan](00-plan.md) · [HLD](01-hld.md)
+**Status:** Baseline · **Last reviewed:** 2026-09-06 · **Companion docs:** [Plan](00-plan.md) · [HLD](01-hld.md)
 
 This document is the implementation contract. Code follows it; where it turns out to be
 wrong, the document is amended rather than silently diverged from.
@@ -109,9 +109,14 @@ top-level `environment` of `local|staging|prod`, but this is a service, and matc
 service convention is what keeps a single `air-client` target block coherent.
 
 The package, env prefix and metric namespace all spell the repo name in full
-(`air_orchestrator_service`, `AIR_ORCHESTRATOR_SERVICE__`, `air_orchestrator_service_*`). That
-makes this the one service in the estate carrying a `-service` suffix, where siblings are
-`air_classifier` / `AIR_CLASSIFIER__`; it is deliberate, not drift.
+(`air_orchestrator_service`, `AIR_ORCHESTRATOR_SERVICE__`, `air_orchestrator_service_*`).
+
+The estate is mid-migration on this point. `air-classifier` already ships an
+`air_classifier_service` package but kept `AIR_CLASSIFIER__` and `air_classifier_*` for its
+env prefix and metrics; `air-rag`, `air-tools`, `air-llm` and `air-infra` are still
+`air_<name>` throughout. This repo's package name follows air-classifier; its prefix and
+metric namespace are spelled in full. Both are deliberate, and worth revisiting only as one
+estate-wide decision rather than per repo.
 
 | Group | Keys | Notes |
 | --- | --- | --- |
@@ -372,7 +377,7 @@ the effective timeout. Request id and tenant propagate on every call.
 
 **Every AIR service is a service dependency, not a package one.** `clients/llm.py` and
 `clients/infra.py` speak HTTP over `httpx` rather than importing a client SDK. That follows
-air-classifier's precedent — its [`providers/infra_provider.py`](../../air-classifier/src/air_classifier/providers/infra_provider.py)
+air-classifier's precedent — its [`providers/air_llm_provider.py`](../../air-classifier/src/air_classifier_service/providers/air_llm_provider.py)
 does the same — and avoids a build-time coupling between repos that a path dependency would
 create, given no SDK is published anywhere. The contract is the other service's published API;
 `httpx` is the transport. The trade is real: a change to a downstream's request shape is not
@@ -385,7 +390,7 @@ be synthesised right now."
 
 `DownstreamClient` (`clients/base.py`) and the five capability clients are **Phase 3**. The
 guard/breaker/bulkhead primitives are to be **lifted from air-classifier's
-[`resilience/`](../../air-classifier/src/air_classifier/resilience/)** rather than rewritten —
+[`resilience/`](../../air-classifier/src/air_classifier_service/resilience/)** rather than rewritten —
 fan-out here has the same failure modes its tier ladder does, and a second implementation
 would drift.
 
@@ -402,7 +407,7 @@ against services that are still empty repos (Plan §6).
 
 `RequestContextMiddleware` → `AccessLogMiddleware` → `BodySizeLimitMiddleware`, as raw ASGI
 middleware, following air-classifier's
-[`api/middleware.py`](../../air-classifier/src/air_classifier/api/middleware.py) — same
+[`api/middleware.py`](../../air-classifier/src/air_classifier_service/api/middleware.py) — same
 reasoning applies here and the implementation is worth lifting rather than rewriting.
 
 One addition it does not have: the access log must record a **streaming** response's true

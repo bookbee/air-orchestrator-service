@@ -11,11 +11,11 @@ requires-python = ">=3.12"
 license = { text = "Proprietary" }
 authors = [{ name = "Vikas Roy" }]
 
-# air-infra is a *service* dependency, reached over HTTP, not a package one.
-# air-classifier set that precedent (providers/infra_provider.py talks to the
-# gateway with httpx rather than importing air_infra_client), and following it
-# keeps the two repos free of a build-time coupling that a path dependency would
-# create. The contract is air-infra's published API; httpx is the transport.
+# Other AIR services are *service* dependencies, reached over HTTP, not package
+# ones. air-classifier set that precedent (providers/air_llm_provider.py talks to
+# air-llm with httpx rather than importing a client SDK), and following it keeps
+# the repos free of a build-time coupling that a path dependency would create.
+# The contract is the other service's published API; httpx is the transport.
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
@@ -51,7 +51,7 @@ dev = [
 air-orchestrator-service = "air_orchestrator_service.__main__:main"
 
 [project.urls]
-Repository = "https://github.com/air/air-orchestrator-service"
+Repository = "https://github.com/bookbee/air-orchestrator-service"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/air_orchestrator_service"]
