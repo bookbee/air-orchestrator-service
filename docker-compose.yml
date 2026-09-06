@@ -30,8 +30,14 @@
 name: air-orchestrator-service
 
 services:
-  platform:
+  # Named for the repo, like every sibling service (air-rag, air-tools,
+  # air-classifier-service), so the container reads `air-orchestrator-service-1`
+  # rather than an anonymous `platform-1` in `docker ps` and Docker Desktop.
+  # `image:` is pinned for the same reason: without it compose derives
+  # `<project>-<service>`, which is not the name the estate tags by.
+  air-orchestrator-service:
     build: .
+    image: air-orchestrator-service:local
     restart: unless-stopped
     env_file: [.env]
     # Lets the container reach air-llm on the host — the same pattern

@@ -110,7 +110,7 @@ up: require-air-net ## Start this service in docker (needs air-infra's stack up)
 .PHONY: status
 status: ## Report this service's own readiness
 	@sleep 2
-	@printf 'platform: http://localhost:$(PORT)/v1/health\n'
+	@printf 'health:   http://localhost:$(PORT)/v1/health\n'
 	@code=$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:$(PORT)/v1/ready 2>/dev/null); \
 	if [ "$$code" = "200" ]; then \
 		printf 'ready:    yes — air-llm reachable\n'; \
@@ -128,7 +128,7 @@ down: ## Stop the container
 
 .PHONY: logs
 logs: ## Tail container logs
-	$(COMPOSE) logs -f platform
+	$(COMPOSE) logs -f air-orchestrator-service
 
 .PHONY: clean
 clean: ## Remove the venv and tool caches

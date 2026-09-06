@@ -4,35 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-```bash
-make dev                   # .venv (python3.12) + `pip install -e ".[all,dev]"`
-make env                   # .env from .env.example (seeds one dev API key per channel)
-make run                   # uvicorn with reload on :8081
-make check                 # ruff + mypy --strict + pytest  ← run before calling work done
-make fmt                   # ruff format + ruff check --fix
-make cov                   # pytest with term-missing coverage
-make openapi               # regenerate docs/openapi.json  ← after any route/schema change
-make up / status / logs / down   # docker; `up` requires air-infra's `air-net` to exist
-```
+`make help` lists every target. Two that are directives rather than conveniences: run
+`make check` (ruff + mypy --strict + pytest) before calling work done, and `make openapi`
+after any route or schema change.
 
 Single test: `.venv/bin/pytest tests/unit/test_turns.py::test_name -q` (`pythonpath=["src"]`
 and `asyncio_mode=auto` come from `pyproject.toml`, so no env setup is needed).
 
-The 178 tests are hermetic — no service needs to be running. `make run` needs nothing either;
+The tests are hermetic — no service needs to be running. `make run` needs nothing either;
 the service boots and serves `/v1/health` with every downstream down.
 
 ## Naming
 
 Repo and distribution are `air-orchestrator-service`; the Python package, env prefix and
-metric namespace all match it literally:
-
-| | |
-| --- | --- |
-| package | `src/air_orchestrator_service/` |
-| imports | `from air_orchestrator_service.config import Settings` |
-| env prefix | `AIR_ORCHESTRATOR_SERVICE__APP__PORT=8081` |
-| metrics | `air_orchestrator_service_turns_total` |
-| API keys | `airo_` prefix (`airo_local_customer_key`) |
+metric namespace all match it literally, as does the `airo_` API-key prefix.
 
 The estate is mid-migration to `<name>_service` package names: `air-classifier` already ships
 `air_classifier_service`, while `air-rag`, `air-tools`, `air-llm` and `air-infra` are still
@@ -75,7 +60,7 @@ refactor:
    in the in-memory store, because that key shape is what the Phase 2b Redis backend inherits.
    Absent-vs-not-yours are deliberately indistinguishable to the caller (both 404).
 
-### The turn engine (`engine/turn.py`, ~780 lines — the centre of the service)
+### The turn engine (`engine/turn.py` — the centre of the service)
 
 Stages run in `constants.Stage` order: `guardrails_in → context → cache → classify → plan →
 gather → synthesise → guardrails_out → persist`. Each emits a `stage` event with a
@@ -115,10 +100,9 @@ exist.
 
 ## Conventions
 
-- **mypy `strict` on `src`, ruff at line-length 100** with `S` (bandit), `T20` (no `print`),
-  `ASYNC`, `B`, `SIM`, `UP` enabled. Structured logging via `structlog` (`get_logger`), never
-  `print`. The long package name puts multi-name imports over 100 chars — let `make fmt`
-  wrap them.
+- **Structured logging via `structlog` (`get_logger`), never `print`.** The lint and type
+  settings live in `pyproject.toml`; the long package name puts multi-name imports over the
+  line limit — let `make fmt` wrap them.
 - **Module docstrings carry the rationale, not just the summary.** Nearly every module
   explains *why it is shaped this way* and what breaks if changed (why raw ASGI middleware,
   why SSE over WebSocket, why `OrjsonResponse` costs the pydantic fast path). Match that, and
