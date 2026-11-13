@@ -7,9 +7,11 @@
 **`clients/classifier.py`** — `ClassifierClient`, built only when `downstream.classifier` is
 configured, so "absent" is `None` on `AppState` rather than a client that always fails. One
 method, `classify(text, *, tenant, timeout_s)`, which posts the masked text with
-`options.latency_budget_ms` set to the same bound as the HTTP timeout. That way air-classifier's
-ladder stops climbing before this service gives up on it, and a slow cloud tier yields a
-cheaper verdict rather than a timeout. It returns a narrow `Classification`: only the fields
+`options.latency_budget_ms` set to the HTTP timeout less 250 ms of response headroom. That way
+air-classifier's ladder stops climbing, and its fallback verdict arrives, before this service
+gives up on it, so a slow cloud tier yields a cheaper verdict rather than a timeout. The
+classifier answers 10–25 ms after its budget, so a budget *equal* to the timeout always loses
+that race; the first cut did exactly that. It returns a narrow `Classification`: only the fields
 this service reads, `extra="ignore"`, labels as plain strings. A new label in air-classifier's
 vocabulary is not a contract break here. Every failure becomes one `ClassifierError`.
 

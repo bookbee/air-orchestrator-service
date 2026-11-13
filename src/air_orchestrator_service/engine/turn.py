@@ -46,8 +46,8 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any, Final
 
-from air_orchestrator_service.clients.classifier import MIN_BUDGET_MS as MIN_CLASSIFY_BUDGET_MS
 from air_orchestrator_service.clients.classifier import (
+    MIN_CALL_MS,
     ClassifierClient,
     ClassifierError,
     label_slug,
@@ -645,7 +645,7 @@ class TurnEngine:
             detail = "not used on the business channel"
         else:
             bound_s = self._classifier.bound_s(_remaining(deadline_at))
-            if bound_s * 1000 < MIN_CLASSIFY_BUDGET_MS:
+            if bound_s * 1000 < MIN_CALL_MS:
                 # Ours, not the classifier's: no `downstream` is named.
                 status, detail = StageStatus.DEGRADED, "turn deadline too close to classify"
             else:

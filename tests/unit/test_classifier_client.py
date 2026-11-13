@@ -14,6 +14,8 @@ import structlog
 from pydantic import SecretStr
 
 from air_orchestrator_service.clients.classifier import (
+    MIN_CALL_MS,
+    RESPONSE_HEADROOM_MS,
     ClassifierClient,
     ClassifierError,
     label_slug,
@@ -83,16 +85,24 @@ async def test_the_request_carries_key_request_id_and_tenant(
     assert body["text"] == "where is my parcel"
 
 
-@pytest.mark.parametrize(("timeout_s", "budget_ms"), [(2.0, 2000), (0.01, 50), (90.0, 30_000)])
-async def test_the_latency_budget_matches_the_bound(
+@pytest.mark.parametrize(
+    ("timeout_s", "budget_ms"), [(5.0, 4750), (2.0, 1750), (0.3, 50), (0.01, 50), (90.0, 30_000)]
+)
+async def test_the_latency_budget_leaves_headroom_below_the_timeout(
     classifier: ClassifierClient, mock: respx.MockRouter, timeout_s: float, budget_ms: int
 ) -> None:
-    """REQ-CLS-004: the ladder is told the bound, clamped to what it accepts."""
+    """REQ-CLS-004: the ladder's budget ends ``RESPONSE_HEADROOM_MS`` before this
+    client stops waiting, because air-classifier answers just *after* its budget —
+    a budget equal to the timeout timed out on every turn that climbed to the
+    cloud tier. Clamped to what the classifier accepts."""
     route = mock.post(_URL).mock(return_value=httpx.Response(200, json=verdict()))
 
     await classifier.classify("hi", tenant="t", timeout_s=timeout_s)
 
-    assert json.loads(route.calls.last.request.content)["options"]["latency_budget_ms"] == budget_ms
+    sent = json.loads(route.calls.last.request.content)["options"]["latency_budget_ms"]
+    assert sent == budget_ms
+    if timeout_s * 1000 >= MIN_CALL_MS:
+        assert sent + RESPONSE_HEADROOM_MS <= timeout_s * 1000
 
 
 def test_the_bound_never_exceeds_the_configured_timeout(classifier: ClassifierClient) -> None:

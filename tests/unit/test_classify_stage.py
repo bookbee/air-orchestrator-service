@@ -89,10 +89,22 @@ async def test_the_classifier_sees_only_masked_text(
     assert "4567" not in sent
 
 
+@pytest.mark.parametrize(
+    ("deadline_ms", "delay_s"),
+    [
+        (100, 0.15),  # the deadline is already gone
+        (300, 0.1),  # ~200 ms left: more than the classifier's minimum, less than a call
+    ],
+)
 async def test_no_time_left_skips_the_call_without_blaming_the_classifier(
-    app: FastAPI, client: httpx.AsyncClient, mock: respx.MockRouter
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    mock: respx.MockRouter,
+    deadline_ms: int,
+    delay_s: float,
 ) -> None:
-    """REQ-CLS-004: a turn that spent its deadline before `CLASSIFY` does not call."""
+    """REQ-CLS-004: with less than a budget plus its response headroom left before
+    `CLASSIFY`, the call is not made."""
     import asyncio
 
     from air_orchestrator_service.api.deps import STATE_ATTR
@@ -102,14 +114,14 @@ async def test_no_time_left_skips_the_call_without_blaming_the_classifier(
     real_create = sessions.create
 
     async def slow_create(*args: Any, **kwargs: Any) -> Any:
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(delay_s)
         return await real_create(*args, **kwargs)
 
     sessions.create = slow_create
     response = await client.post(
         "/v1/chat",
         headers=auth(CUSTOMER_KEY),
-        json={"message": "hi", "options": {"deadline_ms": 100}},
+        json={"message": "hi", "options": {"deadline_ms": deadline_ms}},
     )
     body = response.json()
     stage = _classify_stage(body)

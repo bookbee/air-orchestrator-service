@@ -67,7 +67,7 @@ answers exactly as it does today, and its status is unaffected.
 | `REQ-CLS-001` | MUST | With air-classifier configured, a customer-channel turn that reaches `CLASSIFY` makes exactly one `POST /v1/classify` call, and the stage reports `ok` with the verdict's sentiment, intent and urgency in its `detail`. |
 | `REQ-CLS-002` | MUST | The text sent is the turn's input-masked text, never the raw message. |
 | `REQ-CLS-003` | MUST | The call carries the configured key as `X-API-Key`, the turn's request id as `X-Request-ID`, and the tenant in `metadata`. Its body contains only fields air-classifier's `extra="forbid"` request accepts. |
-| `REQ-CLS-004` | MUST | The call is bounded by the lesser of the classifier's `timeout_ms` and the time left before the turn deadline, and passes that bound as `options.latency_budget_ms` so the ladder stops itself first. With too little time left it is not made at all, and the stage degrades without naming the classifier. |
+| `REQ-CLS-004` | MUST | The call is bounded by the lesser of the classifier's `timeout_ms` and the time left before the turn deadline, and passes that bound **less a fixed response headroom of 250 ms** as `options.latency_budget_ms`. air-classifier answers with its fallback verdict just *after* its budget runs out, so a budget equal to the bound would always lose the race to this service's timeout. With less than 300 ms left (its 50 ms minimum budget plus the headroom) the call is not made at all, and the stage degrades without naming the classifier. |
 | `REQ-CLS-005` | MUST | When air-classifier is unreachable, times out, answers non-200, or answers with a body this service cannot read, `CLASSIFY` reports `degraded` naming `air-classifier`, and the turn still answers with the status it would otherwise have had. |
 | `REQ-CLS-006` | MUST | With air-classifier not configured, `CLASSIFY` reports `skipped` with a reason and no call is made. |
 | `REQ-CLS-007` | MUST | On the business channel, `CLASSIFY` reports `skipped` and no call is made. |
@@ -77,6 +77,12 @@ answers exactly as it does today, and its status is unaffected.
 | `REQ-CLS-011` | SHOULD | A verdict with `requires_human` or low sentiment confidence escalates the turn. |
 | `REQ-CLS-012` | SHOULD | The verdict calibrates the tone of the synthesised answer. |
 | `REQ-CLS-013` | SHOULD | Transient failures are retried under a shared circuit breaker. |
+
+**Revised 2026-11-14 (`REQ-CLS-004`).** The first version passed the bound itself as the
+budget. In console testing against a live air-classifier, any turn that used its whole budget
+climbing to the cloud tier timed out here: the classifier returned its fallback verdict 10–25 ms
+after the budget, by which point this service had already stopped waiting. The headroom makes
+"the ladder stops itself first" true.
 
 ## 6. Acceptance criteria
 
@@ -103,7 +109,7 @@ answers exactly as it does today, and its status is unaffected.
 | Not configured | `CLASSIFY` `skipped`, "air-classifier is not configured" | unchanged |
 | Business channel | `CLASSIFY` `skipped`, "not used on the business channel" | unchanged |
 | Unreachable / timeout / non-200 / unreadable body | `CLASSIFY` `degraded`, `downstream: air-classifier` | unchanged |
-| Less than 50 ms left before the deadline | `CLASSIFY` `degraded`, no downstream named; no call | unchanged |
+| Less than 300 ms left before the deadline | `CLASSIFY` `degraded`, no downstream named; no call | unchanged |
 | air-classifier itself degraded (`degraded: true` in the verdict) | `CLASSIFY` `ok`; detail says `classifier_degraded` | unchanged |
 
 "Unchanged" is deliberate (HLD §7: "Turn unaffected"). A degraded `CLASSIFY` still names
@@ -130,7 +136,7 @@ contribute, not whether the answer suffered.
 | `REQ-CLS-001` | `tests/unit/test_classify_stage.py::test_a_customer_turn_is_classified` · `tests/integration/test_classifier_wiring.py::test_a_customer_turn_is_classified_through_the_classifier` |
 | `REQ-CLS-002` | `tests/unit/test_classify_stage.py::test_the_classifier_sees_only_masked_text` |
 | `REQ-CLS-003` | `tests/unit/test_classifier_client.py::test_the_request_carries_key_request_id_and_tenant` · `tests/integration/test_classifier_wiring.py::test_a_customer_turn_is_classified_through_the_classifier` |
-| `REQ-CLS-004` | `tests/unit/test_classifier_client.py::test_the_latency_budget_matches_the_bound` · `tests/unit/test_classify_stage.py::test_no_time_left_skips_the_call_without_blaming_the_classifier` |
+| `REQ-CLS-004` | `tests/unit/test_classifier_client.py::test_the_latency_budget_leaves_headroom_below_the_timeout` · `tests/unit/test_classify_stage.py::test_no_time_left_skips_the_call_without_blaming_the_classifier` |
 | `REQ-CLS-005` | `tests/unit/test_classifier_client.py::test_failures_raise_a_classifier_error` · `tests/unit/test_classify_stage.py::test_a_failing_classifier_degrades_the_stage_not_the_turn` |
 | `REQ-CLS-006` | `tests/unit/test_classify_stage.py::test_an_unconfigured_classifier_is_skipped` |
 | `REQ-CLS-007` | `tests/unit/test_classify_stage.py::test_the_business_channel_is_not_classified` |

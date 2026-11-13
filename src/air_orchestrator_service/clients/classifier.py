@@ -13,11 +13,15 @@ would make the two repos' release order matter. The cost is that a label is *unt
 downstream text*, so it is rendered into this service's output (stage detail, logs) only
 through :func:`label_slug`.
 
-**Why the latency budget equals the timeout.** air-classifier's ladder climbs from rules
-to a cloud LLM, and ``options.latency_budget_ms`` is its own governor on how far. Passing
-the same bound this client will wait means the ladder stops itself and returns a cheaper
-verdict before this client would abandon the call, instead of being cut off mid-climb
-with nothing to show for the tiers already paid for.
+**Why the latency budget is the timeout less a headroom.** air-classifier's ladder
+climbs from rules to a cloud LLM, and ``options.latency_budget_ms`` is its own governor on
+how far. When the budget runs out, the ladder stops and returns the best verdict it has,
+but that response lands *after* the budget, 10 to 25 ms later on a laptop and more across a
+network. So the budget is this client's timeout less :data:`RESPONSE_HEADROOM_MS`. The
+ladder then stops, and its verdict arrives, before this client would abandon the call,
+rather than the call being cut off mid-climb with nothing to show for the tiers already
+paid for. A budget equal to the timeout loses that race every time the ladder uses its
+whole budget (spec 0005, ``REQ-CLS-004``).
 
 **Why one attempt.** The stage degrades softly (spec 0005 §7), and retries with a
 circuit breaker belong in the shared ``clients/base.py`` that Phase 3 lifts from
@@ -46,15 +50,27 @@ from air_orchestrator_service.constants import (
 from air_orchestrator_service.observability import metrics
 from air_orchestrator_service.observability.logging import current_request_id, get_logger
 
-__all__ = ["Classification", "ClassifierClient", "ClassifierError", "label_slug"]
+__all__ = [
+    "MIN_CALL_MS",
+    "RESPONSE_HEADROOM_MS",
+    "Classification",
+    "ClassifierClient",
+    "ClassifierError",
+    "label_slug",
+]
 
 logger = get_logger(__name__)
 
 _SERVICE: Final = DownstreamService.CLASSIFIER
 _CLASSIFY_PATH: Final[str] = "/v1/classify"
 #: air-classifier's ``Options.latency_budget_ms`` bounds (``ge=50, le=30_000``).
-MIN_BUDGET_MS: Final[int] = 50
+_MIN_BUDGET_MS: Final[int] = 50
 _MAX_BUDGET_MS: Final[int] = 30_000
+#: Time left between the classifier's budget expiring and this client's timeout, for
+#: its fallback verdict to arrive. About ten times the overrun measured locally.
+RESPONSE_HEADROOM_MS: Final[int] = 250
+#: The shortest bound worth a call: the classifier's minimum budget plus the headroom.
+MIN_CALL_MS: Final[int] = _MIN_BUDGET_MS + RESPONSE_HEADROOM_MS
 _LABEL_SHAPE: Final = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 
 
@@ -145,7 +161,9 @@ class ClassifierClient:
     async def classify(self, text: str, *, tenant: str, timeout_s: float) -> Classification:
         """One verdict on ``text`` (already input-masked by the caller), or raise
         :class:`ClassifierError`."""
-        budget_ms = max(MIN_BUDGET_MS, min(_MAX_BUDGET_MS, int(timeout_s * 1000)))
+        budget_ms = max(
+            _MIN_BUDGET_MS, min(_MAX_BUDGET_MS, int(timeout_s * 1000) - RESPONSE_HEADROOM_MS)
+        )
         body: dict[str, Any] = {
             "text": text,
             # Echoed back and never interpreted by air-classifier: the tenant
