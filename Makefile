@@ -75,6 +75,11 @@ typecheck: ## Mypy (strict)
 trace: ## Check every spec requirement names a test that exists
 	$(PY) tools/trace.py
 
+.PHONY: prompt-review
+prompt-review: ## Run the customer-care review set against a live service (paid model calls)
+	$(PY) tools/prompt_review.py --base-url $(or $(BASE_URL),http://127.0.0.1:8081) \
+		--key $(or $(KEY),airo_local_customer_key) $(if $(ONLY),--only $(ONLY))
+
 .PHONY: spec
 spec: ## Scaffold a new spec: make spec NAME=my-feature
 	@test -n "$(NAME)" || { echo "usage: make spec NAME=my-feature"; exit 1; }

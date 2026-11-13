@@ -46,6 +46,7 @@ from air_orchestrator_service.clients.model_gateway import ModelGatewayClient
 from air_orchestrator_service.config import Settings, get_settings
 from air_orchestrator_service.memory.session import build_session_store
 from air_orchestrator_service.observability.logging import configure_logging, get_logger
+from air_orchestrator_service.prompts.registry import PromptRegistry
 from air_orchestrator_service.security.api_keys import ApiKeyStore
 
 __all__ = ["OrjsonResponse", "app", "create_app"]
@@ -168,6 +169,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Fallible construction, before the server exists. An unparseable key file is a
     # deployment defect and must fail loudly at boot, not as a 401 in production.
     key_store = ApiKeyStore.load(resolved)
+    # Same rule for prompt pins: a stale pin is a deployment defect (spec 0006).
+    PromptRegistry(resolved).validate_pins()
 
     state = AppState(
         settings=resolved,

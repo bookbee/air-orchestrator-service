@@ -90,7 +90,7 @@ gather → synthesise → guardrails_out → persist`. Each emits a `stage` even
 on" means. `blocked` (a guardrail refusing) is deliberately distinct from `degraded` (a
 downstream coping) so a refusal spike does not look like an outage.
 
-Real today: guardrails both ways, prompt registry, synthesis via `ModelGatewayClient.generate`
+Real today: guardrails both ways, per-channel prompts (spec 0006), synthesis via `ModelGatewayClient.generate`
 (JSON callers) or `.stream` (SSE callers, as `answer.delta` through `pii.StreamRedactor` —
 spec 0004), `CLASSIFY` via air-classifier when configured (customer channel, fail-soft — spec
 0005), per-turn and per-session cost ceilings, and a turn deadline that bounds every downstream
@@ -115,6 +115,16 @@ Five independent pure-function modules — `injection`, `scope`, `pii`, `boundar
 channel, from `GuardrailSettings.customer` / `.business`, which is what invariant 1 protects.
 `boundary.delimit` demarcates anything that did not originate in this service's own code
 before it reaches a prompt, and the prompt version used is logged with the turn.
+
+### Prompts (spec 0006)
+
+Each channel synthesises with its own system prompt — `customer_care` on `/v1/chat`,
+`business_analyst` on `/v1/query` — picked from `Principal.channel` (`prompts.prompt_for`),
+never from the request. A persona cannot be set per message: customer text arrives inside
+`boundary.delimit` as data. Brand and assistant names are settings
+(`prompts.persona.*`); the rules stay in `prompts/registry.py`. A prompt change is a new
+version, and **`make prompt-review`** (live, paid, not in `make check`) runs the multi-turn
+review set in `evals/prompts/` before and after it — read the transcripts, not just the flags.
 
 ### Contracts that are public surface
 

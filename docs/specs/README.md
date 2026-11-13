@@ -95,6 +95,7 @@ and gains `**Status:** Superseded by NNNN` — the id is a permanent address.
 | `MGW` | [0003 — air-model-gateway integration](0003-model-gateway/spec.md) |
 | `STRM` | [0004 — streaming the answer](0004-answer-streaming/spec.md) |
 | `CLS` | [0005 — air-classifier client](0005-classifier-client/spec.md) |
+| `PRM` | [0006 — channel prompts](0006-channel-prompts/spec.md) |
 
 Ids are never reused or renumbered. A withdrawn requirement stays in the table marked
 `Withdrawn`, because commit messages and test docstrings still point at it.

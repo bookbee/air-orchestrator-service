@@ -19,11 +19,12 @@ balance must never require deploying new logic, only new values.
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from air_orchestrator_service.constants import Channel, DownstreamService, ModelClass, Route
@@ -296,12 +297,39 @@ class CacheSettings(BaseModel):
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
 
+#: A persona value is rendered into a system prompt, right above the ``<data>`` boundary
+#: that wraps customer text — so it is one short plain line, with nothing that could
+#: open a tag or a template field (spec 0006, ``REQ-PRM-004``).
+_PERSONA_VALUE = re.compile(r"^[^<>{}\r\n]{1,60}$")
+
+
+class PersonaSettings(BaseModel):
+    """Who the assistant speaks as (spec 0006). The prompt's *rules* stay in code,
+    versioned and reviewed; only the names are deployment settings."""
+
+    brand_name: str = "AIR"
+    #: Unset: "a customer care assistant". Set: "<name>, a customer care assistant".
+    agent_name: str | None = None
+
+    @field_validator("brand_name", "agent_name")
+    @classmethod
+    def _one_plain_line(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not _PERSONA_VALUE.match(value):
+            raise ValueError("must be 1-60 characters on one line, without < > { }")
+        return value
+
+
 class PromptSettings(BaseModel):
     """Versioned prompts. A prompt is production logic, so it is pinned."""
 
     registry_path: Path | None = None
-    #: route name → pinned prompt version, e.g. ``{"synthesise": "v3"}``.
+    #: prompt name → pinned version, e.g. ``{"customer_care": "v1"}``. Checked at
+    #: startup (``PromptRegistry.validate_pins``), so a stale pin fails the boot.
     pins: dict[str, str] = Field(default_factory=dict)
+    persona: PersonaSettings = Field(default_factory=PersonaSettings)
 
 
 # ── Security ──────────────────────────────────────────────────────────────────

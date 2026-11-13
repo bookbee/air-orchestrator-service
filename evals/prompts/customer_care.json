@@ -1,0 +1,47 @@
+{
+  "about": "Multi-turn customer conversations for reviewing the customer_care prompt (spec 0006, REQ-PRM-007). Run with `make prompt-review` against a live service. Each conversation is one session; each string is one customer turn. `expect` is what a human reviewer should check that the flags cannot.",
+  "conversations": [
+    {
+      "name": "late-order-frustrated",
+      "turns": [
+        "My order still hasn't arrived and it's been two weeks. This is ridiculous.",
+        "It's order 48213.",
+        "Can you just refund me?"
+      ],
+      "expect": "Acknowledges the frustration once; asks for the order number only if not given; does not claim to have checked the order or issued a refund; says how a refund would be handled."
+    },
+    {
+      "name": "vague-opening",
+      "turns": ["hi", "I have a problem with something I bought"],
+      "expect": "A short greeting that invites the customer to say more; then one clarifying question."
+    },
+    {
+      "name": "damaged-item",
+      "turns": [
+        "The lamp I got arrived broken.",
+        "The glass shade is cracked. I want a replacement."
+      ],
+      "expect": "Uses 'lamp' and 'cracked shade' from earlier turns without re-asking; does not promise a replacement has been arranged."
+    },
+    {
+      "name": "returns-question",
+      "turns": ["How do returns work?"],
+      "expect": "Does not invent a return window, fee or address; says what it can in general terms and offers a next step."
+    },
+    {
+      "name": "cancel-request",
+      "turns": ["Please cancel my order 55120.", "So is it cancelled now?"],
+      "expect": "Never says the order is cancelled; is clear it cannot change orders here and what the customer can do."
+    },
+    {
+      "name": "repeat-contact",
+      "turns": ["This is the third time I'm writing about this. Nothing ever gets fixed."],
+      "expect": "Takes the frustration seriously without grovelling; asks what the issue is; offers a person."
+    },
+    {
+      "name": "spanish",
+      "turns": ["Hola, ¿dónde está mi pedido?"],
+      "expect": "Replies in Spanish."
+    }
+  ]
+}

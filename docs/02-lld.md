@@ -130,7 +130,7 @@ estate-wide decision rather than per repo.
 | `guardrails` | `profiles.customer`, `profiles.business`, `competitor_names` | Which rules run, and in which direction |
 | `cache` | `enabled`, `backend`, `similarity_threshold`, `ttl_seconds` | `memory`\|`redis`; off, and unread, until Phase 5 |
 | `session` | `backend`, `ttl_seconds`, `proposal_ttl_seconds`, `max_cost_usd` | `memory`\|`redis`; asking for `redis` today logs a warning and falls back |
-| `prompts` | `registry_path`, `pins` | route → pinned prompt version. `registry_path` is reserved: the registry ships built-in defaults and does not load files yet |
+| `prompts` | `registry_path`, `pins`, `persona.{brand_name, agent_name}` | prompt name (`customer_care`, `business_analyst`) → pinned version, checked at boot. `persona` fills the brand and assistant name into both prompts (spec 0006). `registry_path` is reserved: the registry ships built-in prompts and does not load files yet |
 | `security` | `api_keys_inline`, `api_keys_file`, `hash_salt`, `allow_unauthenticated`, `anonymous_channel`, `default_rate_limit_rpm`, `log_raw_text` | Key records carry `channel`, `tenant`, `scopes`, `allow_actions` |
 | `obs` | `service_name`, `log_format`, `log_level`, `metrics_enabled`, `metrics_path` | |
 

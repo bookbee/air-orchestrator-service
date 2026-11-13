@@ -77,7 +77,7 @@ from air_orchestrator_service.guardrails.scope import screen_scope
 from air_orchestrator_service.memory.session import InMemorySessionStore
 from air_orchestrator_service.observability import metrics
 from air_orchestrator_service.observability.logging import get_logger, safe_text_fields
-from air_orchestrator_service.prompts.registry import PromptRegistry
+from air_orchestrator_service.prompts.registry import PromptRegistry, prompt_for
 from air_orchestrator_service.schemas.chat import (
     ChatRequest,
     Proposal,
@@ -786,8 +786,10 @@ class TurnEngine:
             )
             return
 
-        prompt = self._prompts.get("direct")
-        messages = [{"role": "system", "content": prompt.system}]
+        # The channel alone picks the persona (spec 0006, Article I): nothing in the
+        # request can name a prompt, and the message itself arrives as delimited data.
+        prompt, system = self._prompts.render(prompt_for(principal.channel))
+        messages = [{"role": "system", "content": system}]
         for turn in session.turns:
             messages.append({"role": turn.role, "content": turn.content})
         # Only the newest turn is demarcated, not replayed history: prior
@@ -796,7 +798,8 @@ class TurnEngine:
         messages.append(
             {"role": "user", "content": delimit(masked_text, source="customer_message")}
         )
-        outcome.prompt_version = f"{prompt.route}:{prompt.version}"
+        outcome.prompt_version = prompt.ref
+        _log.info("turn.synthesised", prompt=prompt.ref, history_turns=len(session.turns))
 
         if request.stream:
             outcome.streamed = True
