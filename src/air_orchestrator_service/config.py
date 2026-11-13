@@ -21,12 +21,12 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from air_orchestrator_service.constants import Channel, DownstreamService, Route
+from air_orchestrator_service.constants import Channel, DownstreamService, ModelClass, Route
 
 # ── Application ───────────────────────────────────────────────────────────────
 
@@ -38,7 +38,7 @@ class AppSettings(BaseModel):
     host: str = "0.0.0.0"  # noqa: S104 — containers bind all interfaces by design
     #: 8081 is this service's slot in the AIR port map (air-infra/README.md).
     #: 8080 is air-infra, the store/secrets broker this service calls for
-    #: Redis/Postgres/Mongo credentials; 8083 is air-llm, the model gateway.
+    #: Redis/Postgres/Mongo credentials; 8083 is air-model-gateway.
     port: int = Field(default=8081, ge=1, le=65535)
     workers: int = Field(default=2, ge=1, le=64)
     root_path: str = ""
@@ -57,10 +57,11 @@ class AppSettings(BaseModel):
 class InfraSettings(BaseModel):
     """The air-infra broker: Redis/Postgres/Mongo credentials and secrets.
 
-    Not the model path — that moved to air-llm (:class:`LlmSettings`) when air-llm
-    was split out of air-infra. Kept mandatory (no ``enabled`` flag, unlike
-    :class:`DownstreamSettings`) because Phase 2's Redis-backed session store will
-    depend on it; today nothing in this service actually calls it yet.
+    Not the model path — that is air-model-gateway (:class:`ModelGatewaySettings`),
+    reached directly and never through air-infra (Article VII). Kept mandatory (no
+    ``enabled`` flag, unlike :class:`DownstreamSettings`) because Phase 2's
+    Redis-backed session store will depend on it; today nothing in this service
+    actually calls it yet.
     """
 
     base_url: str = "http://localhost:8080"
@@ -77,29 +78,36 @@ class InfraSettings(BaseModel):
         return self.api_key is not None
 
 
-# ── air-llm ───────────────────────────────────────────────────────────────────
+# ── air-model-gateway ─────────────────────────────────────────────────────────
 
 
-class LlmSettings(BaseModel):
-    """The air-llm gateway: the only model path (docs/01-hld.md §7, as amended).
+class ModelGatewaySettings(BaseModel):
+    """air-model-gateway: the only model path (Article VII, amended 1.1.0).
 
-    This is the one downstream whose absence is fatal to a turn — no synthesis is
-    possible without it — so unlike the services in :class:`DownstreamSettings` it
-    has no ``enabled`` flag. It is either reachable or the service reports itself
-    unready.
+    The one downstream whose absence is fatal to a turn — no synthesis is possible
+    without it — so unlike the services in :class:`DownstreamSettings` it has no
+    ``enabled`` flag. It is either serving this service or the service reports
+    itself unready.
+
+    ``model_class`` is a :class:`ModelClass`, never a model or alias name. The
+    gateway owner assigned this service ``cloud`` when ``/v1/inference`` and its
+    aliases were removed (air-model-gateway ``docs/06-consumer-migration.md``);
+    a laptop with only Ollama sets ``local``. Typed as the enum so a leftover
+    alias such as ``generative`` fails here, at boot, rather than as a 422 on
+    every call while readiness reports green — which is exactly how the previous
+    contract break went unnoticed.
     """
 
     base_url: str = "http://localhost:8083"
-    #: air-llm service token, sent as ``X-API-Key``.
+    #: This service's gateway token (``<service>-model-gateway-token``), sent as
+    #: ``X-API-Key`` on every call — the readiness probe included, since the
+    #: probe's job is to prove the token works.
     api_key: SecretStr | None = None
+    model_class: ModelClass = ModelClass.CLOUD
     timeout_s: float = Field(default=30.0, gt=0)
     #: Readiness probes must not inherit the generous turn timeout: a slow probe
     #: turns a health check into an outage detector that fires too late.
     health_timeout_s: float = Field(default=2.0, gt=0)
-    max_retries: int = Field(default=2, ge=0, le=8)
-    #: Model/routing alias asked of air-llm. ``None`` takes air-llm's own default,
-    #: which is the right choice locally where only Ollama is configured.
-    default_model: str | None = None
 
     @property
     def configured(self) -> bool:
@@ -153,10 +161,10 @@ class DownstreamSettings(BaseModel):
     )
 
     def for_service(self, service: DownstreamService) -> ServiceSettings | None:
-        """Settings for a service, or ``None`` for air-infra/air-llm.
+        """Settings for a service, or ``None`` for air-infra/air-model-gateway.
 
         Those two are mandatory dependencies configured on their own settings
-        objects (:class:`InfraSettings`, :class:`LlmSettings`), not this optional
+        objects (:class:`InfraSettings`, :class:`ModelGatewaySettings`), not this optional
         group.
         """
         attr = _SERVICE_ATTR.get(service)
@@ -173,7 +181,7 @@ class DownstreamSettings(BaseModel):
         (Phase 3); this is the configuration half, and it is what
         ``/v1/capabilities`` can report before any probe has run.
         """
-        live: set[Route] = {Route.DIRECT}  # always available: air-llm alone answers it
+        live: set[Route] = {Route.DIRECT}  # always available: the model gateway alone answers it
         if self.rag.configured:
             live.add(Route.RAG)
         if self.tools.configured:
@@ -185,7 +193,7 @@ class DownstreamSettings(BaseModel):
         return frozenset(live)
 
 
-#: Service → attribute name on :class:`DownstreamSettings`. air-infra and air-llm
+#: Service → attribute name on :class:`DownstreamSettings`. air-infra and the model gateway
 #: are absent deliberately: neither is optional, and neither lives in this group.
 _SERVICE_ATTR: dict[DownstreamService, str] = {
     DownstreamService.CLASSIFIER: "classifier",
@@ -339,11 +347,21 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+        # A validation error is printed at boot, into the pod log. Without this,
+        # pydantic renders the offending input verbatim — and the input to this
+        # model is where every secret lives (gateway tokens, the hash salt, inline
+        # key records). The message still names the field and the reason (Article IX).
+        hide_input_in_errors=True,
     )
 
     app: AppSettings = Field(default_factory=AppSettings)
     infra: InfraSettings = Field(default_factory=InfraSettings)
-    llm: LlmSettings = Field(default_factory=LlmSettings)
+    model_gateway: ModelGatewaySettings = Field(default_factory=ModelGatewaySettings)
+    #: Tombstone for the retired ``llm`` section — see :meth:`_refuse_retired_llm`.
+    #: Typed loosely and excluded from dumps: it exists only so that a deployment
+    #: still setting ``AIR_ORCHESTRATOR_SERVICE__LLM__*`` is *seen* rather than
+    #: silently dropped by ``extra="ignore"``.
+    llm: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
     downstream: DownstreamSettings = Field(default_factory=DownstreamSettings)
     turn: TurnSettings = Field(default_factory=TurnSettings)
     guardrails: GuardrailSettings = Field(default_factory=GuardrailSettings)
@@ -352,6 +370,24 @@ class Settings(BaseSettings):
     prompts: PromptSettings = Field(default_factory=PromptSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     obs: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
+
+    @model_validator(mode="after")
+    def _refuse_retired_llm(self) -> Self:
+        """Fail startup on the retired ``llm`` section rather than ignore it.
+
+        Ignoring it would boot a service with no gateway token, which readiness
+        then reports as a rejected token — correct, but a step removed from the
+        cause. Two accepted names for one secret would be worse: a rotation that
+        updates one and not the other. Article III allows exactly this kind of
+        startup failure: settings that do not validate.
+        """
+        if self.llm is not None:
+            raise ValueError(
+                "the 'llm' settings section was retired with air-llm: rename "
+                "AIR_ORCHESTRATOR_SERVICE__LLM__* to AIR_ORCHESTRATOR_SERVICE__MODEL_GATEWAY__* "
+                "(and replace any model alias with MODEL_CLASS=local|auto|cloud)"
+            )
+        return self
 
     @model_validator(mode="after")
     def _guard_production(self) -> Self:

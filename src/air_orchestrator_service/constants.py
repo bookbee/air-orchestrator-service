@@ -120,12 +120,30 @@ class DownstreamService(StrEnum):
     """
 
     INFRA = "air-infra"
-    LLM = "air-llm"
+    #: Was ``LLM = "air-llm"`` until spec 0003: the gateway was replaced and renamed,
+    #: and this value is a metric label, so the rename is a deliberate breaking
+    #: change for dashboards rather than drift (Article VI).
+    MODEL_GATEWAY = "air-model-gateway"
     CLASSIFIER = "air-classifier"
     RAG = "air-rag"
     TOOLS = "air-tools"
     ACTION = "air-action"
     RECOMMENDER = "air-recommender"
+
+
+class ModelClass(StrEnum):
+    """Where a model runs, which is all this service may say about a model.
+
+    air-model-gateway takes a class, never a model or provider name (Article VII):
+    which models serve a class for this service is the gateway owner's decision, in
+    its own routing file, so a model change never needs a deploy here. Mirrors the
+    gateway's own ``ModelClass``; a value outside it is a 422 there, so it is a
+    settings error here, caught at boot instead of on every call.
+    """
+
+    LOCAL = "local"  #: our own servers; the prompt never leaves the network
+    AUTO = "auto"  #: the gateway's choice, either side
+    CLOUD = "cloud"  #: cloud providers
 
 
 class EscalationReason(StrEnum):

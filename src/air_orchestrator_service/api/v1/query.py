@@ -2,7 +2,7 @@
 
 Same engine and same event contract as ``/v1/chat``; what differs is the profile.
 A business answer carries ``structured``, generated against the caller's
-``output_schema`` via a schema-constrained air-llm call rather than validated
+``output_schema`` via a schema-constrained air-model-gateway call rather than validated
 after the fact and rejected (``engine/turn.py``'s ``_structured_answer``).
 
 Pinned to the business channel by declaration, for the reason given in ``chat.py``.
@@ -50,7 +50,7 @@ async def query(
     if not principal.has_scope(SCOPE_QUERY_WRITE):
         raise InsufficientScopeError(f"This key lacks the '{SCOPE_QUERY_WRITE}' scope.")
 
-    engine = TurnEngine(state.settings, state.sessions, state.llm)
+    engine = TurnEngine(state.settings, state.sessions, state.model_gateway)
     events = engine.run(TurnRequest.from_query(body), principal)
 
     if wants_stream(accept):

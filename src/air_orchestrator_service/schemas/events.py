@@ -7,7 +7,8 @@ Two properties are load-bearing and are asserted in ``tests/unit/test_events.py`
   errored one. A client relies on the frame rather than inferring completion from
   silence.
 * **A client ignores event names it does not know.** That is what lets
-  ``answer.delta`` start arriving once air-llm can stream, with no version bump.
+  ``answer.delta`` start arriving once air-model-gateway's stream is relayed, with
+  no version bump.
 
 Each event carries its own ``event`` discriminator so that a consumer decoding the
 `data:` payload alone — without reading the SSE `event:` line — still knows what it
@@ -23,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from air_orchestrator_service.constants import (
     Channel,
+    DownstreamService,
     EventType,
     Route,
     Stage,
@@ -50,6 +52,11 @@ class StageEvent(BaseModel):
     status: StageStatus
     latency_ms: float
     detail: str | None = None
+    #: The service whose failure degraded this stage, when that is the cause.
+    #: Absent for a stage degraded by this service's own limits (an exhausted turn
+    #: deadline): ``TurnResult.degraded`` is built from this field, and blaming a
+    #: healthy gateway for our own budget would send an operator to the wrong team.
+    downstream: DownstreamService | None = None
 
 
 class RouteEvent(BaseModel):
@@ -80,10 +87,10 @@ class ProposalEvent(BaseModel):
 
 
 class AnswerDeltaEvent(BaseModel):
-    """Reserved; not emitted in v1.
+    """Reserved; not emitted yet.
 
-    Defined now so the contract, the tests and the client-facing docs all describe
-    the same shape when air-llm grows a streaming endpoint (docs/01-hld.md §5, §9).
+    Defined so the contract, the tests and the client-facing docs all describe the
+    same shape when the gateway's stream is relayed (docs/01-hld.md §5, §9).
     """
 
     event: Literal[EventType.ANSWER_DELTA] = EventType.ANSWER_DELTA

@@ -82,7 +82,7 @@ class DependencyStatus(BaseModel):
 class ReadyResponse(BaseModel):
     """Readiness: can this replica serve a turn at all?
 
-    ``ready`` tracks air-infra alone. Every other service being down is a
+    ``ready`` tracks air-model-gateway alone. Every other service being down is a
     narrower answer, not an unservable one (docs/01-hld.md §7), so listing them
     here is reporting, not gating — and conflating the two would take the
     service out of rotation for a degradation it is designed to absorb.

@@ -1,16 +1,16 @@
 """air-infra client — the broker for Redis/Postgres/Mongo and secrets.
 
-Not the model path: that's `air-llm` (see `clients/llm.py`), a separate service
-air-infra's own model gateway was extracted into. air-infra is a **service**
-dependency, reached over HTTP, not a package one — following air-classifier's
-precedent for air-llm (`providers/air_llm_provider.py` talks over httpx rather
-than importing a client package) and keeping the two repos free of the
+Not the model path: that's air-model-gateway (see `clients/model_gateway.py`), a
+separate service. air-infra is a **service** dependency, reached over HTTP, not a
+package one — following air-classifier's precedent for the model gateway
+(`providers/model_gateway_provider.py` talks over httpx rather than importing a
+client package) and keeping the two repos free of the
 build-time coupling a path dependency would create. The contract is air-infra's
 published API; httpx is the transport.
 
 Nothing in this service calls air-infra yet — Phase 0 implements the probe only,
 reported on ``/v1/ready`` for operator visibility but not gating it (that's
-air-llm's job). The store brokering arrives with the session engine in Phase 2,
+the model gateway's job). The store brokering arrives with the session engine in Phase 2,
 at which point air-infra becomes a real dependency again and its readiness
 weight should be revisited.
 """

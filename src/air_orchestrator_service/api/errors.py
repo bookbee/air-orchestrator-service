@@ -13,7 +13,7 @@ Two rules hold everywhere in this module, and everything else is plumbing:
 Note what the catalogue does *not* contain: there is no "rag unavailable" or
 "tools unavailable". A downstream being down narrows what a turn can answer and is
 reported in the turn's own `degraded` list with a 200 (docs/01-hld.md §7). The one
-dependency whose absence is fatal is air-llm — without it no answer can be
+dependency whose absence is fatal is air-model-gateway — without it no answer can be
 synthesised — and it lands on 503 ``dependency-unavailable``.
 
 A second asymmetry matters for the streaming routes: a response that has already
@@ -245,10 +245,10 @@ class InternalError(AppError):
 
 
 class DependencyUnavailableError(AppError):
-    """air-llm is unreachable, so no turn can be synthesised.
+    """air-model-gateway cannot serve this service, so no turn can be synthesised.
 
-    The only 5xx this service raises for a dependency, and reserved for air-llm
-    alone — see this module's docstring.
+    The only 5xx this service raises for a dependency, and reserved for the model
+    gateway alone — see this module's docstring.
     """
 
     slug = "dependency-unavailable"

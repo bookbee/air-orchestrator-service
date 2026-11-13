@@ -189,7 +189,7 @@ def clear_request_context() -> None:
 def current_request_id() -> str | None:
     """The id :func:`bind_request_context` bound for this request, if any.
 
-    Lets an outbound client (``clients/llm.py``) forward the same id downstream
+    Lets an outbound client (``clients/model_gateway.py``) forward the same id downstream
     without threading it through every call signature — a trace that stops at
     the first hop is not a trace, it is one log line.
     """
