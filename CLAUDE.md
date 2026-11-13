@@ -7,21 +7,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `make help` lists every target. Three are directives rather than conveniences:
 
 - **`make dev` first on a fresh checkout.** `make install` installs the package alone; ruff,
-  mypy, pytest and respx arrive only with `make dev` (`-e ".[all,dev]"`).
+  mypy, pytest and respx arrive only with `make dev` (`-e ".[all,dev]"`). The venv is built
+  with `python3.12` explicitly, so that interpreter must be on `PATH`.
 - **`make check`** (ruff + mypy --strict + pytest) before calling work done.
 - **`make openapi`** after any route or schema change — `docs/openapi.json` is generated and
   committed, never hand-edited.
 - **`make trace`** (part of `make check`) enforces that every spec requirement names a test
-  that exists. `make spec NAME=<slug>` scaffolds a new one.
+  that exists. It fails on a broken link (untraced, double-traced, or a renamed test) but
+  only *reports* a declared `GAP`/`DEFERRED` — renaming a test means updating the spec's
+  Traceability table. `make spec NAME=<slug>` scaffolds a new one.
 
 Single test: `.venv/bin/pytest tests/unit/test_turns.py::test_name -q` (`pythonpath=["src"]`
 and `asyncio_mode=auto` come from `pyproject.toml`, so no env setup is needed).
 
 The tests are hermetic — no service needs to be running. `make run` needs nothing either;
 the service boots and serves `/v1/health` with every downstream down.
-
-`make fmt` both formats and autofixes (`ruff format`, then `ruff check --fix`); `make cov`
-adds a term-missing coverage report.
 
 To drive it by hand, `make env` writes a gitignored `.env` from the committed `.env.example`,
 seeding one development key per channel — `airo_local_customer_key` for `POST /v1/chat`,
@@ -36,8 +36,8 @@ Repo and distribution are `air-orchestrator-service`; the Python package, env pr
 metric namespace all match it literally, as does the `airo_` API-key prefix.
 
 The estate is mid-migration to `<name>_service` package names: `air-classifier` already ships
-`air_classifier_service`, while `air-rag`, `air-tools`, `air-llm` and `air-infra` are still
-`air_<name>`. Our **package** name follows air-classifier.
+`air_classifier_service`, while `air-rag`, `air-tools`, `air-model-gateway` (`air_model_gateway`)
+and `air-infra` are still `air_<name>`. Our **package** name follows air-classifier.
 
 Where we differ from air-classifier is the env prefix and metric namespace: it keeps
 `AIR_CLASSIFIER__` / `air_classifier_*` (no `_service`), we spell the repo name in full. That
@@ -46,7 +46,7 @@ is a deliberate choice, not drift — don't "align" it without asking.
 ## Architecture
 
 FastAPI service on **:8081**, the conversational front door for the AIR platform. It
-orchestrates and owns no capability: models are `air-llm` (:8083, the *only* model path),
+orchestrates and owns no capability: models are `air-model-gateway` (:8083, the *only* model path — Article VII),
 stores/secrets `air-infra` (:8080), plus classifier/tools/action/recommender/rag on
 :8082–:8087. All are reached over HTTP with `httpx`, never imported as packages.
 
@@ -74,7 +74,7 @@ refactor:
    **not** an error — the turn answers normally and executes nothing, so the response cannot
    be used to probe which proposal ids exist.
 3. **A missing downstream narrows the answer; it does not refuse one.** Startup fails only for
-   unvalidatable settings or an unparseable key file. air-llm being down is a 503 on
+   unvalidatable settings or an unparseable key file. air-model-gateway being down is a 503 on
    `/v1/ready` (which gates on it alone) and a `degraded` turn that still answers — not a
    crash loop, and not a 5xx from `/v1/chat`.
 4. **Every key is tenant-namespaced.** `memory/session.py` keys on `(tenant, session_id)` even
@@ -90,20 +90,23 @@ gather → synthesise → guardrails_out → persist`. Each emits a `stage` even
 on" means. `blocked` (a guardrail refusing) is deliberately distinct from `degraded` (a
 downstream coping) so a refusal spike does not look like an outage.
 
-Real today: guardrails both ways, prompt registry, synthesis via `LlmClient.chat`, per-turn
-and per-session cost ceilings, a turn deadline decremented before the synthesis call. Stubbed:
-`CACHE` (Phase 5), `CLASSIFY`/`GATHER` (Phase 3). Routing is still the literal `/propose`
+Real today: guardrails both ways, prompt registry, synthesis via `ModelGatewayClient.generate`
+(JSON callers) or `.stream` (SSE callers, as `answer.delta` through `pii.StreamRedactor` —
+spec 0004), `CLASSIFY` via air-classifier when configured (customer channel, fail-soft — spec
+0005), per-turn and per-session cost ceilings, and a turn deadline that bounds every downstream
+call. Stubbed: `CACHE` (Phase 5), `GATHER` (Phase 3). Routing is still the literal `/propose`
 trigger — a stand-in must not appear to understand intent it does not.
 
 ### Wiring (`main.py` + `api/deps.py`)
 
 Nothing is a module-level singleton. `create_app` assembles one frozen `AppState` dataclass —
-settings, `ApiKeyStore`, `InfraClient`, `LlmClient`, the session store — and hangs it on
+settings, `ApiKeyStore`, `InfraClient`, `ModelGatewayClient`, the session store, and a
+`ClassifierClient` that is `None` unless configured — and hangs it on
 `app.state.air_state` (`deps.STATE_ATTR`). Routes reach it via `Depends(get_app_state)` and
 take settings from `get_settings_dep`, never the `get_settings()` process singleton. It is a
 dataclass rather than loose `app.state` attributes so a misspelled field fails at import
 instead of at request time, and it is what lets a test swap a single collaborator
-(`state.llm.chat`, `state.infra.probe`) on an otherwise entirely real app.
+(`state.model_gateway.generate`, `state.infra.probe`) on an otherwise entirely real app.
 
 ### Guardrails
 
@@ -113,12 +116,6 @@ channel, from `GuardrailSettings.customer` / `.business`, which is what invarian
 `boundary.delimit` demarcates anything that did not originate in this service's own code
 before it reaches a prompt, and the prompt version used is logged with the turn.
 
-### Prompts
-
-`prompts/registry.py` holds prompts in Python as `route → version → Prompt`, selected by
-`PromptSettings.pins` and otherwise by the newest version. `"latest"` is a real version, not
-an alias: a prompt change stays reviewable and revertible like code.
-
 ### Contracts that are public surface
 
 - **`constants.py`** — `Stage`, `Route`, `Channel`, `EventType`, `TurnStatus`, scopes. These
@@ -126,8 +123,8 @@ an alias: a prompt change stays reviewable and revertible like code.
   a member is a breaking change for callers and dashboards alike.
 - **`schemas/events.py`** — the SSE models *are* the contract. `turn.start`/`turn.end` bracket
   every turn including refused and errored ones; clients must ignore unknown event names (that
-  is what lets `answer.delta` — defined, never emitted — arrive later without a version bump).
-  v1 streams the turn lifecycle, not tokens, because air-llm cannot stream yet.
+  is what let `answer.delta` start arriving without a version bump). Deltas are *provisional*:
+  the `answer` event is authoritative and replaces them on a refusal, failure or deadline.
 - **`api/errors.py`** — every failure leaves as RFC 9457 `application/problem+json`; nothing
   internal escapes (the catch-all logs the traceback and returns a fixed 500). A failure
   *after* headers are sent is an `error` **event**, not a status — that module handles only
@@ -136,8 +133,7 @@ an alias: a prompt change stays reviewable and revertible like code.
 ### Configuration
 
 `config.py` is nested pydantic-settings with prefix `AIR_ORCHESTRATOR_SERVICE__` and `__` as
-delimiter; the sections are `app`, `infra`, `llm`, `downstream`, `turn`, `guardrails`,
-`session`, `cache`, `prompts`, `security`, `obs`. `create_app(settings)` takes settings as an
+delimiter. `create_app(settings)` takes settings as an
 argument and never reads the environment itself — tests assemble a full app with bespoke
 settings rather than mutating the environment or clearing `get_settings`' cache. Budgets and
 guardrail profiles live in settings so tuning cost/latency never requires a deploy. Every
@@ -155,9 +151,12 @@ degraded against services that do not exist.
   update the reasoning when you change the module. Do not write them as changelogs of a
   session's work — they describe the code as it stands.
 - **Tests never depend on the ambient machine.** `tests/conftest.py` stubs the air-infra and
-  air-llm probes in *both* directions (`reachable_*` / `unreachable_*`) and points their base
-  URLs at `.invalid` hosts so an escaping probe fails loudly. The `app` fixture patches
-  `LlmClient.chat` with a canned response; a test wanting the failure path reassigns it. The
+  air-model-gateway probes in *both* directions (`reachable_*` / `unreachable_*`) and points
+  every base URL at an `.invalid` host so an escaping call fails loudly. The `app` fixture
+  (`build_app` for bespoke settings) patches `model_gateway.generate` with a canned response
+  and `model_gateway.stream` with a `scripted_stream`; a test wanting another path reassigns
+  them. `tests/integration/` runs the real app against respx doubles that enforce each
+  downstream's `extra="forbid"` contract. The
   `client` fixture is in-process (`ASGITransport`, no socket) and deliberately does **not**
   drive the lifespan.
 - Nothing renders a raw API key or digest into a log line, repr, or exception message.
@@ -191,12 +190,16 @@ The near-term work, in order:
 - **Phase 2b — durable sessions.** Redis behind the existing `SessionStore` protocol in
   `memory/session.py`. The key shape is already tenant-namespaced, so this is a backend swap;
   `build_session_store` currently logs a warning and falls back when asked for `redis`.
-- **Phase 3 — read path.** Clients for air-classifier/air-rag/air-tools/air-recommender behind
-  a shared `clients/base.py`, capability discovery, and turning `CLASSIFY`/`GATHER` real. The
+  Spec `0002-durable-sessions` is still **Draft**, and its `tasks.md` T0 gates all code on
+  resolving open questions Q1/Q2 (which change `REQ-SESS-007`/`008`). Start there, not in
+  `memory/`.
+- **Phase 3 — read path.** air-classifier's client exists (spec 0005; acting on its verdict
+  is `DEFERRED` there). Next: air-rag/air-tools/air-recommender behind a shared
+  `clients/base.py`, capability discovery, and turning `GATHER` real. The
   resilience primitives are meant to be lifted from air-classifier's `resilience/`, not
   rewritten.
 - **Phase 4 — write path.** `clients/action.py` behind the propose→confirm→execute gate that
   already exists and is tested.
 
-Cross-repo: air-llm has no `tools` field on its inference contract and no streaming endpoint.
-Both are tracked in `docs/01-hld.md` §9; neither blocks the phases as ordered.
+Cross-repo: air-model-gateway's `/v1/generate` has no `tools` field, tracked in
+`docs/01-hld.md` §9; it does not block the phases as ordered.

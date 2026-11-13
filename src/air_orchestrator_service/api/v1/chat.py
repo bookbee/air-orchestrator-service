@@ -69,7 +69,7 @@ async def chat(
         raise InsufficientScopeError(f"This key lacks the '{SCOPE_CHAT_WRITE}' scope.")
     reject_privileged_options(body.options, principal)
 
-    engine = TurnEngine(state.settings, state.sessions, state.model_gateway)
+    engine = TurnEngine(state.settings, state.sessions, state.model_gateway, state.classifier)
     streaming = wants_stream(accept)
     events = engine.run(TurnRequest.from_chat(body, stream=streaming), principal)
 

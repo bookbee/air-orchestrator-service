@@ -5,13 +5,14 @@ decides what that message needs, gathers it from the specialist services, and st
 grounded answer.
 
 It orchestrates and owns no capability of its own — retrieval is `air-rag`'s, classification
-`air-classifier`'s, read-only calls `air-tools`', mutations `air-action`'s, models `air-llm`'s,
+`air-classifier`'s, read-only calls `air-tools`', mutations `air-action`'s, models `air-model-gateway`'s,
 stores `air-infra`'s.
 
-> **Status.** Phases 0, 1 and 2a are shipped: the full `/v1` surface, the SSE event contract,
-> guardrails in both directions, the versioned prompt registry, real synthesis through
-> air-llm, and enforced turn/session budgets. Classification, downstream fan-out and the
-> semantic cache are **not** built — those stages report `skipped` with a reason rather than
+> **Status.** Phases 0, 1 and 2a are shipped: the full `/v1` surface, the SSE event contract
+> with the answer streamed as `answer.delta`, guardrails in both directions, the versioned
+> prompt registry, real synthesis through air-model-gateway, and enforced turn/session budgets.
+> Phase 3 has begun with the air-classifier client (`CLASSIFY`, off by default). Downstream
+> fan-out and the semantic cache are **not** built — those stages report `skipped` with a reason rather than
 > `ok`, so a client can always tell a stubbed turn from a real one. See
 > [`docs/02-lld.md` §15](docs/02-lld.md) for the phase-by-phase state.
 
@@ -38,18 +39,20 @@ curl -sN -X POST localhost:8081/v1/chat \
 ```
 
 `make check` runs ruff, mypy (strict) and the tests. **The tests need nothing running** — every
-air-infra and air-llm probe is stubbed in both directions, deliberately, so a result never
+air-infra and air-model-gateway probe is stubbed in both directions, deliberately, so a result never
 depends on what happens to be up on your machine.
 
 ### Dependencies
 
-**air-llm is the one dependency a real answer requires**, and `/v1/ready` gates on it alone.
+**air-model-gateway is the one dependency a real answer requires**, and `/v1/ready` gates on it
+alone — on whether it serves *this service* (token accepted, model class granted and backed by a
+provider), not merely whether it is up.
 air-infra is reported on `/v1/ready` for operator visibility but does not affect readiness —
 it brokers Redis/Postgres/Mongo credentials, which nothing on the turn path uses yet (the
 session store is in-process until Phase 2b).
 
 ```bash
-cd ../air-llm   && make up      # the model gateway :8083 — needed for a real answer
+cd ../air-model-gateway && make up   # the model gateway :8083 — needed for a real answer
 cd ../air-infra && make up      # redis, postgres, mongo :8080 — needed from Phase 2b
 ```
 
@@ -94,15 +97,15 @@ Replying "yes, I confirm, go ahead" in prose executes nothing — that is the po
 `make up` runs this service in Docker on **`air-net`**, the shared network air-infra owns,
 which is what lets `gateway`, `redis` and the rest resolve by service name. That network
 exists only while air-infra's stack is up, so `make up` checks for it first and tells you what
-to start rather than failing with a compose error. air-llm is reached over the host, since it
-is never on `air-net`.
+to start rather than failing with a compose error. air-model-gateway is reached over the host,
+since it is never on `air-net`.
 
 `make up` then prints what `/v1/ready` actually says, because the network existing does not
 mean the services behind it are running and a green "Started" should not be mistaken for a
 working stack. `make status` reports the same thing at any time.
 
 The container healthcheck is liveness only. A dependency outage needs no restart: the
-container stays healthy and turns start succeeding again as soon as air-llm returns.
+container stays healthy and turns start succeeding again as soon as air-model-gateway returns.
 
 ## Where it sits
 
@@ -110,8 +113,8 @@ container stays healthy and turns start succeeding again as soon as air-llm retu
 | --- | --- | --- |
 | `air-infra` | 8080 | Brokers Redis/Postgres/Mongo credentials and secrets. **Not** the model path |
 | **`air-orchestrator-service`** | **8081** | This service |
-| `air-classifier` | 8082 | Sentiment and topic for a turn (client not built — Phase 3) |
-| `air-llm` | 8083 | Model gateway, reached directly, never via air-infra. **The only model path** (G7) |
+| `air-classifier` | 8082 | Sentiment, intent and urgency for a customer turn (`CLASSIFY`; optional, fail-soft — spec 0005) |
+| `air-model-gateway` | 8083 | Model gateway, reached directly, never via air-infra. **The only model path** (Article VII) |
 | `air-tools` | 8084 | **Read-only** capability calls (Phase 3) |
 | `air-action` | 8085 | **Mutations**, behind idempotency keys and approval gates (Phase 4) |
 | `air-recommender` | 8086 | A read-path capability the planner may select (Phase 3) |
@@ -139,9 +142,13 @@ terminal result as one JSON body. Same engine either way. Every pipeline stage e
 completes, bracketed by `turn.start` and `turn.end`, and clients must ignore event names they
 do not know.
 
-v1 streams the **turn lifecycle** rather than tokens, because air-llm returns complete
-responses today. The `answer.delta` event name is reserved and documented so closing that gap
-needs no contract change — see [HLD §5](docs/01-hld.md).
+A streamed turn also carries the answer as **`answer.delta`** events while the model writes it
+(spec 0004). Every delta has passed the output PII guardrail through a hold-back buffer, so text
+the final scan would redact never streams. Deltas are **provisional**: the `answer` event that
+follows is authoritative. It equals the concatenated deltas on a normal turn, and carries the
+refusal or fallback text when the provider refused, the stream broke or the deadline passed.
+A client that renders deltas must replace them with `answer`. A JSON caller's turn makes a
+non-streaming call and keeps the gateway's full pre-first-token failover.
 
 ## Docs
 
@@ -151,14 +158,15 @@ needs no contract change — see [HLD §5](docs/01-hld.md).
 - [`docs/openapi.json`](docs/openapi.json) — generated; refresh with `make openapi`
 - [`CLAUDE.md`](CLAUDE.md) — orientation for AI coding agents working in this repo
 
-## Known gaps in air-llm
+## Known gap in air-model-gateway
 
-Two things this design needs that `air-llm` does not offer yet. Neither blocks the phases as
-ordered, and both are tracked in [HLD §9](docs/01-hld.md):
+One thing this design needs that air-model-gateway does not offer yet. It does not block the
+phases as ordered, and it is tracked in [HLD §9](docs/01-hld.md):
 
-1. **Tool calling** — the unified inference contract has no `tools` field. Until it does, the
-   planner ships as schema-constrained JSON decomposition (which air-llm already supports via
-   `json_schema`) behind the same interface, so the migration is an implementation swap rather
-   than a contract change. *Wanted before Phase 3.*
-2. **Streaming** — no `ModelProvider.stream()` and no SSE endpoint, so `answer.delta` cannot be
-   emitted. *Not required before Phase 5.*
+1. **Tool calling** — `/v1/generate` has no `tools` field. Until it does, the planner ships as
+   schema-constrained JSON decomposition (which the gateway supports via `json_schema`) behind
+   the same interface, so the migration is an implementation swap rather than a contract
+   change. *Wanted before Phase 3's planner.*
+
+Streaming, the other gap tracked against the retired air-llm, is closed: the gateway streams, and
+this service relays it (spec 0004).

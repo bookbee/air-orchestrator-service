@@ -45,6 +45,8 @@ TEST_SALT = "test-salt"
 INFRA_BASE_URL = "http://air-infra.invalid:8080"
 #: Not localhost, for the same reason: escaping the stub must fail loudly.
 MODEL_GATEWAY_BASE_URL = "http://air-model-gateway.invalid:8083"
+#: Not localhost, for the same reason. Off by default, as in production.
+CLASSIFIER_BASE_URL = "http://air-classifier.invalid:8082"
 CUSTOMER_KEY = "airo_test_customer"
 BUSINESS_KEY = "airo_test_business"
 NO_SCOPE_KEY = "airo_test_noscope"
@@ -115,6 +117,11 @@ def app(settings: Settings) -> FastAPI:
     turn streams (spec 0004), so ``stream`` is scripted the same way — the
     canned answer in two deltas — and a streaming test passes its own script.
     """
+    return build_app(settings)
+
+
+def build_app(settings: Settings) -> FastAPI:
+    """What the ``app`` fixture builds, for a test that needs bespoke settings."""
     from air_orchestrator_service.api.deps import STATE_ATTR
 
     built = create_app(settings)

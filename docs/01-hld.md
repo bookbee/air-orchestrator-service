@@ -23,20 +23,20 @@ the escalation ladder across two repos.
 | Customer API Gateway | **Edge infrastructure**, not this repo | air-orchestrator-service serves the customer route behind it |
 | Business API Gateway | **Edge infrastructure**, not this repo | Corp-VPN-only ingress to the same service, different route and profile (§3) |
 | Session & Context Manager | air-orchestrator-service module | Built; state is in-process until the Phase 2b Redis backend lands |
-| Intent & Sentiment Analysis | **`air-classifier` :8082** + a local intent step | `/v1/sentiment` and `/v1/feedback` are the four-rung ladder; air-orchestrator-service calls, never classifies |
+| Intent & Sentiment Analysis | **`air-classifier` :8082** | `POST /v1/classify` runs its four-rung ladder; air-orchestrator-service calls it (`clients/classifier.py`, spec 0005), never classifies |
 | Guardrails — input / output | air-orchestrator-service module | **New.** Review item 01 |
 | Router / Planner | air-orchestrator-service module | The core of this repo |
-| Model Gateway | **`air-llm` :8083** | **Already built**, and split out of air-infra after this design was first drafted. Multi-provider routing, fallback, cost, cache, prompt caching, structured output. This service consumes it over HTTP (`clients/llm.py`); it does not rebuild it. Satisfies review item 02 |
-| Semantic Cache | air-orchestrator-service module | **New, not built** (Phase 5). Embeddings from air-llm, vectors in Redis brokered by air-infra. Review item 04 |
-| Retrieval Client (RAG) | air-orchestrator-service client → **`air-rag` :8087** | Reranking, grounding and citation shape are air-rag's; air-orchestrator-service asks and cites. **air-rag hosts its own air-llm client for embeddings** — air-orchestrator-service never embeds a query itself |
-| Tool Executor | air-orchestrator-service client → **`air-tools` :8084** | **Read-only by construction.** Each domain agent's reason → tool-call → interpret loop (Plan's new "agent placement" decision) runs *inside* air-tools, with its own air-llm client — air-orchestrator-service sends one coarse request per sub-task and never sees the intermediate reasoning |
+| Model Gateway | **`air-model-gateway` :8083** | **Already built**; it replaced air-llm (spec 0003, constitution Article VII as amended in 1.1.0). Multi-provider routing by *model class*, fallback, cost, budgets, cache, prompt caching, structured output, streaming. This service consumes it over HTTP (`clients/model_gateway.py`); it does not rebuild it. Satisfies review item 02 |
+| Semantic Cache | air-orchestrator-service module | **New, not built** (Phase 5). Embeddings from air-model-gateway, vectors in Redis brokered by air-infra. Review item 04 |
+| Retrieval Client (RAG) | air-orchestrator-service client → **`air-rag` :8087** | Reranking, grounding and citation shape are air-rag's; air-orchestrator-service asks and cites. **air-rag calls air-model-gateway itself for embeddings** — air-orchestrator-service never embeds a query itself |
+| Tool Executor | air-orchestrator-service client → **`air-tools` :8084** | **Read-only by construction.** Each domain agent's reason → tool-call → interpret loop (Plan's new "agent placement" decision) runs *inside* air-tools, with its own air-model-gateway client — air-orchestrator-service sends one coarse request per sub-task and never sees the intermediate reasoning |
 | Conversation Memory | Redis (turns) + Postgres (profile), brokered by air-infra | Review item 03. **In-process today** — the Redis backend is Phase 2b |
 | Response Streamer | air-orchestrator-service module | SSE, §5 |
 | External RAG / Knowledge | Behind `air-rag` | Vector DB, embedding service, ingestion — not air-orchestrator-service's concern |
 | Tools / Live Data | Behind `air-tools` | |
 | Action Services | **`air-action` :8085** | **Mutations only**, idempotency keys and approval gates. Review item 07 |
 | MCP Server (optional) | Deferred | §8 |
-| Inference Backends (hybrid) | Behind `air-llm` | Ollama local, Anthropic/OpenAI cloud. Self-hosted vLLM/TGI is an air-llm provider, added there |
+| Inference Backends (hybrid) | Behind `air-model-gateway` | Ollama local, Anthropic/OpenAI cloud. Self-hosted vLLM/TGI is a gateway provider, added there |
 | Cross-cutting: Security & Secrets | Mostly **`air-infra`** | Credential broker, policy engine, secret backend already exist. This service holds its own API-key store (`security/api_keys.py`) |
 | Cross-cutting: Observability | Shared convention | Every service ships structlog + Prometheus; air-orchestrator-service owns the per-turn trace that spans them |
 | Cross-cutting: Evaluation & Feedback | air-orchestrator-service module + repo | **New.** Prompt registry, canary prompts, feedback capture. Review item 06 |
@@ -48,10 +48,10 @@ rather than a new architectural element. Confirm this reading.
 
 **The enterprise reference diagram's per-role LLM Inference layer** (separate Router /
 AgentReason / AgentInterpret / AgentGenerate / Generative / Embeddings endpoints) needs no new
-service to realise. It's air-llm's `routing.yaml` alias table, given a role-scoped alias per
-caller — `agent_reason`/`agent_interpret` for air-tools' agents (Plan's agent-placement
-decision), `embeddings` for air-rag, whatever this repo's own synthesis step ends up using.
-Each alias is a config edit in air-llm, not a deployment.
+service to realise. It's air-model-gateway's routing file: each caller asks for a *model
+class* (`local` · `auto` · `cloud`), and a per-caller override decides which models serve that
+class for it. This service asks for `cloud`. air-tools' agents and air-rag's embeddings get
+their own overrides. Each is a config edit in the gateway, not a deployment.
 
 ## 2. System context
 
@@ -78,7 +78,7 @@ Each alias is a config edit in air-llm, not a deployment.
                                 │
   ┌──────────────┬──────────────┴──────────────┬──────────────┬──────────────┐
   ▼              ▼              ▼              ▼              ▼              ▼
-  air-llm        air-infra      air-classifier air-rag        air-tools      air-action
+  model-gateway  air-infra      air-classifier air-rag        air-tools      air-action
   :8083          :8080          :8082          :8087          :8084          :8085
   THE ONLY       stores ·       sentiment      retrieval      READ-ONLY      MUTATIONS
   MODEL PATH     secrets        · intent       · citations    calls          · gates
@@ -125,14 +125,14 @@ POST /v1/chat  {session_id?, message, options?}
   ├─ 3. SESSION & CONTEXT ── load turns from Redis, assemble window, tenant-scope
   ├─ 4. SEMANTIC CACHE ── embed the redacted query, ANN lookup in tenant namespace
   │        └─ hit ⇒ jump to step 9. No model call, no fan-out
-  ├─ 5. CLASSIFY ── air-classifier: sentiment + topic (fail-soft to unknown)
+  ├─ 5. CLASSIFY ── air-classifier: sentiment, intent, urgency (customer channel; fail-soft)
   ├─ 6. ROUTER / PLANNER ── direct answer | RAG | tools | action | combination
   ├─ 7. GATHER (parallel, per-turn deadline)
   │        ├─ air-rag      retrieval + citations
   │        ├─ air-tools    read-only calls
   │        ├─ air-recommender
   │        └─ air-action   ⇒ PROPOSE ONLY, never executes in this step
-  ├─ 8. SYNTHESISE ── air-llm gateway; grounded in step 7 only
+  ├─ 8. SYNTHESISE ── air-model-gateway; grounded in step 7 only; streamed to SSE callers
   ├─ 9. GUARDRAILS OUT ── grounding/citation check · PII · safety · schema validation
   ├─ 10. PERSIST ── turn to Redis, cache entry, usage and cost
   └─ 11. STREAM ── SSE throughout; every step above emits as it completes
@@ -140,7 +140,7 @@ POST /v1/chat  {session_id?, message, options?}
 
 **Step 7's `air-tools` call may itself be a multi-step agent turn**, invisible from here: the
 domain agent's own reason → tool-call → interpret loop runs inside air-tools, against its own
-air-llm client (Plan's agent-placement decision). air-orchestrator-service's per-call budget covers the
+air-model-gateway client (Plan's agent-placement decision). air-orchestrator-service's per-call budget covers the
 whole thing as one deadline; the intermediate reasoning is air-tools' concern, not this
 pipeline's.
 
@@ -161,18 +161,25 @@ routinely do not, and it degrades to a normal response for a client that does no
 Confirmation of a proposed mutation is a *new* turn citing a proposal id, not a message
 upstream on an open socket, so nothing needs a bidirectional channel.
 
-**What v1 streams — a deliberate, recorded deviation.** The diagram specifies
-*token-by-token* streaming. air-llm cannot do that today: `POST /v1/inference` returns a
-complete response, and `ModelProvider` has no `stream()` method. Rather than fork a second
-model path — which
-would cost the centralised routing, cost accounting and cache that review item 02 exists to
-protect — v1 streams the **turn lifecycle**: every stage in §4 emits as it completes, and the
-answer arrives as one `answer` event.
+**What is streamed.** Every stage in §4 emits as it completes. The answer streams
+token by token as `answer.delta` events (spec 0004), relayed from air-model-gateway's
+`stream: true` on `/v1/generate`. That closed the deviation v1 recorded here, when air-llm
+could only return complete responses. It closed without a contract change, because
+`answer.delta` was reserved in v1 and clients ignore event types they do not know.
 
-This closes without a contract change. When air-llm grows a streaming endpoint, this service
-emits `answer.delta` events before the terminal `answer`; the event name is reserved in v1
-and clients ignore unknown event types. **The gap is in air-llm, and it is tracked there** —
-this is the first of two (§9).
+Two properties of the gateway's stream shape how it is relayed:
+
+- **The refusal verdict arrives last**, in the gateway's `done`, after the text has streamed.
+  Deltas are therefore *provisional*. The terminal `answer` event is authoritative: it equals
+  the concatenated deltas on a normal turn, and carries the refusal or fallback text when the
+  provider refused, the stream broke, or the turn deadline passed.
+- **The output guardrail runs before a delta leaves.** A hold-back buffer
+  (`guardrails.pii.StreamRedactor`) releases only text that sits a whitespace boundary and a
+  fixed window behind the newest token, and that no PII match straddles. PII split across model
+  chunks therefore never streams.
+
+Only SSE callers stream. A JSON caller's turn makes the non-streaming call, which keeps the
+gateway's full failover (the gateway fails over only before the first token).
 
 Perceptually this matters less than it sounds: on a turn that retrieves and calls tools, the
 first stage event lands within ~250 ms while a token-streamed answer could not begin until
@@ -216,14 +223,14 @@ makes absence tractable: a missing service removes a *route*, not the service.
 
 | Down | Behaviour |
 | --- | --- |
-| air-classifier | Sentiment and topic are `unknown`; tone calibration is skipped. Turn unaffected |
+| air-classifier | `CLASSIFY` is `degraded` naming it; no verdict for the turn. Turn status unaffected |
 | air-rag | Planner drops the RAG route; the answer says it could not consult the knowledge base rather than answering ungrounded |
 | air-tools | Affected capabilities leave the tool list; the planner cannot select what is not advertised |
 | air-action | Proposals refused with a clear reason. **Never** a fallback direct write |
 | air-recommender | Recommendation capability drops out |
 | air-infra | Store credentials unavailable. No effect on the turn path today; from Phase 2b, sessions degrade to single-turn |
 | Semantic cache / Redis | Cache disabled, sessions degrade to single-turn; the turn still answers |
-| **air-llm** | **No synthesis is possible.** The turn degrades to an honest "cannot answer right now" rather than erroring, and `/v1/ready` reports 503 so the replica is taken out of rotation. Accepted single point of failure; mitigated by provider failover inside air-llm, not by a bypass here |
+| **air-model-gateway** | **No synthesis is possible.** The turn degrades to an honest "cannot answer right now", naming the gateway in `degraded`, rather than erroring. `/v1/ready` reports 503 so the replica is taken out of rotation — also when the gateway is up but rejects this service's token or does not serve its model class. Accepted single point of failure; mitigated by provider failover inside the gateway, not by a bypass here |
 
 The rule: a downstream failure narrows what the answer can contain and says so. It never
 produces a confident answer built on nothing, and it never fails the turn — with the one
@@ -241,16 +248,16 @@ honest exception of the model gateway itself.
 - **Long-term profile store.** Short-term turns land in Redis in Phase 2; the Postgres profile
   half of the memory box waits until a consumer needs it (Plan §4 Q4).
 
-## 9. Gaps this design opens in air-llm
+## 9. Gaps this design opens in air-model-gateway
 
-Both are in air-llm, both are needed for the diagram's full shape, and neither blocks the
-phases as ordered:
+Tracked against air-model-gateway (they were opened against air-llm, which it replaced). They are
+needed for the diagram's full shape, and neither blocks the phases as ordered:
 
-1. **Streaming.** `ModelProvider.stream()` plus a streaming inference endpoint. Unlocks
-   token-by-token (§5). *Not required before Phase 5.*
-2. **Tool calling.** The unified inference contract carries `messages` and `json_schema` but
+1. **Streaming — closed.** The gateway streams `/v1/generate`; this service relays it as
+   `answer.delta` (§5, spec 0004).
+2. **Tool calling — open.** `/v1/generate` carries `messages` and `json_schema` but
    no `tools`. Native tool-calling is the more direct planner mechanism, and cannot be built
    until this exists. **Plan §4 Q1 resolves this in the meantime**: the planner ships as
-   schema-constrained JSON decomposition over the `json_schema` support air-llm already has,
+   schema-constrained JSON decomposition over the `json_schema` support the gateway already has,
    behind the same interface, so adopting native tool-calling later is an implementation swap
    rather than a contract change. *Wanted before Phase 3; not blocking.*

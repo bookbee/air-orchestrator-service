@@ -40,6 +40,7 @@ from air_orchestrator_service.api.errors import install_error_handlers
 from air_orchestrator_service.api.middleware import install_middleware
 from air_orchestrator_service.api.v1.router import build_v1_router
 from air_orchestrator_service.api.v1.system import build_metrics_router
+from air_orchestrator_service.clients.classifier import ClassifierClient
 from air_orchestrator_service.clients.infra import InfraClient
 from air_orchestrator_service.clients.model_gateway import ModelGatewayClient
 from air_orchestrator_service.config import Settings, get_settings
@@ -146,6 +147,8 @@ def _build_lifespan(state: AppState) -> Any:
             # warning on every reload and leaks sockets in tests.
             await state.infra.aclose()
             await state.model_gateway.aclose()
+            if state.classifier is not None:
+                await state.classifier.aclose()
             _log.info("shutdown.complete")
 
     return lifespan
@@ -172,6 +175,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         infra=InfraClient(resolved),
         model_gateway=ModelGatewayClient(resolved),
         sessions=build_session_store(resolved),
+        classifier=(
+            ClassifierClient(resolved.downstream.classifier)
+            if resolved.downstream.classifier.configured
+            else None
+        ),
     )
 
     app = FastAPI(

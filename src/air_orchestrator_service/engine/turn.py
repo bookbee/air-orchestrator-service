@@ -14,9 +14,9 @@ bound to that call's own timeout, and checked *before* a call is made so an
 exhausted budget skips the call rather than starting it — plus per-turn and
 per-session cost ceilings.
 
-**What is stubbed, and why it says so.** ``CACHE`` (Phase 5) and ``CLASSIFY`` /
-``GATHER`` (Phase 3, pending clients for air-classifier/air-rag/air-tools) report
-``StageStatus.SKIPPED`` with a reason, never ``ok`` — see ``_STUBBED``. A client
+**What is stubbed, and why it says so.** ``CACHE`` (Phase 5) and ``GATHER``
+(Phase 3, pending clients for air-rag/air-tools) report ``StageStatus.SKIPPED``
+with a reason, never ``ok`` — see ``_STUBBED``. A client
 must always be able to tell a stubbed turn from a real one, and this engine must
 never be mistaken for a complete one in a demo. Routing is still the literal
 ``/propose`` trigger for the same reason: with ``GATHER`` stubbed there is
@@ -46,6 +46,12 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any, Final
 
+from air_orchestrator_service.clients.classifier import MIN_BUDGET_MS as MIN_CLASSIFY_BUDGET_MS
+from air_orchestrator_service.clients.classifier import (
+    ClassifierClient,
+    ClassifierError,
+    label_slug,
+)
 from air_orchestrator_service.clients.model_gateway import (
     GenerateResult,
     ModelGatewayClient,
@@ -113,7 +119,6 @@ PROPOSE_TRIGGER: Final[str] = "/propose"
 #: more — see the module docstring.
 _STUBBED: Final[dict[Stage, str]] = {
     Stage.CACHE: "semantic cache is Phase 5",
-    Stage.CLASSIFY: "air-classifier has no client here yet (Phase 3)",
     Stage.GATHER: "no downstream services called yet (Phase 3)",
 }
 
@@ -196,10 +201,13 @@ class TurnEngine:
         settings: Settings,
         sessions: InMemorySessionStore,
         model_gateway: ModelGatewayClient,
+        classifier: ClassifierClient | None = None,
     ) -> None:
         self._settings = settings
         self._sessions = sessions
         self._gateway = model_gateway
+        #: ``None`` when air-classifier is not configured (spec 0005).
+        self._classifier = classifier
         self._prompts = PromptRegistry(settings)
         #: Set by `_pipeline` when it degrades a turn — an async generator has
         #: no return value, so this is how `run()` learns the outcome once
@@ -398,7 +406,9 @@ class TurnEngine:
             yield event
         async for event in self._stage(Stage.CACHE):
             yield event
-        async for event in self._stage(Stage.CLASSIFY):
+        async for event in self._classify(
+            masked_text, principal, deadline_at=turn_started + deadline_s
+        ):
             yield event
 
         async for event in self._stage(Stage.PLAN):
@@ -614,6 +624,57 @@ class TurnEngine:
         latency_ms = round((time.perf_counter() - started) * 1000, 3)
         metrics.record_stage(stage=stage, status=status, duration_s=latency_ms / 1000)
         yield StageEvent(stage=stage, status=status, latency_ms=latency_ms, detail=detail)
+
+    async def _classify(
+        self, masked_text: str, principal: Principal, *, deadline_at: float
+    ) -> AsyncIterator[Event]:
+        """The ``CLASSIFY`` stage (spec 0005): one stage event, whatever happens.
+
+        The verdict is observed, not yet acted on: it reaches the stage detail and
+        the log, and nothing downstream reads it (``REQ-CLS-011``/``012`` are
+        deferred). So every failure here is soft by construction. The stage says
+        what went wrong and the turn's status is untouched (HLD §7, "Turn
+        unaffected"). The customer channel only — see the spec's §3 on why a
+        business query is not classified.
+        """
+        started = time.perf_counter()
+        status, detail, downstream = StageStatus.SKIPPED, None, None
+        if self._classifier is None:
+            detail = "air-classifier is not configured"
+        elif principal.channel is not Channel.CUSTOMER:
+            detail = "not used on the business channel"
+        else:
+            bound_s = self._classifier.bound_s(_remaining(deadline_at))
+            if bound_s * 1000 < MIN_CLASSIFY_BUDGET_MS:
+                # Ours, not the classifier's: no `downstream` is named.
+                status, detail = StageStatus.DEGRADED, "turn deadline too close to classify"
+            else:
+                try:
+                    verdict = await self._classifier.classify(
+                        masked_text, tenant=principal.tenant, timeout_s=bound_s
+                    )
+                except ClassifierError as exc:
+                    status, detail = StageStatus.DEGRADED, str(exc)
+                    downstream = DownstreamService.CLASSIFIER
+                else:
+                    status, detail = StageStatus.OK, verdict.summary()
+                    _log.info(
+                        "classifier.verdict",
+                        sentiment=label_slug(verdict.sentiment.label),
+                        intent=label_slug(verdict.intent.label) if verdict.intent else None,
+                        urgency=label_slug(verdict.urgency.label),
+                        requires_human=verdict.requires_human,
+                        decided_by=label_slug(verdict.decided_by),
+                    )
+        latency_ms = round((time.perf_counter() - started) * 1000, 3)
+        metrics.record_stage(stage=Stage.CLASSIFY, status=status, duration_s=latency_ms / 1000)
+        yield StageEvent(
+            stage=Stage.CLASSIFY,
+            status=status,
+            latency_ms=latency_ms,
+            detail=detail,
+            downstream=downstream,
+        )
 
     def _should_redact(self, request: TurnRequest, principal: Principal) -> bool:
         """Customer channel: unconditional — `chat.py`'s `reject_privileged_options`

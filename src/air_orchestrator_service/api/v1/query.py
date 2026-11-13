@@ -50,7 +50,7 @@ async def query(
     if not principal.has_scope(SCOPE_QUERY_WRITE):
         raise InsufficientScopeError(f"This key lacks the '{SCOPE_QUERY_WRITE}' scope.")
 
-    engine = TurnEngine(state.settings, state.sessions, state.model_gateway)
+    engine = TurnEngine(state.settings, state.sessions, state.model_gateway, state.classifier)
     streaming = wants_stream(accept)
     events = engine.run(TurnRequest.from_query(body, stream=streaming), principal)
 
