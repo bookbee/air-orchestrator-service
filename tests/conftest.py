@@ -15,12 +15,20 @@ ambient environment is not testing what it claims to.
 
 ``INFRA_BASE_URL`` and ``MODEL_GATEWAY_BASE_URL`` are deliberately not localhost, so that a
 probe escaping the stubs fails loudly rather than quietly reaching a real service.
+
+**Nor on the developer's ``.env``.** ``Settings`` is a pydantic-settings model, so even
+``Settings.model_validate({...})`` merges in ``.env`` and ``AIR_ORCHESTRATOR_SERVICE__*``
+variables. ``_no_ambient_settings`` switches both off for every test. Without it, a
+``.env`` written by ``make env`` to drive the service by hand (classifier enabled, real
+keys) silently enabled downstreams in tests, which then called the live services on
+localhost.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
@@ -41,6 +49,8 @@ from air_orchestrator_service.main import create_app
 from air_orchestrator_service.schemas.common import DependencyStatus
 
 TEST_SALT = "test-salt"
+#: Read from the model rather than restated, so a renamed prefix cannot leak through.
+ENV_PREFIX = str(Settings.model_config["env_prefix"]).upper()
 #: Not localhost: a probe that escapes the stubs must fail, not reach a real gateway.
 INFRA_BASE_URL = "http://air-infra.invalid:8080"
 #: Not localhost, for the same reason: escaping the stub must fail loudly.
@@ -84,6 +94,15 @@ def key_records() -> list[dict[str, Any]]:
             "scopes": [],
         },
     ]
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every ``Settings`` a test builds sees only what the test passes it."""
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    for name in list(os.environ):
+        if name.upper().startswith(ENV_PREFIX):
+            monkeypatch.delenv(name)
 
 
 @pytest.fixture
