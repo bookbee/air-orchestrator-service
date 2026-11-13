@@ -76,8 +76,13 @@ header.
 **Streaming.** Responses are Server-Sent Events, content-negotiated: send
 `Accept: text/event-stream` to stream, anything else to receive the terminal result
 as one JSON body. Every pipeline stage emits as it completes, bracketed by
-`turn.start` and `turn.end`. Ignore event names you do not recognise — that is what
-lets token deltas arrive later without a contract change.
+`turn.start` and `turn.end`. Ignore event names you do not recognise.
+
+The answer streams as `answer.delta` events, then one `answer` event. **`answer` is
+authoritative:** deltas are provisional. On a normal turn `answer` equals the deltas
+concatenated. When the model provider refuses, the stream fails, or the deadline passes,
+`answer` carries the refusal or fallback text instead, and a client that rendered the
+deltas must replace them with it.
 
 Errors are RFC 9457 `application/problem+json`.
 """.strip()

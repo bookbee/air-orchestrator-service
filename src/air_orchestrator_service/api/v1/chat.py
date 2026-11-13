@@ -70,9 +70,10 @@ async def chat(
     reject_privileged_options(body.options, principal)
 
     engine = TurnEngine(state.settings, state.sessions, state.model_gateway)
-    events = engine.run(TurnRequest.from_chat(body), principal)
+    streaming = wants_stream(accept)
+    events = engine.run(TurnRequest.from_chat(body, stream=streaming), principal)
 
-    if wants_stream(accept):
+    if streaming:
         return event_stream_response(events)
 
     include_trace = body.options.include_trace if body.options else True

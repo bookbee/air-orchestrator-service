@@ -23,6 +23,8 @@ from pydantic import ValidationError
 from air_orchestrator_service.clients.model_gateway import (
     ModelGatewayClient,
     ModelGatewayError,
+    StreamDelta,
+    StreamDone,
 )
 from air_orchestrator_service.config import Settings
 
@@ -473,4 +475,143 @@ async def test_generate_forwards_the_bound_request_id() -> None:
         clear_request_context()
 
     assert route.calls.last.request.headers["X-Request-ID"] == "req_test123"
+    await client.aclose()
+
+
+# ── stream() (spec 0004) ──────────────────────────────────────────────────────
+
+
+def _sse(*frames: tuple[str, object]) -> bytes:
+    return "".join(f"event: {e}\ndata: {json.dumps(d)}\n\n" for e, d in frames).encode()
+
+
+_DONE = {
+    "id": "g1",
+    "model": "claude-sonnet-5",
+    "provider": "anthropic",
+    "usage": {"prompt_tokens": 9, "completion_tokens": 3},
+    "cost_usd": 0.0004,
+    "cached": False,
+    "refusal": False,
+    "finish_reason": "stop",
+}
+
+
+async def _drain(client: ModelGatewayClient) -> list[Any]:
+    items: list[Any] = []
+    async with client.stream(messages=MESSAGES) as stream:
+        while True:
+            item = await stream.next(timeout=2.0)
+            items.append(item)
+            if isinstance(item, StreamDone):
+                return items
+
+
+@respx.mock
+async def test_stream_yields_deltas_then_the_summary() -> None:
+    """REQ-STRM-012: framing parsed, `start` ignored, usage and cost from `done`."""
+    route = respx.post(f"{BASE}/v1/generate").mock(
+        return_value=httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=_sse(
+                ("start", {"id": "g1", "model": "m", "provider": "anthropic", "cached": False}),
+                ("delta", {"content": "Hel"}),
+                ("delta", {"content": "lo"}),
+                ("done", _DONE),
+            ),
+        )
+    )
+    client = _client()
+
+    items = await _drain(client)
+
+    assert [i.text for i in items if isinstance(i, StreamDelta)] == ["Hel", "lo"]
+    done = items[-1]
+    assert isinstance(done, StreamDone)
+    assert done.result.cost_usd == 0.0004
+    assert done.result.usage.prompt_tokens == 9
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["stream"] is True
+    assert set(sent) <= GATEWAY_GENERATE_FIELDS
+    await client.aclose()
+
+
+@respx.mock
+async def test_stream_error_event_raises_after_deltas() -> None:
+    """REQ-STRM-012: an `error` event replaces `done`; the text so far is incomplete."""
+    respx.post(f"{BASE}/v1/generate").mock(
+        return_value=httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=_sse(
+                ("start", {"id": "g1", "model": "m", "provider": "gemini", "cached": False}),
+                ("delta", {"content": "Partial"}),
+                ("error", {"code": "provider_unavailable", "detail": "went silent"}),
+            ),
+        )
+    )
+    client = _client()
+
+    async with client.stream(messages=MESSAGES) as stream:
+        first = await stream.next(timeout=2.0)
+        with pytest.raises(ModelGatewayError) as caught:
+            await stream.next(timeout=2.0)
+
+    assert isinstance(first, StreamDelta)
+    assert caught.value.code == "provider_unavailable"
+    assert caught.value.retryable is True
+    await client.aclose()
+
+
+@respx.mock
+async def test_a_stream_refused_before_start_is_classified() -> None:
+    """REQ-STRM-009: a plain HTTP problem before the first byte, classified exactly as
+    the non-streaming call — a spent budget is still not retryable."""
+    respx.post(f"{BASE}/v1/generate").mock(
+        return_value=httpx.Response(429, json={"code": "budget_exceeded", "status": 429})
+    )
+    client = _client()
+
+    async with client.stream(messages=MESSAGES) as stream:
+        with pytest.raises(ModelGatewayError) as caught:
+            await stream.next(timeout=2.0)
+
+    assert caught.value.code == "budget_exceeded"
+    assert caught.value.retryable is False
+    await client.aclose()
+
+
+class _NeverEndingStream(httpx.AsyncByteStream):
+    """Sends `start` and one delta, then hangs — a long answer still generating."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def __aiter__(self) -> Any:
+        yield _sse(("start", {"id": "g", "model": "m", "provider": "anthropic", "cached": False}))
+        yield _sse(("delta", {"content": "still going"}))
+        await asyncio.Event().wait()
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@respx.mock
+async def test_closing_a_stream_closes_the_gateway_connection() -> None:
+    """REQ-STRM-007: closing the connection is what makes the gateway stop generating
+    — and stop billing — when the turn's own client goes away or its deadline passes."""
+    body = _NeverEndingStream()
+    respx.post(f"{BASE}/v1/generate").mock(
+        return_value=httpx.Response(200, headers={"Content-Type": "text/event-stream"}, stream=body)
+    )
+    client = _client()
+
+    async with client.stream(messages=MESSAGES) as stream:
+        first = await stream.next(timeout=2.0)
+        with pytest.raises(TimeoutError):
+            await stream.next(timeout=0.05)  # the caller's deadline, not the gateway's
+
+    assert isinstance(first, StreamDelta)
+    assert body.closed is True
     await client.aclose()

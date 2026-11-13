@@ -111,13 +111,18 @@ def app(settings: Settings) -> FastAPI:
     rather than as a fixture every turn-test file has to remember to request,
     the same reasoning that put ``reachable_infra``/``reachable_model_gateway``
     one level up from the tests that need them. A test that wants the real
-    failure path reassigns ``state.model_gateway.generate`` again itself.
+    failure path reassigns ``state.model_gateway.generate`` again itself. An SSE
+    turn streams (spec 0004), so ``stream`` is scripted the same way — the
+    canned answer in two deltas — and a streaming test passes its own script.
     """
     from air_orchestrator_service.api.deps import STATE_ATTR
 
     built = create_app(settings)
     state = getattr(built.state, STATE_ATTR)
     state.model_gateway.generate = _canned_generate  # type: ignore[method-assign]
+    state.model_gateway.stream = scripted_stream(  # type: ignore[method-assign]
+        CANNED_ANSWER[:20], CANNED_ANSWER[20:], canned_summary()
+    )
     return built
 
 
@@ -260,3 +265,77 @@ async def _canned_generate(
 
 def auth(key: str) -> dict[str, str]:
     return {"X-API-Key": key}
+
+
+#: In a :func:`scripted_stream` script, the stream stops producing and waits forever.
+HANG = object()
+
+
+def canned_summary(*, refusal: bool = False, cost_usd: float = 0.001) -> Any:
+    """The gateway's ``done`` summary for a scripted stream: no content (that was
+    the deltas), usage and cost as a real stream reports them."""
+    from air_orchestrator_service.clients.model_gateway import GenerateResult, GenerateUsage
+
+    return GenerateResult(
+        content="",
+        refusal=refusal,
+        cost_usd=cost_usd,
+        finish_reason="stop",
+        usage=GenerateUsage(prompt_tokens=10, completion_tokens=5),
+    )
+
+
+class ScriptedStream:
+    """A stand-in for ``ModelGatewayClient.stream`` that replays a script through a
+    *real* :class:`GatewayStream` — so the queue, the per-read timeout and close-on-
+    exit are the production ones, and only the HTTP is replaced.
+
+    Script items: ``str`` → a delta; a ``GenerateResult`` → ``done``; a
+    ``ModelGatewayError`` → raised by the read that reaches it; :data:`HANG` → the
+    producer stalls until cancelled. ``calls`` counts opened streams; ``closed``
+    records that the producer was cancelled rather than running to its end.
+    """
+
+    def __init__(self, *script: Any) -> None:
+        self.script = script
+        self.calls = 0
+        self.closed = False
+
+    def __call__(self, *, messages: list[dict[str, str]], max_tokens: int = 1024) -> Any:
+        import asyncio
+
+        from air_orchestrator_service.clients.model_gateway import (
+            GatewayStream,
+            GenerateResult,
+            ModelGatewayError,
+            StreamDelta,
+            StreamDone,
+        )
+
+        self.calls += 1
+
+        async def produce(put: Any) -> None:
+            try:
+                for item in self.script:
+                    await asyncio.sleep(0)
+                    if item is HANG:
+                        await asyncio.Event().wait()
+                    elif isinstance(item, str):
+                        put(StreamDelta(item))
+                    elif isinstance(item, GenerateResult):
+                        put(StreamDone(item))
+                    elif isinstance(item, ModelGatewayError):
+                        put(item)
+                        return
+                    else:
+                        raise TypeError(f"unscriptable stream item: {item!r}")
+            except asyncio.CancelledError:
+                self.closed = True
+                raise
+
+        return GatewayStream(produce)
+
+
+def scripted_stream(*script: Any) -> ScriptedStream:
+    """Build a :class:`ScriptedStream` — see its docstring for the script items."""
+    return ScriptedStream(*script)

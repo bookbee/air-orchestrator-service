@@ -182,8 +182,8 @@ async def test_capabilities_reports_only_configured_routes(client: httpx.AsyncCl
     assert response.json()["routes"] == ["direct"]
 
 
-async def test_capabilities_admits_it_cannot_stream_tokens(client: httpx.AsyncClient) -> None:
-    """Token deltas are not relayed yet, and the capability says so.
+async def test_capabilities_reports_token_deltas(client: httpx.AsyncClient) -> None:
+    """REQ-STRM-011: this build streams the answer, and says so.
 
     A client must be able to tell a build that *cannot* stream tokens from one that
     merely did not this time, so the capability is reported rather than implied.
@@ -193,7 +193,7 @@ async def test_capabilities_admits_it_cannot_stream_tokens(client: httpx.AsyncCl
     streaming = response.json()["streaming"]
     assert streaming["sse"] is True
     assert streaming["stage_events"] is True
-    assert streaming["token_deltas"] is False
+    assert streaming["token_deltas"] is True
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────────

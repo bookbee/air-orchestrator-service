@@ -93,6 +93,7 @@ and gains `**Status:** Superseded by NNNN` — the id is a permanent address.
 | `MUT` | [0001 — mutation gate](0001-mutation-gate/spec.md) |
 | `SESS` | [0002 — durable sessions](0002-durable-sessions/spec.md) |
 | `MGW` | [0003 — air-model-gateway integration](0003-model-gateway/spec.md) |
+| `STRM` | [0004 — streaming the answer](0004-answer-streaming/spec.md) |
 
 Ids are never reused or renumbered. A withdrawn requirement stays in the table marked
 `Withdrawn`, because commit messages and test docstrings still point at it.

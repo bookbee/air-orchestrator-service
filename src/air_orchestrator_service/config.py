@@ -108,6 +108,10 @@ class ModelGatewaySettings(BaseModel):
     #: Readiness probes must not inherit the generous turn timeout: a slow probe
     #: turns a health check into an outage detector that fires too late.
     health_timeout_s: float = Field(default=2.0, gt=0)
+    #: A streamed answer's limit on *silence* between frames, not its duration
+    #: (the turn deadline bounds that). Above the gateway's own 30 s idle limit, so
+    #: the gateway's `error` event — which says why — arrives before this fires.
+    stream_idle_timeout_s: float = Field(default=45.0, gt=0)
 
     @property
     def configured(self) -> bool:

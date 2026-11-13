@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from air_orchestrator_service.guardrails.pii import mask_input, scan_output
+from air_orchestrator_service.guardrails.pii import StreamRedactor, mask_input, scan_output
 
 # ── Input ─────────────────────────────────────────────────────────────────────
 
@@ -83,3 +83,73 @@ def test_clean_text_is_not_flagged() -> None:
 
     assert verdict.flagged is False
     assert verdict.safe_text == "Your order ships tomorrow."
+
+
+# ── Streaming (spec 0004) ─────────────────────────────────────────────────────
+
+#: Every output category, several spanning whitespace, with ordinary prose around
+#: them so a split can land anywhere: inside a token, between tokens, in a match.
+_PII_DENSE = (
+    "Thanks for waiting. I've updated the record: email vikram.s@example.com, "
+    "phone +91 98765 43210, card 4111 1111 1111 1111, and the order "
+    "1234567890123456 stays as is. Your API key sk-abcdefghijklmnopqrstuvwx "
+    "was rotated; the old link postgres://admin:hunter2@db.internal:5432/app "
+    "no longer works. Anything else?"
+)
+
+
+def _stream(chunks: list[str]) -> tuple[list[str], str]:
+    """Feed chunks, returning the cumulative released text after each one, and the
+    final released text after `finish()`."""
+    redactor = StreamRedactor()
+    released = ""
+    seen: list[str] = []
+    for chunk in chunks:
+        released += redactor.feed(chunk)
+        seen.append(released)
+    released += redactor.finish()
+    return seen, released
+
+
+def test_stream_redactor_never_releases_split_pii() -> None:
+    """REQ-STRM-003 (AC-1): a phone number split across deltas, each half harmless alone."""
+    text = "Sure — call me on 555 12" + "3 4567 tomorrow morning, " + "x" * 80 + " done."
+    final = scan_output(text).safe_text
+    assert "555 123 4567" not in final  # the final scan does redact it
+
+    chunks = ["Sure — call me on 555 12", "3 4567 tomorrow morning, ", "x" * 80, " done."]
+    seen, released = _stream(chunks)
+
+    for partial in seen:
+        assert "555 12" not in partial
+        assert "3 4567" not in partial
+        assert final.startswith(partial)
+    assert released == final
+
+
+def test_stream_redactor_matches_the_final_scan_under_any_chunking() -> None:
+    """REQ-STRM-003: at every split point, and fed one character at a time, everything
+    released so far is a prefix of the final redacted answer — so it can never contain
+    what that answer masks — and the whole release equals it."""
+    final = scan_output(_PII_DENSE).safe_text
+    assert "4111 1111 1111 1111" not in final and "hunter2" not in final  # sanity
+
+    for i in range(1, len(_PII_DENSE)):
+        seen, released = _stream([_PII_DENSE[:i], _PII_DENSE[i:]])
+        assert all(final.startswith(partial) for partial in seen), f"split at {i}"
+        assert released == final, f"split at {i}"
+
+    seen, released = _stream(list(_PII_DENSE))
+    assert all(final.startswith(partial) for partial in seen)
+    assert released == final
+
+
+def test_stream_redactor_releases_ordinary_prose_before_the_end() -> None:
+    """The point of streaming: text with nothing to hide flows, a hold-back behind."""
+    words = [f"word{i} " for i in range(60)]
+    redactor = StreamRedactor()
+
+    released = "".join(redactor.feed(w) for w in words)
+
+    assert released  # something came out mid-stream
+    assert len("".join(words)) - len(released) >= 64  # but the tail was held back

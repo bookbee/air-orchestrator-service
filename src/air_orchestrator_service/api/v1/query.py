@@ -51,9 +51,10 @@ async def query(
         raise InsufficientScopeError(f"This key lacks the '{SCOPE_QUERY_WRITE}' scope.")
 
     engine = TurnEngine(state.settings, state.sessions, state.model_gateway)
-    events = engine.run(TurnRequest.from_query(body), principal)
+    streaming = wants_stream(accept)
+    events = engine.run(TurnRequest.from_query(body, stream=streaming), principal)
 
-    if wants_stream(accept):
+    if streaming:
         return event_stream_response(events)
 
     include_trace = body.options.include_trace if body.options else True

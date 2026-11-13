@@ -29,6 +29,16 @@ configured provider in this deployment? It is in-process on the gateway and bill
 nothing, unlike a probe ``/v1/generate``. The two run concurrently, each under the
 short health timeout.
 
+**Why a stream runs in its own task** (spec 0004). ``api/sse.py`` drives the turn
+engine one event at a time, each step in a *separate* task, so its heartbeat never
+stalls behind a slow stage. An httpx response stream held open across those steps
+would be entered in one task and closed in another. :class:`GatewayStream` instead
+does all of a stream's I/O in one producer task that parses the gateway's SSE frames
+into a queue; the engine only reads the queue, with its own deadline on each read.
+Closing the stream cancels that task, which exits the httpx context where it was
+entered and closes the connection — and closing the connection is what makes the
+gateway stop generating (and stop billing) when the turn's client goes away.
+
 The ``httpx.AsyncClient`` is created lazily behind a lock: built in ``__init__`` it
 would bind to whichever event loop existed at construction, which breaks under a
 uvicorn reload and most test harnesses.
@@ -37,8 +47,13 @@ uvicorn reload and most test harnesses.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import re
 import time
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from types import TracebackType
 from typing import Any, Final
 
 import httpx
@@ -56,10 +71,13 @@ from air_orchestrator_service.observability.logging import current_request_id, g
 from air_orchestrator_service.schemas.common import DependencyStatus
 
 __all__ = [
+    "GatewayStream",
     "GenerateResult",
     "GenerateUsage",
     "ModelGatewayClient",
     "ModelGatewayError",
+    "StreamDelta",
+    "StreamDone",
 ]
 
 logger = get_logger(__name__)
@@ -155,6 +173,66 @@ class ModelGatewayError(Exception):
         self.retryable = retryable
         self.status = status
         self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class StreamDelta:
+    """A slice of the answer text, in order. Raw model output: not yet guardrailed."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class StreamDone:
+    """The stream finished. ``result.content`` is empty — the text was the deltas —
+    but usage, cost, ``refusal`` and ``finish_reason`` are the gateway's summary."""
+
+    result: GenerateResult
+
+
+StreamItem = StreamDelta | StreamDone
+
+
+class GatewayStream:
+    """One streamed generation. Use as ``async with`` and read with :meth:`next`.
+
+    :meth:`next` returns :class:`StreamDelta` items, then exactly one
+    :class:`StreamDone`, or raises :class:`ModelGatewayError` — for a refusal before
+    the first byte (classified exactly as :meth:`ModelGatewayClient.generate`), or
+    for a stream that broke after it started (the gateway's ``error`` event, a lost
+    connection). ``asyncio.TimeoutError`` from :meth:`next` means *the caller's*
+    deadline passed, not the gateway's; the caller closes the stream.
+    """
+
+    def __init__(self, open_stream: Any) -> None:
+        self._open = open_stream
+        self._queue: asyncio.Queue[StreamItem | ModelGatewayError] = asyncio.Queue()
+        self._task: asyncio.Task[None] | None = None
+
+    async def __aenter__(self) -> GatewayStream:
+        self._task = asyncio.create_task(self._open(self._queue.put_nowait))
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        await self.aclose()
+
+    async def next(self, *, timeout: float | None) -> StreamItem:  # noqa: ASYNC109
+        item = await asyncio.wait_for(self._queue.get(), timeout=timeout)
+        if isinstance(item, ModelGatewayError):
+            raise item
+        return item
+
+    async def aclose(self) -> None:
+        """Stop the producer and close the gateway connection. Idempotent."""
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
 
 
 class ModelGatewayClient:
@@ -315,6 +393,75 @@ class ModelGatewayClient:
             return GenerateResult.model_validate(response.json())
         raise self._classify(response)
 
+    def stream(self, *, messages: list[dict[str, str]], max_tokens: int = 1024) -> GatewayStream:
+        """A streamed generation (``stream: true``). See :class:`GatewayStream`.
+
+        Prose only: a schema-constrained answer is usable only once complete, so it
+        stays on :meth:`generate`. The read timeout is ``stream_idle_timeout_s``, a
+        limit on *silence*, set above the gateway's own 30 s idle limit so that the
+        gateway's ``error`` event, which says why, arrives before ours fires. Total
+        duration is the caller's deadline, enforced on each :meth:`GatewayStream.next`.
+        """
+        body = self._body(messages, max_tokens, None, None)
+        body["stream"] = True
+        headers = self._trace_headers()
+        timeout = httpx.Timeout(self._config.timeout_s, read=self._config.stream_idle_timeout_s)
+
+        async def produce(put: Any) -> None:
+            try:
+                await self._produce(put, body, headers, http_timeout=timeout)
+            except ModelGatewayError as exc:
+                put(exc)
+            except httpx.TimeoutException:
+                metrics.record_downstream_call(service=_SERVICE, outcome="timeout")
+                put(ModelGatewayError("the stream went silent", retryable=True))
+            except httpx.HTTPError as exc:
+                metrics.record_downstream_call(service=_SERVICE, outcome="unavailable")
+                put(ModelGatewayError(f"stream lost ({type(exc).__name__})", retryable=True))
+            except (ValueError, KeyError, TypeError) as exc:
+                metrics.record_downstream_call(service=_SERVICE, outcome="error")
+                logger.error("model_gateway.stream_malformed", error=type(exc).__name__)
+                put(ModelGatewayError("malformed stream", retryable=False))
+
+        return GatewayStream(produce)
+
+    async def _produce(
+        self,
+        put: Any,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        *,
+        http_timeout: httpx.Timeout,
+    ) -> None:
+        client = await self._http()
+        async with client.stream(
+            "POST", _GENERATE_PATH, json=body, headers=headers, timeout=http_timeout
+        ) as response:
+            if response.status_code != httpx.codes.OK:
+                # Refused before the first byte: a plain problem body, classified
+                # exactly like the non-streaming call (REQ-STRM-009).
+                await response.aread()
+                raise self._classify(response)
+            async for event, data in _sse_frames(response.aiter_lines()):
+                if event == "delta":
+                    put(StreamDelta(str(json.loads(data).get("content", ""))))
+                elif event == "done":
+                    metrics.record_downstream_call(service=_SERVICE, outcome="ok")
+                    put(StreamDone(GenerateResult.model_validate(json.loads(data))))
+                    return
+                elif event == "error":
+                    metrics.record_downstream_call(service=_SERVICE, outcome="error")
+                    code = _slug(json.loads(data).get("code"))
+                    logger.warning("model_gateway.stream_interrupted", code=code)
+                    suffix = f" ({code})" if code else ""
+                    raise ModelGatewayError(
+                        f"air-model-gateway stream interrupted{suffix}", retryable=True, code=code
+                    )
+                # `start` and any event name we do not know: ignored, as the
+                # gateway's contract (and our own) asks of clients.
+        metrics.record_downstream_call(service=_SERVICE, outcome="error")
+        raise ModelGatewayError("stream ended without a summary", retryable=True)
+
     def _classify(self, response: httpx.Response) -> ModelGatewayError:
         """Turn a non-200 into a classified error, logging it at a level that
         matches whose problem it is."""
@@ -357,3 +504,24 @@ def _problem_code(response: httpx.Response) -> str | None:
 
 def _slug(code: object) -> str | None:
     return code if isinstance(code, str) and _CODE_SHAPE.match(code) else None
+
+
+async def _sse_frames(lines: AsyncIterator[str]) -> AsyncIterator[tuple[str, str]]:
+    """``(event, data)`` per Server-Sent Events frame: ``event:`` and ``data:`` lines,
+    dispatched on a blank line. Multi-line ``data`` is joined with newlines, per the
+    SSE spec; comment lines (``:``) are skipped."""
+    event = "message"
+    data: list[str] = []
+    async for line in lines:
+        if not line:
+            if data:
+                yield event, "\n".join(data)
+            event, data = "message", []
+        elif line.startswith(":"):
+            continue
+        elif line.startswith("event:"):
+            event = line[6:].strip()
+        elif line.startswith("data:"):
+            data.append(line[5:].removeprefix(" "))
+    if data:
+        yield event, "\n".join(data)

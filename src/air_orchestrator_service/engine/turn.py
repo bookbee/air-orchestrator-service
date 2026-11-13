@@ -50,6 +50,7 @@ from air_orchestrator_service.clients.model_gateway import (
     GenerateResult,
     ModelGatewayClient,
     ModelGatewayError,
+    StreamDelta,
 )
 from air_orchestrator_service.config import Settings
 from air_orchestrator_service.constants import (
@@ -65,7 +66,7 @@ from air_orchestrator_service.constants import (
 from air_orchestrator_service.guardrails.boundary import delimit
 from air_orchestrator_service.guardrails.escalation import wants_human
 from air_orchestrator_service.guardrails.injection import screen_input
-from air_orchestrator_service.guardrails.pii import mask_input, scan_output
+from air_orchestrator_service.guardrails.pii import StreamRedactor, mask_input, scan_output
 from air_orchestrator_service.guardrails.scope import screen_scope
 from air_orchestrator_service.memory.session import InMemorySessionStore
 from air_orchestrator_service.observability import metrics
@@ -81,6 +82,7 @@ from air_orchestrator_service.schemas.chat import (
 )
 from air_orchestrator_service.schemas.common import Principal, Usage
 from air_orchestrator_service.schemas.events import (
+    AnswerDeltaEvent,
     AnswerEvent,
     ErrorEvent,
     Event,
@@ -141,7 +143,7 @@ _SESSION_BUDGET_EXHAUSTED: Final[str] = (
 class TurnRequest:
     """The two route bodies, normalised to what the engine actually needs."""
 
-    __slots__ = ("confirm", "options", "output_schema", "session_id", "text")
+    __slots__ = ("confirm", "options", "output_schema", "session_id", "stream", "text")
 
     def __init__(
         self,
@@ -151,29 +153,36 @@ class TurnRequest:
         options: TurnOptions | None,
         confirm: object | None = None,
         output_schema: dict[str, Any] | None = None,
+        stream: bool = False,
     ) -> None:
         self.text = text
         self.session_id = session_id
         self.options = options or TurnOptions()
         self.confirm = confirm
         self.output_schema = output_schema
+        #: The caller is reading Server-Sent Events, so the prose answer is
+        #: streamed as `answer.delta` (spec 0004). A JSON caller's turn makes the
+        #: non-streaming call, which keeps the gateway's full failover.
+        self.stream = stream
 
     @classmethod
-    def from_chat(cls, body: ChatRequest) -> TurnRequest:
+    def from_chat(cls, body: ChatRequest, *, stream: bool = False) -> TurnRequest:
         return cls(
             text=body.message,
             session_id=body.session_id,
             options=body.options,
             confirm=body.confirm,
+            stream=stream,
         )
 
     @classmethod
-    def from_query(cls, body: QueryRequest) -> TurnRequest:
+    def from_query(cls, body: QueryRequest, *, stream: bool = False) -> TurnRequest:
         return cls(
             text=body.query,
             session_id=body.session_id,
             options=body.options,
             output_schema=body.output_schema,
+            stream=stream,
         )
 
 
@@ -435,7 +444,7 @@ class TurnEngine:
         synth_started = time.perf_counter()
         outcome = _Synthesis()
         try:
-            await self._answer(
+            async for delta in self._answer(
                 request,
                 masked_text,
                 principal,
@@ -444,7 +453,23 @@ class TurnEngine:
                 propose,
                 outcome,
                 deadline_at=turn_started + deadline_s if needs_model else None,
+            ):
+                yield delta
+        except TimeoutError:
+            # The turn's own deadline ran out while the answer streamed (spec 0004,
+            # REQ-STRM-006). Ours, not the gateway's: no `downstream` is named.
+            self._last_status = TurnStatus.DEGRADED
+            yield StageEvent(
+                stage=Stage.SYNTHESISE,
+                status=StageStatus.DEGRADED,
+                latency_ms=round((time.perf_counter() - synth_started) * 1000, 3),
+                detail="turn deadline reached while the answer was streaming",
             )
+            async for event in self._finish_with_answer(
+                turn_id, masked_text, principal, session, text=_DEGRADED_ANSWER
+            ):
+                yield event
+            return
         except ModelGatewayError as exc:
             self._last_status = TurnStatus.DEGRADED
             yield StageEvent(
@@ -467,12 +492,17 @@ class TurnEngine:
         detail = "model provider refused" if outcome.refused else None
         if detail is None and outcome.prompt_version:
             detail = f"prompt={outcome.prompt_version}"
+            if outcome.streamed:
+                detail += " streamed"
         yield StageEvent(
             stage=Stage.SYNTHESISE,
             status=StageStatus.BLOCKED if outcome.refused else StageStatus.OK,
             latency_ms=round((time.perf_counter() - synth_started) * 1000, 3),
             detail=detail,
         )
+        # The answer event carries the *complete* text, scanned whole by
+        # `_finish_with_answer` — so it is authoritative over any deltas: equal to
+        # their concatenation on a normal turn, the refusal text on a refusal.
         async for event in self._finish_with_answer(
             turn_id,
             masked_text,
@@ -668,16 +698,18 @@ class TurnEngine:
         outcome: _Synthesis,
         *,
         deadline_at: float | None,
-    ) -> None:
-        """Synthesis proper. Fills ``outcome`` rather than returning a tuple, so the
-        pipeline reads the result by name.
+    ) -> AsyncIterator[AnswerDeltaEvent]:
+        """Synthesis proper. Fills ``outcome``; yields ``answer.delta`` events only
+        when the caller is streaming (an async generator has no return value, hence
+        the holder).
 
         Confirmation/proposal replies stay canned — there is no model call to make
         for a scripted stand-in mutation that touches nothing real, so the deadline
         and the prompt registry are irrelevant to those two branches.
 
-        Raises `ModelGatewayError` on a real synthesis failure — the caller decides
-        the degraded fallback; this method's job is only to try.
+        Raises `ModelGatewayError` on a real synthesis failure, and `TimeoutError`
+        when the turn's deadline passes mid-stream — the caller decides the degraded
+        fallback; this method's job is only to try.
         """
         if confirmed is not None:
             outcome.text = (
@@ -705,15 +737,25 @@ class TurnEngine:
         )
         outcome.prompt_version = f"{prompt.route}:{prompt.version}"
 
-        result = await self._gateway.generate(
-            messages=messages,
-            max_tokens=_SYNTHESIS_MAX_TOKENS,
-            timeout=_remaining(deadline_at),
-        )
+        if request.stream:
+            outcome.streamed = True
+            result: GenerateResult | None = None
+            async for event in self._stream_prose(messages, deadline_at, outcome):
+                if isinstance(event, AnswerDeltaEvent):
+                    yield event
+                else:
+                    result = event
+            assert result is not None  # `_stream_prose` always ends with the summary
+        else:
+            result = await self._gateway.generate(
+                messages=messages,
+                max_tokens=_SYNTHESIS_MAX_TOKENS,
+                timeout=_remaining(deadline_at),
+            )
         outcome.usage = _usage(result)
         if result.refusal:
-            # Billed, so the usage stands; the content (empty on a refusal) does
-            # not. No structured
+            # Billed, so the usage stands; the content (empty on a refusal, partial
+            # and already-streamed on a streamed one) does not. No structured
             # follow-up: a second call on a refused question would spend money to be
             # refused again.
             outcome.text = _PROVIDER_REFUSAL
@@ -756,6 +798,45 @@ class TurnEngine:
             usage.completion_tokens += schema_usage.completion_tokens
             usage.total_tokens += schema_usage.total_tokens
             usage.cost_usd += schema_usage.cost_usd
+
+    async def _stream_prose(
+        self, messages: list[dict[str, str]], deadline_at: float | None, outcome: _Synthesis
+    ) -> AsyncIterator[AnswerDeltaEvent | GenerateResult]:
+        """The prose call, streamed (spec 0004): guardrailed deltas, then the
+        gateway's summary with ``content`` set to the whole raw text.
+
+        Every delta passes through :class:`StreamRedactor`, which only ever releases
+        a prefix of the final redacted answer — PII split across model chunks never
+        streams (REQ-STRM-003). On a refusal nothing more is released: the
+        authoritative answer that follows replaces what was sent (REQ-STRM-004).
+
+        The deadline is checked on every read rather than wrapped around the loop:
+        this generator is resumed from a different task for each event
+        (``api/sse.py``), so a single ``asyncio.timeout`` would cancel the wrong one.
+        Leaving the ``async with`` — normally, on the deadline, or because the client
+        disconnected and the generator was closed — closes the gateway connection.
+        """
+        redactor = StreamRedactor()
+        async with self._gateway.stream(
+            messages=messages, max_tokens=_SYNTHESIS_MAX_TOKENS
+        ) as stream:
+            while True:
+                remaining = _remaining(deadline_at)
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError
+                item = await stream.next(timeout=remaining)
+                if isinstance(item, StreamDelta):
+                    safe = redactor.feed(item.text)
+                    if safe:
+                        yield AnswerDeltaEvent(text=safe)
+                    continue
+                result = item.result
+                break
+        if not result.refusal:
+            tail = redactor.finish()
+            if tail:
+                yield AnswerDeltaEvent(text=tail)
+        yield result.model_copy(update={"content": redactor.text})
 
     async def _structured_answer(
         self, masked_text: str, output_schema: dict[str, Any], *, timeout_s: float | None
@@ -802,9 +883,10 @@ class TurnEngine:
 
 
 class _Synthesis:
-    """What synthesis produced — the holder `_answer` fills."""
+    """What synthesis produced — the holder `_answer` fills, since an async
+    generator cannot return a value."""
 
-    __slots__ = ("prompt_version", "refused", "structured", "text", "usage")
+    __slots__ = ("prompt_version", "refused", "streamed", "structured", "text", "usage")
 
     def __init__(self) -> None:
         self.text = ""
@@ -812,6 +894,7 @@ class _Synthesis:
         self.usage = Usage(model_calls=0, cost_usd=0.0, cache_hit=False)
         self.prompt_version: str | None = None
         self.refused = False
+        self.streamed = False
 
 
 def _remaining(deadline_at: float | None) -> float | None:

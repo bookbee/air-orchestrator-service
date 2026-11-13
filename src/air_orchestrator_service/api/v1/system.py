@@ -164,10 +164,11 @@ async def capabilities(
         streaming={
             "sse": True,
             "stage_events": True,
-            # False until the gateway's stream is relayed as `answer.delta`.
+            # An SSE turn streams its prose answer as `answer.delta` (spec 0004).
             # Reported rather than assumed so a client can tell a build that
-            # cannot stream tokens from one that simply did not this time.
-            "token_deltas": False,
+            # cannot stream tokens from one that simply did not this time (a
+            # canned reply, or a stream that failed before its first delta).
+            "token_deltas": True,
         },
         session={
             "backend": settings.session.backend,
