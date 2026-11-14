@@ -71,7 +71,11 @@ async def chat(
 
     engine = TurnEngine(state.settings, state.sessions, state.model_gateway, state.classifier)
     streaming = wants_stream(accept)
-    events = engine.run(TurnRequest.from_chat(body, stream=streaming), principal)
+    turn = TurnRequest.from_chat(body, stream=streaming)
+    # Before the response shape is chosen, so an unknown session is a 404 status
+    # line on a stream too, not an `error` event after headers (REQ-VAL-001).
+    await engine.open(turn, principal)
+    events = engine.run(turn, principal)
 
     if streaming:
         return event_stream_response(events)

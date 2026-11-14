@@ -1014,14 +1014,15 @@
                 "items": {
                   "$ref": "#/components/schemas/Route"
                 },
-                "type": "array"
+                "type": "array",
+                "minItems": 1
               },
               {
                 "type": "null"
               }
             ],
             "title": "Allow Routes",
-            "description": "Restrict the planner to these routes. Cannot add a route that is not live."
+            "description": "Restrict the planner to these routes. Cannot add a route that is not live. Omit it for the default; an empty list is refused."
           },
           "use_cache": {
             "anyOf": [

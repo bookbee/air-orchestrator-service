@@ -49,6 +49,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any, Final
 
+from air_orchestrator_service.api.errors import SessionNotFoundError
 from air_orchestrator_service.clients.classifier import (
     MIN_CALL_MS,
     ClassifierClient,
@@ -226,13 +227,30 @@ class TurnEngine:
         #: What air-classifier reported spending on this turn (spec 0008,
         #: ``REQ-COST-005``). Per request, like `_last_status`.
         self._classifier_cost_usd = 0.0
+        #: Set by `open()`: the turn's clock and its session.
+        self._opened: tuple[float, Session] | None = None
+
+    async def open(self, request: TurnRequest, principal: Principal) -> None:
+        """Start the turn's clock and resolve its session, before any event.
+
+        Raises :class:`SessionNotFoundError` for a ``session_id`` this caller cannot
+        see (spec 0009, ``REQ-VAL-001``). A route awaits this *before* it picks a
+        response shape, so on a streaming request the 404 is the status line, not an
+        ``error`` event after headers have gone. :meth:`run` calls it when a caller
+        did not.
+        """
+        started = time.perf_counter()
+        session = await self._resolve_session(request.session_id, principal)
+        self._opened = (started, session)
 
     async def run(self, request: TurnRequest, principal: Principal) -> AsyncIterator[Event]:
         turn_id = f"{_TURN_ID_PREFIX}{uuid.uuid4().hex}"
-        started = time.perf_counter()
         status = TurnStatus.OK
 
-        session = await self._resolve_session(request.session_id, principal)
+        if self._opened is None:
+            await self.open(request, principal)
+        assert self._opened is not None
+        started, session = self._opened
 
         yield TurnStartEvent(
             turn_id=turn_id, session_id=session.session_id, channel=principal.channel
@@ -830,11 +848,16 @@ class TurnEngine:
     # ── Pieces ────────────────────────────────────────────────────────────────
 
     async def _resolve_session(self, session_id: str | None, principal: Principal) -> Session:
-        if session_id is not None:
-            existing = await self._sessions.get(session_id, principal)
-            if existing is not None:
-                return existing
-        return await self._sessions.create(principal)
+        """No id starts a session. An id that does not resolve is a 404, never a
+        silent new session: a client that sent one believes it is continuing a
+        conversation (``REQ-VAL-001``). Absent, expired and another tenant's are the
+        same 404, as on ``GET /v1/sessions/{id}`` (Article IV)."""
+        if session_id is None:
+            return await self._sessions.create(principal)
+        existing = await self._sessions.get(session_id, principal)
+        if existing is None:
+            raise SessionNotFoundError("No such session.")
+        return existing
 
     async def _resolve_confirmation(
         self, request: TurnRequest, session: Session

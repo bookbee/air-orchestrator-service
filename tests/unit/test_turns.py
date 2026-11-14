@@ -63,16 +63,6 @@ async def test_history_is_bounded_by_the_configured_window(
     assert len(view.json()["turns"]) <= window
 
 
-async def test_an_unknown_session_id_starts_a_new_one_rather_than_erroring(
-    client: httpx.AsyncClient,
-) -> None:
-    """A guessed id must reveal nothing about whether it existed."""
-    result = await _chat(client, session_id="sess_does_not_exist", message="hello")
-
-    assert result["session_id"] != "sess_does_not_exist"
-    assert result["answer"] == CANNED_ANSWER
-
-
 async def test_reading_someone_elses_session_is_a_404(client: httpx.AsyncClient) -> None:
     """Indistinguishable from a missing one, so this is not an enumeration oracle."""
     mine = await _chat(client, message="private")
