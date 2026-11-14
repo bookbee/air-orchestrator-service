@@ -25,6 +25,7 @@ from air_orchestrator_service.api.errors import (
     MissingApiKeyError,
 )
 from air_orchestrator_service.api.middleware import KEY_ID_ATTR
+from air_orchestrator_service.clients.base import DownstreamClient
 from air_orchestrator_service.clients.classifier import ClassifierClient
 from air_orchestrator_service.clients.infra import InfraClient
 from air_orchestrator_service.clients.model_gateway import ModelGatewayClient
@@ -68,6 +69,10 @@ class AppState:
     #: ``None`` unless ``downstream.classifier`` is configured — absent is a
     #: value, not a client that always fails (spec 0005).
     classifier: ClassifierClient | None = None
+
+    def optional_clients(self) -> list[DownstreamClient]:
+        """The optional downstreams this deployment has clients for (spec 0010)."""
+        return [client for client in (self.classifier,) if client is not None]
 
 
 def get_app_state(request: Request) -> AppState:

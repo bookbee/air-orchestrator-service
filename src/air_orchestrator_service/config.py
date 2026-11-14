@@ -135,6 +135,16 @@ class ServiceSettings(BaseModel):
     base_url: str = ""
     api_key: SecretStr | None = None
     timeout_ms: int = Field(default=5000, ge=1, le=120_000)
+    #: The most of the turn's whole deadline one call may use. A downstream call is
+    #: enrichment; the answer is the product (spec 0005 ``REQ-CLS-014``, spec 0011
+    #: ``REQ-RAG-004``).
+    deadline_share: float = Field(default=0.25, gt=0, le=1)
+    #: ``GET /v1/health`` on ``/v1/capabilities`` (spec 0010, ``REQ-CLB-007``).
+    health_timeout_ms: int = Field(default=2000, ge=1, le=30_000)
+    #: Consecutive failures that open this service's breaker, and how long it stays
+    #: open before one call tests it (spec 0010, ``REQ-CLB-004``/``005``).
+    breaker_threshold: int = Field(default=5, ge=1, le=1000)
+    breaker_cooldown_s: float = Field(default=30.0, gt=0, le=3600)
 
     @property
     def configured(self) -> bool:
@@ -148,13 +158,10 @@ class ClassifierSettings(ServiceSettings):
     #: (``REQ-CLS-016``). ``None`` sends nothing, and the classifier's own default
     #: applies. ``t2_local_llm`` keeps customer text on-premises and free.
     max_tier: Literal["t0_rules", "t1_classifier", "t2_local_llm", "t3_cloud_llm"] | None = None
-    #: The most of the turn's whole deadline classification may use
-    #: (``REQ-CLS-014``). Classification is enrichment; the answer is the product.
-    deadline_share: float = Field(default=0.25, gt=0, le=1)
 
 
 class DownstreamSettings(BaseModel):
-    """Defaults are *off*: air-rag, air-tools and air-action are empty repos.
+    """Defaults are *off*: most of these services are not deployed everywhere.
 
     A default of ``enabled=true`` would make a fresh checkout report itself
     degraded against services that do not exist, which trains an operator to

@@ -405,7 +405,15 @@
             },
             "type": "array",
             "title": "Routes",
-            "description": "Routes whose backing service is configured."
+            "description": "Routes whose backing service is configured and, where probed, reachable."
+          },
+          "downstreams": {
+            "items": {
+              "$ref": "#/components/schemas/DependencyStatus"
+            },
+            "type": "array",
+            "title": "Downstreams",
+            "description": "Live status of each configured optional service this build calls, probed for this response. A route whose service is unreachable is not in `routes`."
           },
           "guardrails": {
             "additionalProperties": {

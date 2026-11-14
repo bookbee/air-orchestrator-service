@@ -148,8 +148,8 @@ def _build_lifespan(state: AppState) -> Any:
             # warning on every reload and leaks sockets in tests.
             await state.infra.aclose()
             await state.model_gateway.aclose()
-            if state.classifier is not None:
-                await state.classifier.aclose()
+            for client in state.optional_clients():
+                await client.aclose()
             _log.info("shutdown.complete")
 
     return lifespan

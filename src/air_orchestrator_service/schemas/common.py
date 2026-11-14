@@ -112,7 +112,16 @@ class CapabilitiesResponse(BaseModel):
     version: str
     env: str
     channel: Channel
-    routes: list[Route] = Field(description="Routes whose backing service is configured.")
+    routes: list[Route] = Field(
+        description="Routes whose backing service is configured and, where probed, reachable."
+    )
+    downstreams: list[DependencyStatus] = Field(
+        default_factory=list,
+        description=(
+            "Live status of each configured optional service this build calls, probed "
+            "for this response. A route whose service is unreachable is not in `routes`."
+        ),
+    )
     guardrails: dict[str, bool] = Field(description="Rules active for this caller's channel.")
     streaming: dict[str, bool] = Field(
         description=(
