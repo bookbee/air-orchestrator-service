@@ -38,7 +38,8 @@ metric namespace all match it literally, as does the `airo_` API-key prefix.
 The estate is mid-migration to `<name>-service` repos and `<name>_service` packages:
 `air-classifier-service` ships `air_classifier_service`, and `air-rag-service` ships
 `air_rag_service` with `AIR_RAG_SERVICE__` / `air_rag_service_*`, spelled in full like ours.
-`air-tools`, `air-model-gateway` (`air_model_gateway`) and `air-infra` are still `air_<name>`.
+`air-model-gateway` (`air_model_gateway`) and `air-infra` are still `air_<name>`.
+`air-tools-gateway` is a Node service built against `docs/specs/0012-tools-gateway/contract.openapi.yaml`.
 
 Where we differ from air-classifier-service is the env prefix and metric namespace: it keeps
 `AIR_CLASSIFIER__` / `air_classifier_*` (no `_service`), we spell the repo name in full. That
@@ -53,8 +54,9 @@ they are when a sibling repo is renamed. Changing one is a breaking change made 
 
 FastAPI service on **:8081**, the conversational front door for the AIR platform. It
 orchestrates and owns no capability: models are `air-model-gateway` (:8083, the *only* model path — Article VII),
-stores/secrets `air-infra` (:8080), plus classifier/tools/action/recommender/rag on
-:8082–:8087. All are reached over HTTP with `httpx`, never imported as packages.
+stores/secrets `air-infra` (:8080), plus air-classifier (:8082), air-tools-gateway (:8084, lookups
+*and* proposed mutations — one service since Plan §4 "Decided: one tools gateway"; air-action
+:8085 will not be built), air-recommender (:8086) and air-rag-service (:8087). All are reached over HTTP with `httpx`, never imported as packages.
 
 Request path: `main.create_app` → `api/middleware.py` (raw ASGI, not `BaseHTTPMiddleware`,
 because responses are long-lived streams) → `api/deps.require_principal` → `api/v1/*` →
@@ -214,13 +216,15 @@ The near-term work, in order:
   resolving open questions Q1/Q2 (which change `REQ-SESS-007`/`008`). Start there, not in
   `memory/`.
 - **Phase 3 — read path.** air-classifier's and air-rag-service's clients exist on the shared
-  `clients/base.py` (specs 0005, 0010, 0011). Next: air-tools behind the same base, a planner
+  `clients/base.py` (specs 0005, 0010, 0011). Next: air-tools-gateway behind the same base
+  (spec 0012, **Accepted**, plan and tasks written; identity verification is spec 0014), a planner
   (schema-constrained JSON decomposition — HLD §9 item 2), inventory discovery from each
   service's `/v1/capabilities`, and parallel fan-out in `GATHER`. air-rag-service scopes by key, so
   `RagSettings.tenant_keys` picks the air-rag-service key by the principal's tenant (`REQ-RAG-016`).
   Spec 0011's open gap is the grounding check (`REQ-RAG-014`).
-- **Phase 4 — write path.** `clients/action.py` behind the propose→confirm→execute gate that
-  already exists and is tested.
+- **Phase 4 — write path.** air-tools-gateway's propose/execute (spec 0012) behind the
+  propose→confirm→execute gate that already exists and is tested. The execute key lives only on
+  the confirmation path; the read-side client has no execute method.
 
 Cross-repo: air-model-gateway's `/v1/generate` has no `tools` field, tracked in
 `docs/01-hld.md` §9; it does not block the phases as ordered.

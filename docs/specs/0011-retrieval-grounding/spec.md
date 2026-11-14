@@ -42,7 +42,7 @@ reaches it.
 - **A grounding check on the answer** (are its claims supported by the passages?).
   `answer.grounded` stays `false`. See `REQ-RAG-014`.
 - **Running `CLASSIFY` and `GATHER` concurrently.** They stay sequential; parallel fan-out
-  comes with air-tools, when there is more than one thing to gather.
+  comes with air-tools-gateway (spec 0012), when there is more than one thing to gather.
 - **How air-rag-service namespaces its index.** air-rag-service's concern: each of its keys belongs to one tenant, and it searches only that tenant's documents.
 - **Ingestion, chunking, ranking and embeddings.** These belong to air-rag-service (HLD §1).
 

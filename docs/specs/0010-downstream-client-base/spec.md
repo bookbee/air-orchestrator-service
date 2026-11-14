@@ -10,7 +10,7 @@
 air-classifier is the only optional downstream with a client today, and that client carries
 its own copy of everything a downstream call needs: the key header, the request id, the
 failure taxonomy, the metric, and the rule that no URL or body reaches an error message.
-air-rag-service is next and air-tools after it. A third copy of that code is how one of them ends up
+air-rag-service is next and air-tools-gateway after it. A third copy of that code is how one of them ends up
 rendering a URL into a stage detail. Nothing stops a failing downstream from being called on
 every turn, either. A dead air-classifier costs each customer turn its full timeout share
 until someone notices. `/v1/capabilities` lists a route as available whenever its service is
@@ -30,7 +30,7 @@ service answers and its breaker is closed. `/v1/ready` keeps its current behavio
 **In scope**
 
 - The shared calling behaviour for optional downstreams (air-classifier now, air-rag-service in spec
-  0011, air-tools later).
+  0011, air-tools-gateway in spec 0012).
 - A per-service circuit breaker.
 - Live status of optional downstreams on `/v1/capabilities`.
 
@@ -42,7 +42,7 @@ service answers and its breaker is closed. `/v1/ready` keeps its current behavio
 - **air-model-gateway and air-infra.** Both are mandatory, have their own clients, and the
   gateway gates readiness. They keep their own clients.
 - **Reading each service's `/v1/capabilities` body** to build a tool inventory. That needs
-  air-tools' contract and belongs to the tools spec.
+  air-tools-gateway's contract and belongs to spec 0012.
 - **Probing optional services from `/v1/ready`.** Spec 0005 `REQ-CLS-010` and Article III keep
   readiness gated on the gateway alone.
 

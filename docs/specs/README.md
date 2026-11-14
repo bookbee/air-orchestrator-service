@@ -101,6 +101,7 @@ and gains `**Status:** Superseded by NNNN` — the id is a permanent address.
 | `VAL` | [0009 — request validation](0009-request-validation/spec.md) |
 | `CLB` | [0010 — downstream client base](0010-downstream-client-base/spec.md) |
 | `RAG` | [0011 — retrieval and grounding](0011-retrieval-grounding/spec.md) |
+| `TGW` | [0012 — air-tools-gateway](0012-tools-gateway/spec.md) |
 
 Ids are never reused or renumbered. A withdrawn requirement stays in the table marked
 `Withdrawn`, because commit messages and test docstrings still point at it.

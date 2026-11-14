@@ -5,7 +5,7 @@ decides what that message needs, gathers it from the specialist services, and st
 grounded answer.
 
 It orchestrates and owns no capability of its own — retrieval is `air-rag-service`'s, classification
-`air-classifier`'s, read-only calls `air-tools`', mutations `air-action`'s, models `air-model-gateway`'s,
+`air-classifier`'s, lookups and changes to business systems `air-tools-gateway`'s, models `air-model-gateway`'s,
 stores `air-infra`'s.
 
 > **Status.** Phases 0, 1 and 2a are shipped: the full `/v1` surface, the SSE event contract
@@ -77,7 +77,7 @@ takes a deliberately configured key. Any real deployment overrides both halves.
 ### Exercising the mutation path
 
 `/propose` in a message is a literal trigger that makes the engine propose a mutation, so the
-propose → confirm → execute path can be walked end to end before `air-action` exists:
+propose → confirm → execute path can be walked end to end before `air-tools-gateway` exists:
 
 ```bash
 # Turn 1 returns a proposal and changes nothing
@@ -115,18 +115,18 @@ container stays healthy and turns start succeeding again as soon as air-model-ga
 | **`air-orchestrator-service`** | **8081** | This service |
 | `air-classifier` | 8082 | Sentiment, intent and urgency for a customer turn (`CLASSIFY`; optional, fail-soft — spec 0005) |
 | `air-model-gateway` | 8083 | Model gateway, reached directly, never via air-infra. **The only model path** (Article VII) |
-| `air-tools` | 8084 | **Read-only** capability calls (Phase 3) |
-| `air-action` | 8085 | **Mutations**, behind idempotency keys and approval gates (Phase 4) |
+| `air-tools-gateway` | 8084 | Node REST gateway to business systems: `read` capabilities (Phase 3) and `write` capabilities behind propose → confirm → execute (Phase 4). No model inside it — spec 0012 |
 | `air-recommender` | 8086 | A read-path capability the planner may select (Phase 3) |
 | `air-rag-service` | 8087 | Retrieval, reranking, citations (Phase 3) |
 
 ## The two invariants
 
-**Reads and writes are separated structurally, not by a flag.** `air-tools` has no mutating
-surface and this service's tool client will have no execute-shaped method. Reaching
-`air-action` requires the proposal path: a mutation is *proposed*, streamed to the user for an
-explicit confirmation that must cite the proposal id, and only then executed — idempotently,
-and re-validated independently by air-action. Prose that merely reads as consent executes
+**Reads and writes are separated by protocol and credential, not by a flag.** One gateway,
+`air-tools-gateway`, serves both, on separate endpoints and separately scoped keys. This
+service's lookup client has no execute-shaped method and never holds the execute key.
+Reaching execute requires the proposal path: a mutation is *proposed*, streamed to the user
+for an explicit confirmation that must cite the proposal id, and only then executed, once,
+with an idempotency key, and re-validated independently by the gateway (spec 0012). Prose that merely reads as consent executes
 nothing, which is what makes a successful prompt injection a dead end rather than a write.
 
 **One turn engine, two channels.** Public conversational traffic (`POST /v1/chat`) and internal

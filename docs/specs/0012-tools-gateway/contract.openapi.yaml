@@ -1,0 +1,601 @@
+openapi: 3.1.0
+info:
+  title: air-tools-gateway
+  version: 0.1.0
+  summary: One REST gateway for the AIR platform's lookups and proposed mutations.
+  description: |
+    Written by air-orchestrator-service (spec 0012) and handed to the gateway's builders.
+    The orchestrator's integration double enforces this file (REQ-TGW-024), so a change here
+    is a change on both sides: version it, and tell the orchestrator.
+
+    ## What the gateway is
+
+    A plain REST service. It exposes named **capabilities**, each either `read` (a lookup)
+    or `write` (a change), and calls the business systems behind them. It does **not** call
+    any language model. Which capability a conversation needs is decided by the orchestrator.
+    The gateway's job is to run the request it is given correctly and safely.
+
+    ## Rules the gateway must keep
+
+    1. **Declared capabilities only.** Every operation is a named entry in
+       `GET /v1/capabilities` with a JSON Schema for its arguments. There is no generic
+       "call this URL" endpoint.
+    2. **Arguments are validated** against the capability's `input_schema`, which must set
+       `additionalProperties: false` and must not declare `subject` or `tenant`. Identity
+       travels in the request envelope, never in arguments.
+    3. **The tenant comes from the API key.** Each tenant has its own pair of keys, one
+       `read` and one `execute`. Each key belongs to exactly one tenant and one scope. No
+       request names a tenant, and a request only ever sees its key's tenant's data. Keys
+       are stored as salted sha256 digests, never raw, as every AIR service does.
+    4. **The subject is enforced.** For a capability with `requires_subject: true`, the
+       gateway returns only that customer's data, and acts only on that customer's records.
+       Someone else's order is `404 not_found`, exactly like a missing one.
+    5. **Two key scopes.** A `read` key may call `/v1/capabilities`, `/v1/tools/*` and
+       `/v1/actions/*/propose`. An `execute` key may call `/v1/actions/*/execute` and nothing
+       else. A key used outside its scope gets `403`.
+    6. **Propose changes nothing.** It validates, checks the record's current state, prices
+       or previews the change, and stores a proposal bound to tenant, subject, capability and
+       arguments. The proposal expires after at most 10 minutes.
+    7. **Execute re-checks everything.** Ownership, current state and limits are checked
+       again at execution time. The orchestrator's confirmation is evidence, not authority.
+    8. **Execute is idempotent.** The `Idempotency-Key` is stored for at least 24 hours. The
+       same key returns the same response and never acts twice. A different key for an
+       already-executed proposal gets `409 already_executed`.
+    9. **Responses are small and flat.** Return only the fields a customer conversation
+       needs. No raw backend payloads, no internal ids that mean nothing to a customer, no
+       other customers' data. Free text from customers (order notes, reviews) is data the
+       orchestrator will screen, but keep it out unless a capability needs it.
+    10. **Errors are RFC 9457** (`application/problem+json`) with a `code` from the closed set
+        in `Problem.code`. `detail` must never contain a backend URL, credential, stack trace
+        or raw backend message.
+    11. **Estate conventions:** `GET /v1/health` (liveness, no auth) and `GET /v1/ready`
+        (dependencies); echo `X-Request-ID`; structured JSON logs carrying the request id;
+        Prometheus metrics at `/metrics` (`air_tools_gateway_requests_total{capability,outcome}`
+        and a latency histogram); explicit timeouts on every backend call.
+
+    ## How a turn uses it
+
+    - "Where are my recent orders?": `POST /v1/tools/orders.list_recent`
+      `{"arguments": {"limit": 5}, "subject": "cust_123"}` returns the orders. The
+      orchestrator words the answer.
+    - "Cancel my last order", turn 1: `orders.list_recent` with limit 1, then
+      `POST /v1/actions/orders.cancel/propose` `{"arguments": {"order_id": "55120"},
+      "subject": "cust_123"}` returns a proposal. Nothing has changed. The customer is shown
+      the summary and asked to confirm.
+    - Turn 2, the customer presses Confirm: `POST /v1/actions/orders.cancel/execute`
+      with the execute key, `Idempotency-Key`, and `{"proposal_id": "gp_…", "subject":
+      "cust_123"}`.
+
+servers:
+  - url: http://localhost:8084
+    description: Local development (the port the platform reserves for it)
+  - url: http://air-tools-gateway:8080
+    description: Inside the air-net Docker network
+
+tags:
+  - name: system
+  - name: capabilities
+  - name: tools
+  - name: actions
+
+paths:
+  /v1/health:
+    get:
+      tags: [system]
+      summary: Liveness. No auth, no dependency checks.
+      operationId: health
+      security: []
+      responses:
+        "200":
+          description: The process is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, const: ok }
+
+  /v1/ready:
+    get:
+      tags: [system]
+      summary: Readiness. Checks the backends the gateway calls.
+      operationId: ready
+      security: []
+      responses:
+        "200":
+          description: Ready to serve.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+        "503":
+          description: Not ready. Same body, `status` is `not_ready`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+
+  /v1/capabilities:
+    get:
+      tags: [capabilities]
+      summary: Every capability this key's tenant may use.
+      description: |
+        The orchestrator reads this at runtime and caches it briefly. A capability added
+        here becomes usable without an orchestrator release, inside namespaces the
+        orchestrator's allow-list admits. Names, kinds and schemas are a contract: change a
+        schema compatibly, or publish a new name.
+      operationId: listCapabilities
+      security:
+        - readKey: []
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: The inventory.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Inventory" }
+              example:
+                service: air-tools-gateway
+                version: 0.1.0
+                capabilities:
+                  - name: orders.list_recent
+                    kind: read
+                    version: 1
+                    requires_subject: true
+                    description: >-
+                      The customer's most recent orders, newest first, with status, total and
+                      expected delivery date. Use for "where is my order", "my recent orders",
+                      or to find which order the customer means.
+                    input_schema:
+                      type: object
+                      additionalProperties: false
+                      properties:
+                        limit: { type: integer, minimum: 1, maximum: 10, default: 5 }
+                  - name: orders.get
+                    kind: read
+                    version: 1
+                    requires_subject: true
+                    description: >-
+                      One order by its number, with its items, status, delivery tracking and
+                      whether it can still be cancelled or returned.
+                    input_schema:
+                      type: object
+                      additionalProperties: false
+                      required: [order_id]
+                      properties:
+                        order_id: { type: string, pattern: "^[0-9]{4,12}$" }
+                  - name: orders.cancel
+                    kind: write
+                    version: 1
+                    requires_subject: true
+                    risk: low
+                    description: >-
+                      Cancel an order that has not shipped yet. Prepaid orders are refunded to
+                      the original payment method. Propose first; the customer must confirm.
+                    input_schema:
+                      type: object
+                      additionalProperties: false
+                      required: [order_id]
+                      properties:
+                        order_id: { type: string, pattern: "^[0-9]{4,12}$" }
+                        reason:
+                          type: string
+                          enum: [changed_mind, ordered_by_mistake, found_cheaper, delivery_too_slow, other]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/tools/{name}:
+    post:
+      tags: [tools]
+      summary: Run a `read` capability.
+      operationId: runTool
+      security:
+        - readKey: []
+      parameters:
+        - $ref: "#/components/parameters/CapabilityName"
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ToolRequest" }
+            example:
+              arguments: { limit: 5 }
+              subject: cust_123
+      responses:
+        "200":
+          description: The lookup's result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ToolResult" }
+              example:
+                capability: orders.list_recent
+                as_of: "2026-11-14T10:02:11Z"
+                truncated: false
+                data:
+                  orders:
+                    - order_id: "48213"
+                      placed_at: "2026-10-30"
+                      status: in_transit
+                      total: { amount: "1899.00", currency: INR }
+                      expected_delivery: "2026-11-16"
+                      cancellable: false
+                    - order_id: "55120"
+                      placed_at: "2026-11-12"
+                      status: confirmed
+                      total: { amount: "1240.00", currency: INR }
+                      expected_delivery: "2026-11-18"
+                      cancellable: true
+        "400": { $ref: "#/components/responses/InvalidArguments" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/UpstreamFailed" }
+        "504": { $ref: "#/components/responses/UpstreamTimeout" }
+
+  /v1/actions/{name}/propose:
+    post:
+      tags: [actions]
+      summary: Prepare a `write` capability. Changes nothing.
+      description: |
+        Validates the arguments, checks ownership and the record's current state, and stores
+        a proposal bound to (tenant, subject, capability, arguments). Returns what executing it
+        would do, in the customer's terms. A change that is not possible right now (an order
+        that has shipped) is a `422` with a `code`, not a proposal.
+      operationId: proposeAction
+      security:
+        - readKey: []
+      parameters:
+        - $ref: "#/components/parameters/CapabilityName"
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ToolRequest" }
+            example:
+              arguments: { order_id: "55120", reason: changed_mind }
+              subject: cust_123
+      responses:
+        "200":
+          description: A proposal. Nothing has changed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProposalResponse" }
+              example:
+                proposal_id: gp_7c1e4a90b2d3
+                capability: orders.cancel
+                risk: low
+                summary: Cancel order 55120 (₹1,240.00). The refund goes to your original payment method within 3 business days.
+                expires_at: "2026-11-14T10:12:11Z"
+                preview:
+                  order_id: "55120"
+                  refund: { amount: "1240.00", currency: INR }
+        "400": { $ref: "#/components/responses/InvalidArguments" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/NotPossible" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/UpstreamFailed" }
+        "504": { $ref: "#/components/responses/UpstreamTimeout" }
+
+  /v1/actions/{name}/execute:
+    post:
+      tags: [actions]
+      summary: Execute a confirmed proposal. Execute key only.
+      description: |
+        Re-checks ownership, state and limits, then performs the change once. The same
+        `Idempotency-Key` always returns the first response and never acts twice. A
+        high-risk change may enter an approval queue and return `pending_approval`.
+      operationId: executeAction
+      security:
+        - executeKey: []
+      parameters:
+        - $ref: "#/components/parameters/CapabilityName"
+        - $ref: "#/components/parameters/RequestId"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Opaque, 16–128 characters. Derived by the orchestrator from its own proposal id.
+          schema: { type: string, minLength: 16, maxLength: 128, pattern: "^[A-Za-z0-9_.:-]+$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExecuteRequest" }
+            example:
+              proposal_id: gp_7c1e4a90b2d3
+              subject: cust_123
+      responses:
+        "200":
+          description: The outcome. `rejected` means re-validation refused it and nothing changed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecuteResponse" }
+              examples:
+                done:
+                  value:
+                    status: done
+                    execution_id: gx_93ab10f2
+                    capability: orders.cancel
+                    result: { order_id: "55120", refund: { amount: "1240.00", currency: INR, eta_business_days: 3 } }
+                rejected:
+                  value:
+                    status: rejected
+                    execution_id: gx_93ab10f3
+                    capability: orders.cancel
+                    code: invalid_state
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "`proposal_expired`, or `already_executed` under a different Idempotency-Key."
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/UpstreamFailed" }
+        "504": { $ref: "#/components/responses/UpstreamTimeout" }
+
+components:
+  securitySchemes:
+    readKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Tenant-scoped key, `read` scope. Capabilities, tools and propose.
+    executeKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Tenant-scoped key, `execute` scope. Execute only, and nothing else.
+
+  parameters:
+    CapabilityName:
+      name: name
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/CapabilityName" }
+    RequestId:
+      name: X-Request-ID
+      in: header
+      required: false
+      description: The orchestrator's turn request id. Log it and echo it back.
+      schema: { type: string, maxLength: 128 }
+
+  responses:
+    InvalidArguments:
+      description: "`invalid_arguments`: the body or the arguments do not match the schema."
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Unauthorized:
+      description: "`unauthorized`: missing or unknown key."
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Forbidden:
+      description: "`forbidden`: the key's scope does not allow this endpoint."
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotFound:
+      description: "`unknown_capability`, or `not_found` (absent and not-this-customer's are the same answer)."
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotPossible:
+      description: "`invalid_state`, `not_permitted` or `limit_exceeded`: the change is not possible now. Nothing was stored."
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+          example:
+            type: https://air.local/problems/invalid_state
+            title: Not possible in the order's current state
+            status: 422
+            code: invalid_state
+            detail: The order has already shipped.
+    RateLimited:
+      description: "`rate_limited`."
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    UpstreamFailed:
+      description: "`upstream_error`: a business system failed. No change was made by this call."
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    UpstreamTimeout:
+      description: "`upstream_timeout`. For execute, the outcome may be unknown; the same Idempotency-Key later returns the real one."
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+  schemas:
+    CapabilityName:
+      type: string
+      maxLength: 64
+      pattern: "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+      examples: [orders.list_recent, orders.cancel]
+
+    Subject:
+      type: [string, "null"]
+      maxLength: 128
+      description: |
+        The verified customer the request is for: the tenant's own customer id. The
+        orchestrator takes it from a short-lived customer token it has verified (its spec
+        0014), never from model output or a request body. The gateway trusts it because the
+        caller's tenant key authenticates the orchestrator, and uses it to enforce ownership. Null for capabilities with
+        `requires_subject: false`. A capability that requires one returns `400
+        invalid_arguments` when it is null.
+
+    Readiness:
+      type: object
+      required: [status, checks]
+      properties:
+        status: { type: string, enum: [ready, not_ready] }
+        checks:
+          type: array
+          items:
+            type: object
+            required: [name, ok]
+            properties:
+              name: { type: string }
+              ok: { type: boolean }
+              detail: { type: string, description: No URLs or credentials. }
+
+    Inventory:
+      type: object
+      required: [service, version, capabilities]
+      properties:
+        service: { type: string, const: air-tools-gateway }
+        version: { type: string }
+        capabilities:
+          type: array
+          maxItems: 64
+          items: { $ref: "#/components/schemas/Capability" }
+
+    Capability:
+      type: object
+      additionalProperties: false
+      required: [name, kind, version, description, input_schema, requires_subject]
+      properties:
+        name: { $ref: "#/components/schemas/CapabilityName" }
+        kind:
+          type: string
+          enum: [read, write]
+          description: "`read` is served at /v1/tools/{name}; `write` at /v1/actions/{name}/propose and /execute."
+        version:
+          type: integer
+          minimum: 1
+          description: Bump on any incompatible schema change, or better, publish a new name.
+        description:
+          type: string
+          maxLength: 1000
+          description: |
+            What it does and when to use it, written for the orchestrator's planner (a model)
+            to choose it correctly. Plain sentences; name the customer phrasings it answers.
+        input_schema:
+          type: object
+          description: |
+            JSON Schema (draft 2020-12) for `arguments`. Must be `type: object` with
+            `additionalProperties: false`, and must not declare `subject` or `tenant`.
+        requires_subject:
+          type: boolean
+          description: True when the capability reads or changes one customer's records.
+        risk:
+          type: string
+          enum: [low, medium, high]
+          description: Required for `write`, absent for `read`. `high` may route execute to approval.
+
+    ToolRequest:
+      type: object
+      additionalProperties: false
+      required: [arguments, subject]
+      properties:
+        arguments:
+          type: object
+          description: Validated against the capability's `input_schema`.
+        subject: { $ref: "#/components/schemas/Subject" }
+        locale:
+          type: string
+          maxLength: 16
+          description: Optional BCP 47 tag, for any text the gateway formats (dates, currency).
+
+    ToolResult:
+      type: object
+      required: [capability, data, truncated, as_of]
+      properties:
+        capability: { $ref: "#/components/schemas/CapabilityName" }
+        data:
+          description: The result. Keep it small and flat; the orchestrator cuts it at a fixed size.
+          type: [object, array]
+        truncated:
+          type: boolean
+          description: True when the gateway itself left records out (for example, a list cap).
+        as_of:
+          type: string
+          format: date-time
+          description: When the data was read from the business system.
+
+    ProposalResponse:
+      type: object
+      required: [proposal_id, capability, risk, summary, expires_at]
+      properties:
+        proposal_id:
+          type: string
+          maxLength: 128
+          description: The gateway's own id. The orchestrator keeps it server-side and never shows it to the customer.
+        capability: { $ref: "#/components/schemas/CapabilityName" }
+        risk: { type: string, enum: [low, medium, high] }
+        summary:
+          type: string
+          maxLength: 500
+          description: What executing would do, in the customer's terms, in one or two sentences.
+        expires_at:
+          type: string
+          format: date-time
+          description: At most 10 minutes after creation.
+        preview:
+          type: object
+          description: Optional structured detail (amounts, dates) the orchestrator may show.
+
+    ExecuteRequest:
+      type: object
+      additionalProperties: false
+      required: [proposal_id, subject]
+      properties:
+        proposal_id: { type: string, maxLength: 128 }
+        subject: { $ref: "#/components/schemas/Subject" }
+
+    ExecuteResponse:
+      type: object
+      required: [status, execution_id, capability]
+      properties:
+        status:
+          type: string
+          enum: [done, pending_approval, rejected]
+        execution_id: { type: string, maxLength: 128 }
+        capability: { $ref: "#/components/schemas/CapabilityName" }
+        code:
+          description: Present when `status` is `rejected`.
+          $ref: "#/components/schemas/ProblemCode"
+        result:
+          type: object
+          description: Present when `status` is `done`. Small and flat.
+
+    ProblemCode:
+      type: string
+      enum:
+        - invalid_arguments
+        - unauthorized
+        - forbidden
+        - unknown_capability
+        - not_found
+        - invalid_state
+        - not_permitted
+        - limit_exceeded
+        - proposal_expired
+        - already_executed
+        - rate_limited
+        - upstream_error
+        - upstream_timeout
+      description: A closed set. The orchestrator words its answers from this code, never from `detail`.
+
+    Problem:
+      type: object
+      description: RFC 9457 problem details, plus `code`.
+      required: [type, title, status, code]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        code: { $ref: "#/components/schemas/ProblemCode" }
+        detail:
+          type: string
+          description: For logs and developers. Never a URL, credential, stack trace or raw backend message.
+        instance: { type: string }

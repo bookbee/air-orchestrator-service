@@ -29,18 +29,18 @@ the escalation ladder across two repos.
 | Model Gateway | **`air-model-gateway` :8083** | **Already built**; it replaced air-llm (spec 0003, constitution Article VII as amended in 1.1.0). Multi-provider routing by *model class*, fallback, cost, budgets, cache, prompt caching, structured output, streaming. This service consumes it over HTTP (`clients/model_gateway.py`); it does not rebuild it. Satisfies review item 02 |
 | Semantic Cache | air-orchestrator-service module | **New, not built** (Phase 5). Embeddings from air-model-gateway, vectors in Redis brokered by air-infra. Review item 04 |
 | Retrieval Client (RAG) | air-orchestrator-service client → **`air-rag-service` :8087** | Reranking, grounding and citation shape are air-rag-service's; air-orchestrator-service asks and cites. **air-rag-service calls air-model-gateway itself for embeddings** — air-orchestrator-service never embeds a query itself |
-| Tool Executor | air-orchestrator-service client → **`air-tools` :8084** | **Read-only by construction.** Each domain agent's reason → tool-call → interpret loop (Plan's new "agent placement" decision) runs *inside* air-tools, with its own air-model-gateway client — air-orchestrator-service sends one coarse request per sub-task and never sees the intermediate reasoning |
+| Tool Executor | air-orchestrator-service client → **`air-tools-gateway` :8084** | **One REST gateway for lookups and changes** (Plan §4 "Decided: one tools gateway", spec 0012). Named capabilities, each `read` or `write`, discovered from its `/v1/capabilities`. **No model inside it**: this service's planner decides which capability a turn needs; the gateway runs it deterministically |
 | Conversation Memory | Redis (turns) + Postgres (profile), brokered by air-infra | Review item 03. **In-process today** — the Redis backend is Phase 2b |
 | Response Streamer | air-orchestrator-service module | SSE, §5 |
 | External RAG / Knowledge | Behind `air-rag-service` | Vector DB, embedding service, ingestion — not air-orchestrator-service's concern |
-| Tools / Live Data | Behind `air-tools` | |
-| Action Services | **`air-action` :8085** | **Mutations only**, idempotency keys and approval gates. Review item 07 |
+| Tools / Live Data | Behind `air-tools-gateway` | Order, shipment and account systems |
+| Action Services | **`air-tools-gateway`'s `write` capabilities** | Propose (changes nothing) and execute (separately scoped execute key, idempotency key, re-validation, approval gate for `high` risk) on separate endpoints. Review item 07. air-action :8085 will not be built |
 | MCP Server (optional) | Deferred | §8 |
 | Inference Backends (hybrid) | Behind `air-model-gateway` | Ollama local, Anthropic/OpenAI cloud. Self-hosted vLLM/TGI is a gateway provider, added there |
 | Cross-cutting: Security & Secrets | Mostly **`air-infra`** | Credential broker, policy engine, secret backend already exist. This service holds its own API-key store (`security/api_keys.py`) |
 | Cross-cutting: Observability | Shared convention | Every service ships structlog + Prometheus; air-orchestrator-service owns the per-turn trace that spans them |
 | Cross-cutting: Evaluation & Feedback | air-orchestrator-service module + repo | **New.** Prompt registry, canary prompts, feedback capture. Review item 06 |
-| Cross-cutting: Scale & Resilience | Split | Circuit breakers here; async action queue in air-action |
+| Cross-cutting: Scale & Resilience | Split | Circuit breakers here; approval queue in air-tools-gateway |
 
 **Not on the diagram:** `air-recommender` :8086. It fits the *Tools / Live Data* role — a
 read-only capability the planner may select — and is treated as a fourth read-path client
@@ -50,8 +50,9 @@ rather than a new architectural element. Confirm this reading.
 AgentReason / AgentInterpret / AgentGenerate / Generative / Embeddings endpoints) needs no new
 service to realise. It's air-model-gateway's routing file: each caller asks for a *model
 class* (`local` · `auto` · `cloud`), and a per-caller override decides which models serve that
-class for it. This service asks for `cloud`. air-tools' agents and air-rag-service's embeddings get
-their own overrides. Each is a config edit in the gateway, not a deployment.
+class for it. This service asks for `cloud`. air-rag-service's embeddings get their own
+override. Each is a config edit in the gateway, not a deployment. air-tools-gateway makes no
+model call, so it needs none.
 
 ## 2. System context
 
@@ -76,15 +77,15 @@ their own overrides. Each is a config edit in the gateway, not a deployment.
     │     → gather → synthesise → guardrails-out → persist     │
     └───────────────────────────┬──────────────────────────────┘
                                 │
-  ┌──────────────┬──────────────┴──────────────┬──────────────┬──────────────┐
-  ▼              ▼              ▼              ▼              ▼              ▼
-  model-gateway  air-infra      air-classifier air-rag-service air-tools      air-action
-  :8083          :8080          :8082          :8087           :8084          :8085
-  THE ONLY       stores ·       sentiment      retrieval       READ-ONLY      MUTATIONS
-  MODEL PATH     secrets        · intent       · citations     calls          · gates
-  │
-  ▼
-  Ollama · Anthropic · OpenAI · self-hosted
+  ┌──────────────┬──────────────┴──────────────┬───────────────────┐
+  ▼              ▼              ▼              ▼                   ▼
+  model-gateway  air-infra      air-classifier air-rag-service     air-tools-gateway
+  :8083          :8080          :8082          :8087               :8084
+  THE ONLY       stores ·       sentiment      retrieval           read: lookups
+  MODEL PATH     secrets        · intent       · citations         write: propose │
+  │                                                                execute (own key)
+  ▼                                                                    │
+  Ollama · Anthropic · OpenAI · self-hosted          order · shipment · account systems
 ```
 
 One service, two ingress paths, one turn engine. The paths differ in profile, not in
@@ -107,7 +108,7 @@ principal — never from a request header, which the client controls.
 | Caller identity | End user, via OIDC or API key | Service or analyst, via mTLS identity |
 | Answer shape | Prose, cited | **Schema-validated structured output**, prose optional (review item 08) |
 | Guardrail profile | Full: injection defence, PII redaction both ways, safety filters | Injection defence and grounding checks; PII redaction configurable — internal analysts legitimately query customer records |
-| Mutations | Proposal + explicit human confirmation, always | Same gate; high-impact actions additionally require air-action's approval workflow |
+| Mutations | Proposal + explicit human confirmation, always | Same gate; high-impact actions additionally require air-tools-gateway's approval workflow |
 | Audit | Standard structured audit | **Immutable compliance audit log** of every query and answer (review item 05) |
 | Quota | Per API key | Per team, with cost attribution |
 
@@ -129,20 +130,20 @@ POST /v1/chat  {session_id?, message, options?}
   ├─ 6. ROUTER / PLANNER ── direct answer | RAG | tools | action | combination
   ├─ 7. GATHER (parallel, per-turn deadline)
   │        ├─ air-rag-service      retrieval + citations
-  │        ├─ air-tools    read-only calls
+  │        ├─ air-tools-gateway  read capabilities
   │        ├─ air-recommender
-  │        └─ air-action   ⇒ PROPOSE ONLY, never executes in this step
+  │        └─ air-tools-gateway  write capabilities ⇒ PROPOSE ONLY, never executes in this step
   ├─ 8. SYNTHESISE ── air-model-gateway; grounded in step 7 only; streamed to SSE callers
   ├─ 9. GUARDRAILS OUT ── grounding/citation check · PII · safety · schema validation
   ├─ 10. PERSIST ── turn to Redis, cache entry, usage and cost
   └─ 11. STREAM ── SSE throughout; every step above emits as it completes
 ```
 
-**Step 7's `air-tools` call may itself be a multi-step agent turn**, invisible from here: the
-domain agent's own reason → tool-call → interpret loop runs inside air-tools, against its own
-air-model-gateway client (Plan's agent-placement decision). air-orchestrator-service's per-call budget covers the
-whole thing as one deadline; the intermediate reasoning is air-tools' concern, not this
-pipeline's.
+**Step 7's air-tools-gateway calls are single deterministic requests.** The gateway hosts no
+agent and no model client (Plan §4 "Decided: one tools gateway"). A turn that needs several
+steps ("find the latest order, then propose cancelling it") is decomposed by the planner in
+step 6, so every intermediate step is visible here, guardrailed here, and bounded by this
+turn's deadline.
 
 Steps 2 and 9 are the diagram's bidirectional guardrail box, and review item 01's point is
 that they belong *here* rather than at the gateway: a gateway filter sees a request, not a
@@ -187,19 +188,24 @@ after retrieval anyway.
 
 ## 6. Mutations: propose → confirm → execute
 
-The read/write split is the platform's central safety property. It is structural: the tool
-client can only reach air-tools, and air-tools has no mutating surface. Reaching air-action
-requires the proposal path, and there is no code path from a synthesis step to an execution.
+The read/write split is the platform's central safety property. Since one gateway serves both
+(Plan §4), it is carried by protocol and credential rather than by a service boundary: the
+read path reaches only inventory, lookup and propose endpoints, on a **read** key; the
+execute endpoint accepts only a separately scoped **execute** key, which this service uses on
+the confirmation path alone. There is no code path from a synthesis step to an execution
+(spec 0012).
 
 ```
 turn N     planner decides a mutation is warranted
-           └─ air-action /v1/actions/propose → validates, prices, returns proposal_id + risk
+           └─ air-tools-gateway /v1/actions/{name}/propose (read key) → validates, prices,
+              returns its proposal id (kept server-side) + risk + summary
            └─ SSE `proposal` event; the answer asks for confirmation. Nothing has changed yet.
            └─ proposal stored on the session with a short TTL
 
 turn N+1   user replies
-           ├─ confirms, citing proposal_id ⇒ air-action /v1/actions/execute
-           │     with an idempotency key; high-risk actions enter air-action's approval queue
+           ├─ confirms, citing proposal_id ⇒ air-tools-gateway /v1/actions/{name}/execute
+           │     (execute key) with an idempotency key; never retried; high-risk actions
+           │     enter the gateway's approval queue
            └─ anything else ⇒ proposal cancelled, silently and by default
 ```
 
@@ -208,12 +214,12 @@ Three properties do the work:
 1. **A confirmation cannot be inferred.** It must cite a `proposal_id` the session is holding.
    Text that merely reads as agreement does not execute anything, which is what makes a
    successful prompt injection in turn N a dead end rather than a write.
-2. **air-action re-validates independently.** It never trusts that air-orchestrator-service checked;
+2. **The gateway re-validates at execute.** It never trusts that air-orchestrator-service checked;
    air-orchestrator-service's confirmation is evidence, not authority.
 3. **Every execution is idempotent and audited.** The idempotency key is derived from the
    proposal id, so a retried stream cannot double-execute.
 
-Review item 07's async queue and approval gates live inside air-action. air-orchestrator-service's
+Review item 07's async queue and approval gates live inside air-tools-gateway. air-orchestrator-service's
 obligation is to surface queue state as stage events rather than block the turn on it.
 
 ## 7. Degradation
@@ -225,8 +231,7 @@ makes absence tractable: a missing service removes a *route*, not the service.
 | --- | --- |
 | air-classifier | `CLASSIFY` is `degraded` naming it; no verdict for the turn. Turn status unaffected |
 | air-rag-service | Planner drops the RAG route; the answer says it could not consult the knowledge base rather than answering ungrounded |
-| air-tools | Affected capabilities leave the tool list; the planner cannot select what is not advertised |
-| air-action | Proposals refused with a clear reason. **Never** a fallback direct write |
+| air-tools-gateway | Its capabilities leave the tool list; the planner cannot select what is not advertised. Proposals refused with a clear reason, **never** a fallback direct write. An execute that fails reports the outcome as unknown, never as done, and is not retried |
 | air-recommender | Recommendation capability drops out |
 | air-infra | Store credentials unavailable. No effect on the turn path today; from Phase 2b, sessions degrade to single-turn |
 | Semantic cache / Redis | Cache disabled, sessions degrade to single-turn; the turn still answers |
@@ -240,7 +245,7 @@ honest exception of the model gateway itself.
 
 - **MCP server.** Optional on the diagram, and review item 07 flags it as an expanded attack
   surface. It is a *second* way to reach tools, and the first one does not exist yet. Revisit
-  once air-tools and air-action are real, with scoped credentials, sandboxing and an
+  once air-tools-gateway is real, with scoped credentials, sandboxing and an
   allow-list as entry conditions.
 - **Multi-region and data residency** (item 08). A deployment-topology decision that needs a
   real target; the tenant scoping in §3 is the part that must exist now so residency can be

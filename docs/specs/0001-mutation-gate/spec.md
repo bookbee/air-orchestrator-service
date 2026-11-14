@@ -1,6 +1,6 @@
 # 0001 — The mutation gate (propose → confirm → execute)
 
-**Status:** Partial · **Area:** `MUT` · **Phase:** 1 (gate) / 4 (execution) · **Updated:** 2026-09-12
+**Status:** Partial · **Area:** `MUT` · **Phase:** 1 (gate) / 4 (execution) · **Updated:** 2026-11-14
 **Derives from:** [HLD §6](../../01-hld.md) · [LLD §8](../../02-lld.md) · [Plan §4 Q3](../../00-plan.md)
 **Supersedes:** —
 
@@ -19,7 +19,8 @@ The mitigation cannot be "detect the injection", because detection is a probabil
 on an adversarial input. It has to be a structural one: make agreement, by itself, incapable of
 causing a write.
 
-This service implements that gate today, before `air-action` exists, so the path is exercised
+This service implements that gate today, before air-tools-gateway's write path exists (spec
+[0012](../0012-tools-gateway/spec.md)), so the path is exercised
 and proved before there is anything real behind it to execute.
 
 ## 2. Outcome
@@ -44,9 +45,10 @@ executes nothing — so the response is never an oracle for which proposal ids e
 
 - **How a mutation is chosen.** Routing today is the literal `/propose` trigger
   (Article V); real intent detection arrives with Phase 3 and gets its own spec.
-- **The `air-action` client and idempotency keys.** Phase 4, spec to follow. This spec
+- **The execution client and idempotency keys.** Spec [0012](../0012-tools-gateway/spec.md)
+  (air-tools-gateway's write path, which replaced the planned air-action). This spec
   governs the gate, not what stands behind it.
-- **Re-validation by air-action.** That service is the last word and validates independently;
+- **Re-validation at execute.** air-tools-gateway is the last word and validates independently;
   this gate is the first word, not the only one.
 
 ## 4. Constitution check
@@ -55,7 +57,7 @@ executes nothing — so the response is never an oracle for which proposal ids e
 | --- | --- | --- |
 | II — Mutations are proposed, never performed | This spec *is* Article II | Every requirement below derives from it |
 | I — Channel from the credential | `allow_actions` and channel both come from the key record | Nothing in the request body may influence them — but see `REQ-MUT-012` |
-| III — Missing downstream narrows | No `air-action` client exists | A proposal is still produced and confirmable; only execution is a stand-in |
+| III — Missing downstream narrows | No execution client exists yet (spec 0012) | A proposal is still produced and confirmable; only execution is a stand-in |
 | IV — Tenant-namespaced | The pending proposal lives on a tenant-namespaced session | Reached only through `SessionStore.get`, which enforces the tenant |
 | V — A stage that cannot run says so | The `action` route is real; the execution behind it is not | The answer text states plainly that nothing executes |
 
@@ -113,7 +115,7 @@ executes nothing — so the response is never an oracle for which proposal ids e
 
 | Condition | Behaviour | Turn status |
 | --- | --- | --- |
-| No `air-action` client exists (today) | A proposal is created and confirmable; "execution" is a canned reply naming the stand-in action | `ok` |
+| No execution client exists (today; spec 0012) | A proposal is created and confirmable; "execution" is a canned reply naming the stand-in action | `ok` |
 | Session store loses the proposal | Confirmation finds nothing and executes nothing | `ok` |
 | Confirmation arrives after the session TTL | Session is absent, a new one starts, nothing executes | `ok` |
 | Proposal expired | Consumed, nothing executes | `ok` |
@@ -136,7 +138,7 @@ be indistinguishable from each other to the caller, so every row answers normall
 | --- | --- | --- | --- |
 | Q1 | Should `REQ-MUT-012` refuse with a 403, or silently take the direct route? A 403 is clearer to a developer; silence reveals less to an attacker probing what a key can do. | Fixing the `REQ-MUT-012` gap | — |
 | Q2 | Does `REQ-MUT-007` cancellation survive Phase 2b's Redis backend atomically, or can two concurrent turns both consume one proposal? | 0002 durable sessions | — |
-| Q3 | Should a proposal carry the tenant explicitly, or is reaching it only through a tenant-scoped session sufficient? | Phase 4 | — |
+| Q3 | Should a proposal carry the tenant explicitly, or is reaching it only through a tenant-scoped session sufficient? Spec 0012 `REQ-TGW-019` proposes binding it to the creating `key_id` and `subject` as well; settle both there. | Phase 4 | — |
 
 ## 10. Traceability
 

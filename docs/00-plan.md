@@ -14,21 +14,25 @@ air-orchestrator-service decides what that message needs, gathers it from the sp
 streams back a grounded reply.
 
 Everything expensive or specialised already lives somewhere else — retrieval in `air-rag-service`,
-classification in `air-classifier`, recommendations in `air-recommender`, reads in
-`air-tools`, writes in `air-action`, models behind `air-model-gateway`, stores behind `air-infra`. What does *not*
+classification in `air-classifier`, recommendations in `air-recommender`, lookups and
+changes to business systems behind `air-tools-gateway`, models behind `air-model-gateway`,
+stores behind `air-infra`. What does *not*
 exist is the thing that turns "where is my order and can you cancel it" into a sequence of
 calls across those services and one coherent answer.
 
 Three constraints define the design:
 
-**The read/write split is architectural, not stylistic.** `air-tools` performs read-only
-calls and nothing else. `air-action` performs mutating calls, and each one passes external
-checks before it commits. This split is why the two are separate services rather than one
-tool registry with a flag: a boundary the orchestrator cannot accidentally cross is worth
-more than a boolean it must remember to check. A model that has been talked into calling
-`cancel_order` still has to get that call past air-action, and air-orchestrator-service's job is to
-make sure such a call is *proposed* explicitly, confirmed, and audited — never a silent
-side effect of a retrieval turn.
+**The read/write split is enforced by protocol and credential, not by a repo boundary.**
+`air-tools-gateway` serves both lookups and changes, and keeps them apart the way a bank
+keeps a balance enquiry apart from a transfer: different endpoints, different keys, and a
+change that is only ever *proposed* until a confirmation arrives. A `write` capability has a
+propose endpoint that changes nothing and an execute endpoint that only a separately scoped
+execute key can reach; this service holds that key on the confirmation path alone. A model
+that has been talked into calling `orders.cancel` can at most produce a proposal, which a
+customer must confirm by a structured field the model cannot write, and which the gateway
+re-validates before acting. The plan first drew this boundary as two services, air-tools and
+air-action; §4 "Decided: one tools gateway" records why it is now one, and what carries the
+boundary instead.
 
 **The reply is streamed.** A turn that fans out to three services and a model takes seconds.
 A client that must wait for all of it before rendering anything feels broken, so the API
@@ -48,7 +52,7 @@ selecting the profile — see [HLD §3](01-hld.md).
 | --- | --- | --- |
 | G1 | One conversational API for the whole platform | A client integrates against air-orchestrator-service alone and reaches every AIR capability |
 | G2 | Streaming turn lifecycle | Client renders the first event well before the final answer; every stage is observable as it completes |
-| G3 | Strict read/write separation | Every mutation goes through air-action; air-orchestrator-service holds no mutating capability of its own, and this is enforced by the client layer, not by convention |
+| G3 | Strict read/write separation | Every mutation is proposed, confirmed and executed through air-tools-gateway's write path, on a separately scoped execute key; air-orchestrator-service holds no mutating capability of its own, and this is enforced by the client layer, not by convention (spec 0012) |
 | G4 | Confirmed, auditable mutations | No mutating call executes without an explicit confirmation step recorded against the session |
 | G5 | Degrades service by service | Any downstream being absent removes a capability from the turn; it never fails the turn |
 | G6 | Durable multi-turn sessions | Conversation state survives restart and is shared across replicas, via air-infra's brokered Redis |
@@ -62,8 +66,8 @@ selecting the profile — see [HLD §3](01-hld.md).
 
 ## 3. Non-goals (v1)
 
-- **No tool implementations.** air-orchestrator-service selects and calls; the work lives in `air-tools`
-  and `air-action`. A tool added there must not require a code change here.
+- **No tool implementations.** air-orchestrator-service selects and calls; the work lives in
+  `air-tools-gateway`. A capability added there must not require a code change here.
 - **No mutating capability of its own.** air-orchestrator-service never writes to a business system
   directly, not even "just this once" for a simple case.
 - **No retrieval or indexing.** Vector stores, chunking and embeddings are `air-rag-service`'s.
@@ -88,7 +92,9 @@ selecting the profile — see [HLD §3](01-hld.md).
 | Decision | Choice | Rationale |
 | --- | --- | --- |
 | Orchestration boundary | air-orchestrator-service decides *what* to call; the specialist services decide *how* | Keeps the orchestrator small and the capabilities independently deployable |
-| Read/write split | `air-tools` read-only, `air-action` mutating behind external checks | A structural boundary, per §1. Also lets the two scale, fail and get audited differently |
+| Read/write split | One `air-tools-gateway`; `read` and `write` capabilities on separate endpoints and separately scoped keys; writes propose → confirm → execute | Per §1. Revised 2026-11-14 from two services (air-tools, air-action): see "Decided: one tools gateway" below |
+| Customer identity | A short-lived customer token signed per tenant, sent beside the API key and verified here; its `sub` becomes the principal's subject (spec 0012 §9 Q1; verification is spec 0014) | A key identifies an application, not a shopper, and "my orders" needs a shopper. Never taken from a body or from the model. Decided 2026-11-14 |
+| Tools gateway tenancy | One `read` and one `execute` key per tenant at air-tools-gateway; the tenant comes from the key, never from a request (spec 0012 §9 Q2) | A service key that may name any tenant makes one bug here a cross-tenant read or write. Matches air-rag-service. Decided 2026-11-14 |
 | Mutation flow | **Propose → confirm → execute**, confirmation recorded on the session | A mutation triggered by a model's reading of free text needs a human "yes" in the loop that outlives the process |
 | Streaming shape | **SSE, orchestration events, plus token deltas** — stage events, then the answer as provisional `answer.delta` events and an authoritative `answer` | v1 shipped stage events alone, because air-llm could not stream. air-model-gateway can, so deltas were added as the compatible later addition this row anticipated: a new event, not a new contract. They are guardrailed through a hold-back buffer, and the authoritative `answer` retracts them on a refusal (spec 0004; product decision 2026-11-14: stream on both channels) |
 | Model access | Exclusively via air-model-gateway's `POST /v1/generate`, over HTTP (`clients/model_gateway.py`), asking for a model *class* (`cloud`), never a model | G7. Centralised routing, failover, budgets, cache and cost accounting are the whole point of the gateway. Reached directly, never through air-infra. Replaced air-llm's `/v1/inference` in spec 0003 |
@@ -149,9 +155,51 @@ running code, not an aspiration.
    serving a wrong fact, and it stays useful even for turns the answer cache's eligibility rules
    exclude.
 6. **`air-recommender`'s place — resolved.** Not on the diagram. A fourth read-path capability,
-   same shape as air-tools, not architecturally distinct ([HLD §1](01-hld.md)).
+   same shape as an air-tools-gateway `read` capability, not architecturally distinct ([HLD §1](01-hld.md)).
+
+### Decided: one tools gateway (2026-11-14)
+
+**Supersedes the two-service split (air-tools read-only, air-action mutating) and, for tools,
+the agent-placement decision below.**
+
+*Decision.* One REST service, **`air-tools-gateway`** on :8084, fronts every external
+business system for both lookups and changes. It advertises named capabilities, each `read`
+or `write`, from `GET /v1/capabilities`; the orchestrator discovers them at runtime. The
+gateway makes **no model call**. Choosing which capability a turn needs, and in what order,
+stays in this service's planner. air-action (:8085) will not be built.
+
+*Why.* Two services doubled the deployment, the contract and the on-call surface for a
+platform at the size of this one, before either existed. The properties the split was meant
+to guarantee do not depend on a repo boundary, and each now has an explicit owner:
+
+| The split gave | Now carried by |
+| --- | --- |
+| A turn cannot write | Article II (unchanged): a write is proposed, and executes only on a later turn's structured `confirm` (spec 0001) |
+| The read path holds no write credential | Two key scopes per tenant: a **read** key for inventory, lookups and propose, an **execute** key for execute only, refused everywhere else (spec 0012 `REQ-TGW-016`, contract rule 5) |
+| air-action re-validates independently | The gateway's execute re-checks ownership, state and limits (contract rule 7) |
+| Idempotent, audited writes | `Idempotency-Key` derived from the proposal id, never retried here; an `action.executed` audit line (`REQ-TGW-015`, `018`, `021`) |
+
+*What is given up,* and accepted: a bug in a lookup handler now runs in a process that also
+holds write credentials, and reads and writes no longer scale or deploy independently. If
+either starts to matter, the gateway's `write` handlers can move to their own deployment
+behind the same contract with no change here, because the endpoints and keys are already
+separate.
+
+*Why no model inside the gateway.* It keeps the gateway a plain REST service that a backend
+developer can build and test deterministically, keeps all model traffic and its guardrails
+in one place (this service), and means one planner sees the whole turn rather than an agent
+in each service seeing a slice. A capability's `description` and `input_schema` are the only
+part of the gateway a model reads, and they are reviewed here.
+
+*Contract.* [`docs/specs/0012-tools-gateway/contract.openapi.yaml`](specs/0012-tools-gateway/contract.openapi.yaml),
+written here and handed to the gateway's builders. Behaviour on this side is spec
+[0012](specs/0012-tools-gateway/spec.md); the planner is spec 0013, to follow.
 
 ### New decision: agent placement inside air-tools/air-rag-service
+
+> **Amended 2026-11-14 for tools:** superseded by "Decided: one tools gateway" above. The
+> gateway hosts no agents and no model client, and `POST /v1/agents/{name}` will not exist;
+> the planner here decomposes the turn. The decision still stands for air-rag-service.
 
 `shopassist-service`'s five agents (`OrderTrackingAgent` et al.) each run **reason → tool call
 → interpret** — two LLM calls plus a data call, per agent, per sub-task. Externalising RAG and
@@ -208,15 +256,16 @@ in place, so this is a backend swap.
 
 ### Phase 3 — Read path · *not started*
 
-Typed clients for `air-rag-service`, `air-tools`, `air-classifier`, `air-recommender`; capability
-discovery; parallel fan-out with per-call budgets and fail-soft degradation; grounding and
+Typed clients for `air-rag-service`, `air-tools-gateway` (`read` capabilities, spec 0012),
+`air-classifier`, `air-recommender`; the planner (spec 0013); capability discovery; parallel fan-out with per-call budgets and fail-soft degradation; grounding and
 citation checks in the output guardrail.
 *Exit:* Answers grounded in retrieval and read-only tools; each service can be killed
 individually without failing a turn.
 
 ### Phase 4 — Write path · *not started*
 
-`air-action` client, propose → confirm → execute, confirmation state on the session,
+`air-tools-gateway`'s write path (spec 0012): propose → confirm → execute on the separate
+execute key, confirmation state on the session,
 idempotency keys derived from proposal ids, mutation audit records, async-queue state
 surfaced as stage events.
 *Exit:* A mutating request completes end to end, and is refused end to end when unconfirmed.
@@ -240,8 +289,8 @@ load test, runbook, image published.
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
-| **Prompt injection reaches a mutation.** Retrieved content or user text talks the model into proposing a destructive action | Unauthorised writes to a business system | The split itself is the primary control: air-orchestrator-service can only ever *propose*. Beyond that — confirmation is a separate turn against a stored proposal, never inferable from the same message; air-action re-validates independently and is the last word; retrieved content is delimited and never treated as instruction |
-| **Most of the platform does not exist yet.** air-tools, air-action, air-rag-service are empty repos | Phases 3–4 have nothing to integrate against | Contract-first: define each client against the service's published contract, ship a fixture-backed fake, and make absence a capability downgrade (G5). Phase 2 is deliberately shaped to be useful with zero downstreams |
+| **Prompt injection reaches a mutation.** Retrieved content or user text talks the model into proposing a destructive action | Unauthorised writes to a business system | The propose-only rule is the primary control: air-orchestrator-service can only ever *propose*, and execute needs a key the read path never holds. Beyond that — confirmation is a separate turn against a stored proposal, never inferable from the same message; the gateway re-validates at execute and is the last word; retrieved content and tool results are delimited and never treated as instruction |
+| **Most of the platform does not exist yet.** air-tools-gateway is not built (air-rag-service now is) | Phases 3–4 have nothing to integrate against | Contract-first: define each client against the service's published contract, ship a fixture-backed fake, and make absence a capability downgrade (G5). Phase 2 is deliberately shaped to be useful with zero downstreams |
 | **Fan-out latency compounds.** Three services plus a model, serially, blows the turn budget | Unusable P95 | Parallel fan-out with a per-turn deadline; partial results synthesise into an answer that says what is missing. Stage events mean the user sees progress even at the slow end |
 | Cost blowout on a single turn | Unbounded spend from a runaway loop | Hard per-turn ceiling on model calls and tokens, enforced in the orchestrator and cross-checked against the gateway's own cost accounting; a turn that hits it answers with what it has |
 | Session state grows unbounded | Redis memory exhaustion, and long histories inflate every prompt | TTL on every session key; a bounded turn window in the prompt with older context summarised |
@@ -292,5 +341,8 @@ Status against each, as of this review round:
 - [x] The six items in §4 are resolved (item 4, transcript retention, deferred rather than
       decided) — **Q1 (routing mechanism) is resolved as LLM-based decomposition**, reversing
       the earlier tool-calling recommendation, since the gateway still has no `tools` field
+- [x] **2026-11-14:** one `air-tools-gateway` replaces air-tools and air-action, with separate
+      read and execute keys and no model inside it (§4 "Decided: one tools gateway", spec 0012)
 - [x] **New:** agent placement — reason/tool/interpret loops live inside air-tools/air-rag-service,
-      each with its own air-model-gateway client; air-orchestrator-service sends one coarse request per sub-task
+      each with its own air-model-gateway client; air-orchestrator-service sends one coarse request per sub-task.
+      **Amended 2026-11-14:** no longer for tools; see the gateway item above
