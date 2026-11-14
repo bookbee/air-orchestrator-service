@@ -15,7 +15,7 @@ streams back a grounded reply.
 
 Everything expensive or specialised already lives somewhere else — retrieval in `air-rag`,
 classification in `air-classifier`, recommendations in `air-recommender`, reads in
-`air-tools`, writes in `air-action`, models behind `air-llm`, stores behind `air-infra`. What does *not*
+`air-tools`, writes in `air-action`, models behind `air-model-gateway`, stores behind `air-infra`. What does *not*
 exist is the thing that turns "where is my order and can you cancel it" into a sequence of
 calls across those services and one coherent answer.
 
@@ -52,7 +52,7 @@ selecting the profile — see [HLD §3](01-hld.md).
 | G4 | Confirmed, auditable mutations | No mutating call executes without an explicit confirmation step recorded against the session |
 | G5 | Degrades service by service | Any downstream being absent removes a capability from the turn; it never fails the turn |
 | G6 | Durable multi-turn sessions | Conversation state survives restart and is shared across replicas, via air-infra's brokered Redis |
-| G7 | All model traffic through air-llm | No provider SDK and no provider key in this repo; cost and cache stay centralised |
+| G7 | All model traffic through air-model-gateway (constitution Article VII) | No provider SDK and no provider key in this repo; cost and cache stay centralised |
 | G8 | Guardrails on both directions, inside the platform | Injection defence, PII redaction and grounding checks run on input *and* output, where the prompt is visible — not at the gateway, which only sees a request |
 | G9 | Two channels, one engine | Customer and business traffic differ only by profile — guardrails, output contract, audit sink, quota bucket, tool allow-list — never by pipeline |
 | G10 | Cache before inferring | A semantic-cache hit costs no model call and no fan-out; hit rate and the spend it avoids are both reported |
@@ -67,9 +67,10 @@ selecting the profile — see [HLD §3](01-hld.md).
 - **No mutating capability of its own.** air-orchestrator-service never writes to a business system
   directly, not even "just this once" for a simple case.
 - **No retrieval or indexing.** Vector stores, chunking and embeddings are `air-rag`'s.
-- **No model hosting or provider SDKs.** `air-llm` is the only model path.
-- **No model gateway of its own.** The diagram's *Model Gateway* box is `air-llm` :8083,
-  which already does multi-provider routing, fallback, cost policy and token budgets. This
+- **No model hosting or provider SDKs.** `air-model-gateway` is the only model path.
+- **No model gateway of its own.** The diagram's *Model Gateway* box is `air-model-gateway`
+  :8083 (which replaced air-llm), and it already does multi-provider routing by model class,
+  fallback, cost policy and budgets. This
   repo consumes it. Building a second one is the failure mode this non-goal exists to prevent.
 - **No API gateway.** Both edge gateways are infrastructure, not application code. air-orchestrator-service
   authenticates its own callers and derives the channel from the principal, but it does not
@@ -79,8 +80,8 @@ selecting the profile — see [HLD §3](01-hld.md).
 - **No UI.** `air-client`'s Chat tab covers exercising the API.
 - **No business data ownership.** Sessions and turn transcripts only; orders, customers and
   catalogue stay behind the services that own them.
-- **No token-level streaming in v1.** See §4 — the gateway cannot stream today, and the
-  chosen event contract does not require it to.
+- **No token-level streaming in v1.** See §4. v1 shipped without it; it was added
+  without a contract change once the gateway could stream (spec 0004).
 
 ## 4. Decisions taken
 
@@ -89,8 +90,8 @@ selecting the profile — see [HLD §3](01-hld.md).
 | Orchestration boundary | air-orchestrator-service decides *what* to call; the specialist services decide *how* | Keeps the orchestrator small and the capabilities independently deployable |
 | Read/write split | `air-tools` read-only, `air-action` mutating behind external checks | A structural boundary, per §1. Also lets the two scale, fail and get audited differently |
 | Mutation flow | **Propose → confirm → execute**, confirmation recorded on the session | A mutation triggered by a model's reading of free text needs a human "yes" in the loop that outlives the process |
-| Streaming shape | **SSE, orchestration events** — stage events plus the final answer as one chunk | air-llm returns complete responses from `POST /v1/inference` and has no `ModelProvider.stream()`. Stage events deliver the responsiveness that matters without blocking on a two-repo change. Token deltas remain a compatible later addition — a new event type, not a new contract |
-| Model access | Exclusively via air-llm's `POST /v1/inference`, over HTTP (`clients/llm.py`) | G7. Centralised routing, failover, cache and cost accounting are the whole point of the gateway. Reached directly, never through air-infra |
+| Streaming shape | **SSE, orchestration events, plus token deltas** — stage events, then the answer as provisional `answer.delta` events and an authoritative `answer` | v1 shipped stage events alone, because air-llm could not stream. air-model-gateway can, so deltas were added as the compatible later addition this row anticipated: a new event, not a new contract. They are guardrailed through a hold-back buffer, and the authoritative `answer` retracts them on a refusal (spec 0004; product decision 2026-11-14: stream on both channels) |
+| Model access | Exclusively via air-model-gateway's `POST /v1/generate`, over HTTP (`clients/model_gateway.py`), asking for a model *class* (`cloud`), never a model | G7. Centralised routing, failover, budgets, cache and cost accounting are the whole point of the gateway. Reached directly, never through air-infra. Replaced air-llm's `/v1/inference` in spec 0003 |
 | Channel model | One service, `customer` and `business` channels, derived from the **authenticated principal** | Two deployments would duplicate the orchestrator; one undifferentiated endpoint would apply the weaker profile to both. Deriving from a header would let the client pick its own profile |
 | Guardrails | **Inside air-orchestrator-service, both directions** | Review item 01. A gateway filter sees a request, not a prompt, and cannot tell that a retrieved document is being read as an instruction |
 | Semantic cache | Embedding-similarity cache, checked **before** classification and fan-out | Review item 04 puts hits at 20–40% of traffic. A hit that already paid for classification, retrieval and a model call has spent most of what it was meant to save |
@@ -113,10 +114,10 @@ running code, not an aspiration.
 
 1. **Routing mechanism — resolved as LLM-based decomposition, reversing the earlier
    tool-calling recommendation.** `shopassist-service`'s `call_task_decomposer()` is exactly
-   this shape, proven in production use, and air-llm confirmed still has no `tools` field on
-   its unified inference contract (checked against its actual source, not assumed) — so
+   this shape, proven in production use, and the model gateway confirmed still has no `tools`
+   field on its inference contract (air-llm then; air-model-gateway's `/v1/generate` now) (checked against its actual source, not assumed) — so
    tool-calling remains blocked on a change in a repo this one doesn't own. Decomposition needs
-   nothing further to ship. Migrate to native tool-calling once air-llm grows it; the tool list
+   nothing further to ship. Migrate to native tool-calling once air-model-gateway grows it; the tool list
    still assembles at runtime from each service's `/v1/capabilities`, so that migration is a
    planner-internal change, not a contract change.
 2. ~~**Where PII masking belongs.**~~ *Resolved by the diagram — and re-confirmed against
@@ -157,13 +158,13 @@ running code, not an aspiration.
 tools into their own repos (`air-rag`, `air-tools`) forced a decision this section's original
 scope didn't cover: where does that reasoning loop live once it's not all one process?
 
-**Decided: inside air-tools and air-rag, not air-orchestrator-service.** Each hosts its own air-llm client
+**Decided: inside air-tools and air-rag, not air-orchestrator-service.** Each hosts its own air-model-gateway client
 and does its own reason/interpret calls; air-orchestrator-service sends **one coarse request per sub-task**
 (`POST /v1/agents/{name}` on air-tools) and folds the structured result into synthesis. This
 keeps the non-goal already on record — "a tool added there must not require a code change
 here" — true for agent logic as well as flat capability calls, and matches the per-role
 fine-tuned LLM endpoints on the reference diagram (`agent_reason`, `agent_interpret`), realised
-as air-llm `routing.yaml` aliases rather than new services. air-tools' read-only boundary is
+as per-caller overrides in air-model-gateway's routing file rather than new services. air-tools' read-only boundary is
 unchanged: an agent that finds a mutation warranted returns a description for air-orchestrator-service to
 route to air-action, and never executes anything itself — the same structural gap that closes
 the highest-severity issue in shopassist's own retrospective (no ownership/confirmation check
@@ -195,7 +196,7 @@ contract; the reply extractor gets a real path instead of probing.
 Split in two, because the turn engine does not depend on the session backend:
 
 **2a — the turn engine · *shipped*.** Turn lifecycle, guardrails in and out, prompt registry,
-model calls through air-llm, answer synthesis, real event stream, enforced turn and session
+model calls through the model gateway (air-llm then; air-model-gateway since spec 0003), answer synthesis, real event stream, enforced turn and session
 budgets.
 *Exit, met:* A multi-turn conversation with **zero downstream services running**, and an
 injection attempt that is caught rather than answered.
@@ -247,7 +248,7 @@ load test, runbook, image published.
 | **Semantic cache returns a confidently wrong answer.** Two near-identical vectors are two different questions | Worse than a cache miss — a plausible answer about the wrong order | Cache only the direct-answer route; never cache anything grounded in tool output, retrieval or per-user data; high similarity threshold plus exact entity match; tenant-namespaced keys (§4 Q5) |
 | **Cross-tenant leakage through a shared read path** — cache, session, or an unscoped downstream call | Confidentiality breach, and the hardest class of bug to detect after the fact | Tenant is on the request context from authentication, is part of every cache and session key, and is passed to every downstream. Tested as an explicit isolation suite, not assumed |
 | Guardrails cause false refusals | Legitimate traffic blocked; the business channel is most exposed, since analyst queries look adversarial | Per-channel guardrail profiles; every block emits a structured event with the rule that fired, so refusals are measurable and tunable rather than anecdotal |
-| The gateway becomes a single point of failure for chat | All conversation stops when air-llm is down | It genuinely is one — accepted deliberately, since centralised cost/key custody is worth it. Mitigation is on air-llm's side (provider failover), plus an honest degraded answer here rather than a hang |
+| The gateway becomes a single point of failure for chat | All conversation stops when air-model-gateway is down | It genuinely is one — accepted deliberately, since centralised cost/key custody is worth it. Mitigation is on air-model-gateway's side (provider failover), plus an honest degraded answer here rather than a hang |
 | Confirmation UX is ambiguous over a stream | A user's "yes" applies to the wrong proposal | The proposal carries an id, the confirmation must cite it, and any turn that does not answer the proposal cancels it (§4 Q3) |
 
 ## 7. Success metrics
@@ -269,7 +270,8 @@ Status against each, as of this review round:
       **air-llm** :8083, not air-infra: air-llm split out of air-infra after this plan was
       first drafted, and air-infra now brokers only Redis/Postgres/Mongo and secrets. This
       correction is applied throughout the plan, HLD, LLD and code. *Intent & Sentiment*
-      remains air-classifier.
+      remains air-classifier. **Since superseded:** air-model-gateway replaced air-llm in the
+      same slot (spec 0003, constitution 1.1.0).
 - [x] Two channels on one engine, with the channel derived from the principal (HLD §3)
 - [x] The read/write split as stated in §1, and G3's "enforced by the client layer" — and now
       independently evidenced: shopassist-service's retrospective names skipping exactly this
@@ -277,8 +279,8 @@ Status against each, as of this review round:
 - [x] Propose → confirm → execute as the only mutation path, confirmation by deterministic
       keyword match on the next turn, never a second LLM call (§4 item 3)
 - [x] **SSE stage events for v1, with token-by-token deferred to an air-llm change** —
-      a recorded deviation from the diagram's *Response Streamer* (HLD §5). Shipped;
-      `answer.delta` is defined and reserved but never emitted
+      a recorded deviation from the diagram's *Response Streamer* (HLD §5). **Closed
+      2026-11-14:** air-model-gateway streams, and `answer.delta` is emitted (spec 0004)
 - [ ] Sessions on brokered Redis rather than in-process — **Phase 2b, not started.** The
       `SessionStore` protocol and tenant-namespaced key shape exist so this is a backend
       swap, not a redesign
@@ -289,6 +291,6 @@ Status against each, as of this review round:
       Held: Phase 2a shipped a real turn with zero downstream services running
 - [x] The six items in §4 are resolved (item 4, transcript retention, deferred rather than
       decided) — **Q1 (routing mechanism) is resolved as LLM-based decomposition**, reversing
-      the earlier tool-calling recommendation, since air-llm still has no `tools` field
+      the earlier tool-calling recommendation, since the gateway still has no `tools` field
 - [x] **New:** agent placement — reason/tool/interpret loops live inside air-tools/air-rag,
-      each with its own air-llm client; air-orchestrator-service sends one coarse request per sub-task
+      each with its own air-model-gateway client; air-orchestrator-service sends one coarse request per sub-task

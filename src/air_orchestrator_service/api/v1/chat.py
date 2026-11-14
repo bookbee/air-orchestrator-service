@@ -69,10 +69,15 @@ async def chat(
         raise InsufficientScopeError(f"This key lacks the '{SCOPE_CHAT_WRITE}' scope.")
     reject_privileged_options(body.options, principal)
 
-    engine = TurnEngine(state.settings, state.sessions, state.llm)
-    events = engine.run(TurnRequest.from_chat(body), principal)
+    engine = TurnEngine(state.settings, state.sessions, state.model_gateway, state.classifier)
+    streaming = wants_stream(accept)
+    turn = TurnRequest.from_chat(body, stream=streaming)
+    # Before the response shape is chosen, so an unknown session is a 404 status
+    # line on a stream too, not an `error` event after headers (REQ-VAL-001).
+    await engine.open(turn, principal)
+    events = engine.run(turn, principal)
 
-    if wants_stream(accept):
+    if streaming:
         return event_stream_response(events)
 
     include_trace = body.options.include_trace if body.options else True

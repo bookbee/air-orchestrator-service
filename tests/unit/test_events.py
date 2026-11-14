@@ -81,22 +81,25 @@ def test_the_wire_name_and_the_payload_discriminator_agree() -> None:
     assert name == f"event: {payload['event']}"
 
 
-def test_answer_delta_is_defined_but_never_emitted_in_v1() -> None:
-    """Reserved so closing the air-infra streaming gap needs no contract change.
-
-    The model exists and frames correctly; the engine simply does not produce it. A
-    client written against this contract today already ignores it, which is the whole
-    point (docs/01-hld.md §5).
-    """
+def test_answer_delta_frames_under_its_reserved_name() -> None:
+    """Reserved since v1 so that streaming the answer needed no contract change: a
+    client written before it was emitted already ignored it (docs/01-hld.md §5)."""
     frame = format_event(AnswerDeltaEvent(text="tok")).decode()
 
     assert frame.startswith("event: answer.delta")
 
 
-async def test_no_answer_delta_is_emitted(client: httpx.AsyncClient) -> None:
+async def test_answer_deltas_are_provisional_and_the_answer_follows_them(
+    client: httpx.AsyncClient,
+) -> None:
+    """A client that ignores deltas still gets the whole answer — spec 0004."""
     events = await _stream(client, CUSTOMER_KEY, message="hello")
+    names = [name for name, _ in events]
 
-    assert EventType.ANSWER_DELTA not in {name for name, _ in events}
+    assert EventType.ANSWER_DELTA in names
+    assert names.index(EventType.ANSWER) > max(
+        i for i, name in enumerate(names) if name == EventType.ANSWER_DELTA
+    )
 
 
 # ── Rule 3: a mid-stream failure is an event, not a status ────────────────────

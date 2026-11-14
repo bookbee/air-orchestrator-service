@@ -12,8 +12,8 @@ license = { text = "Proprietary" }
 authors = [{ name = "Vikas Roy" }]
 
 # Other AIR services are *service* dependencies, reached over HTTP, not package
-# ones. air-classifier set that precedent (providers/air_llm_provider.py talks to
-# air-llm with httpx rather than importing a client SDK), and following it keeps
+# ones. air-classifier set that precedent (providers/model_gateway_provider.py talks
+# to air-model-gateway with httpx rather than importing its client), and following it keeps
 # the repos free of a build-time coupling that a path dependency would create.
 # The contract is the other service's published API; httpx is the transport.
 dependencies = [

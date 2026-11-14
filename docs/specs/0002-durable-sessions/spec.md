@@ -74,7 +74,7 @@ and a Redis outage degrades the turn honestly rather than silently dropping hist
 | `REQ-SESS-009` | MUST | Redis credentials are obtained from air-infra's broker, not from a static URL, when `infra` is configured. |
 | `REQ-SESS-010` | MUST | The stored payload carries a schema version, and a reader rejects a version it does not understand rather than silently misreading it. |
 | `REQ-SESS-011` | MUST NOT | A brokered credential appear in any log line, repr or error message. |
-| `REQ-SESS-012` | SHOULD | `/v1/ready` reports the session backend's reachability without gating on it — air-llm alone gates readiness (Article III). |
+| `REQ-SESS-012` | SHOULD | `/v1/ready` reports the session backend's reachability without gating on it — air-model-gateway alone gates readiness (Article III). |
 
 ## 6. Acceptance criteria
 

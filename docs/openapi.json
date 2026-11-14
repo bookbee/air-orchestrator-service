@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "AIR Orchestrator Service",
-    "description": "The AIR estate's conversational front door.\n\nSend a message; the platform decides what it needs, gathers it from the specialist\nservices, and streams back a grounded answer. It orchestrates and owns no\ncapability of its own \u2014 retrieval is `air-rag`'s, classification\n`air-classifier`'s, read-only calls `air-tools`', mutations `air-action`'s, models\n`air-llm`'s, and stores `air-infra`'s.\n\n**Two channels, one engine.** `POST /v1/chat` serves public conversational traffic\nthrough the customer gateway; `POST /v1/query` serves internal business queries\nthrough the corporate one, returning schema-validated structured output. They share\nthe pipeline and differ only by profile \u2014 guardrails, output contract, audit sink,\nquota bucket, tool allow-list. The channel comes from your API key, not from a\nheader.\n\n**Mutations are proposed, never performed.** A turn that warrants a write returns a\n`proposal` and changes nothing. Executing it takes a second turn carrying\n`confirm.proposal_id`; prose that merely reads as agreement executes nothing.\n\n**Streaming.** Responses are Server-Sent Events, content-negotiated: send\n`Accept: text/event-stream` to stream, anything else to receive the terminal result\nas one JSON body. Every pipeline stage emits as it completes, bracketed by\n`turn.start` and `turn.end`. Ignore event names you do not recognise \u2014 that is what\nlets token deltas arrive later without a contract change.\n\nErrors are RFC 9457 `application/problem+json`.",
+    "description": "The AIR estate's conversational front door.\n\nSend a message; the platform decides what it needs, gathers it from the specialist\nservices, and streams back a grounded answer. It orchestrates and owns no\ncapability of its own \u2014 retrieval is `air-rag`'s, classification\n`air-classifier`'s, read-only calls `air-tools`', mutations `air-action`'s, models\n`air-model-gateway`'s, and stores `air-infra`'s.\n\n**Two channels, one engine.** `POST /v1/chat` serves public conversational traffic\nthrough the customer gateway; `POST /v1/query` serves internal business queries\nthrough the corporate one, returning schema-validated structured output. They share\nthe pipeline and differ only by profile \u2014 guardrails, output contract, audit sink,\nquota bucket, tool allow-list. The channel comes from your API key, not from a\nheader.\n\n**Mutations are proposed, never performed.** A turn that warrants a write returns a\n`proposal` and changes nothing. Executing it takes a second turn carrying\n`confirm.proposal_id`; prose that merely reads as agreement executes nothing.\n\n**Streaming.** Responses are Server-Sent Events, content-negotiated: send\n`Accept: text/event-stream` to stream, anything else to receive the terminal result\nas one JSON body. Every pipeline stage emits as it completes, bracketed by\n`turn.start` and `turn.end`. Ignore event names you do not recognise.\n\nThe answer streams as `answer.delta` events, then one `answer` event. **`answer` is\nauthoritative:** deltas are provisional. On a normal turn `answer` equals the deltas\nconcatenated. When the model provider refuses, the stream fails, or the deadline passes,\n`answer` carries the refusal or fallback text instead, and a client that rendered the\ndeltas must replace them with it.\n\nErrors are RFC 9457 `application/problem+json`.",
     "version": "0.1.0"
   },
   "paths": {
@@ -34,7 +34,7 @@
           "system"
         ],
         "summary": "Readiness",
-        "description": "Whether this replica can serve a turn. Gates on air-llm, which is the one dependency without which no answer can be synthesised. Other services, including air-infra, are reported for operator visibility but do not affect readiness.",
+        "description": "Whether this replica can serve a turn. Gates on air-model-gateway serving this service \u2014 reachable, accepting its token, and offering its model class \u2014 the one dependency without which no answer can be synthesised. Other services, including air-infra, are reported for operator visibility but do not affect readiness.",
         "operationId": "ready_v1_ready_get",
         "responses": {
           "200": {
@@ -648,7 +648,7 @@
         "type": "string",
         "enum": [
           "air-infra",
-          "air-llm",
+          "air-model-gateway",
           "air-classifier",
           "air-rag",
           "air-tools",
@@ -825,7 +825,7 @@
           "checked_at"
         ],
         "title": "ReadyResponse",
-        "description": "Readiness: can this replica serve a turn at all?\n\n``ready`` tracks air-infra alone. Every other service being down is a\nnarrower answer, not an unservable one (docs/01-hld.md \u00a77), so listing them\nhere is reporting, not gating \u2014 and conflating the two would take the\nservice out of rotation for a degradation it is designed to absorb."
+        "description": "Readiness: can this replica serve a turn at all?\n\n``ready`` tracks air-model-gateway alone. Every other service being down is a\nnarrower answer, not an unservable one (docs/01-hld.md \u00a77), so listing them\nhere is reporting, not gating \u2014 and conflating the two would take the\nservice out of rotation for a degradation it is designed to absorb."
       },
       "Route": {
         "type": "string",
@@ -1014,14 +1014,15 @@
                 "items": {
                   "$ref": "#/components/schemas/Route"
                 },
-                "type": "array"
+                "type": "array",
+                "minItems": 1
               },
               {
                 "type": "null"
               }
             ],
             "title": "Allow Routes",
-            "description": "Restrict the planner to these routes. Cannot add a route that is not live."
+            "description": "Restrict the planner to these routes. Cannot add a route that is not live. Omit it for the default; an empty list is refused."
           },
           "use_cache": {
             "anyOf": [
@@ -1208,6 +1209,13 @@
           "cost_usd": {
             "type": "number",
             "title": "Cost Usd",
+            "description": "Everything the turn spent, `classifier_cost_usd` included.",
+            "default": 0.0
+          },
+          "classifier_cost_usd": {
+            "type": "number",
+            "title": "Classifier Cost Usd",
+            "description": "What air-classifier reported spending on this turn.",
             "default": 0.0
           },
           "cache_hit": {

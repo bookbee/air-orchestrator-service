@@ -5,12 +5,13 @@
 This document is the implementation contract. Code follows it; where it turns out to be
 wrong, the document is amended rather than silently diverged from.
 
-**Shipped so far: Phases 0, 1 and 2a.** The full `/v1` surface is live — `/v1/chat`,
-`/v1/query`, `/v1/sessions/{id}` and the SSE event contract — served by a real turn engine:
-guardrails both ways, a versioned prompt registry, synthesis through air-llm, and enforced
-turn and session budgets. Classification, downstream fan-out and the semantic cache are not
-built, and the stages that would run them report `skipped` with a reason rather than `ok`.
-178 tests; `make check` is green.
+**Shipped so far: Phases 0, 1 and 2a, and the first Phase 3 client.** The full `/v1` surface
+is live — `/v1/chat`, `/v1/query`, `/v1/sessions/{id}` and the SSE event contract — served by a
+real turn engine: guardrails both ways, a versioned prompt registry, synthesis through
+air-model-gateway (streamed to SSE callers as `answer.delta`), classification through
+air-classifier when configured, and enforced turn and session budgets. Downstream fan-out and
+the semantic cache are not built, and the stages that would run them report `skipped` with a
+reason rather than `ok`. `make check` is green; specs 0003–0005 trace every requirement.
 
 **Read §15 first.** Sections 1-14 describe the whole contract, including parts that are
 designed but unbuilt. §15 is the authoritative record of what exists today, and every entry
@@ -80,10 +81,11 @@ air-orchestrator-service/
     ├── cache/                    ○ # semantic.py: embed → ANN → eligibility gate (Phase 5)
     │
     ├── clients/
-    │   ├── llm.py                  # air-llm — the only model path (G7)
+    │   ├── model_gateway.py        # air-model-gateway — the only model path (Article VII)
     │   ├── infra.py                # air-infra — brokered stores and secrets
+    │   ├── classifier.py           # air-classifier — the CLASSIFY stage (spec 0005)
     │   ├── base.py               ○ # shared timeout/retry/breaker/budget     (Phase 3)
-    │   ├── classifier.py rag.py tools.py action.py recommender.py  ○   (Phases 3-4)
+    │   ├── rag.py tools.py action.py recommender.py  ○                 (Phases 3-4)
     │   └── discovery.py          ○ # /v1/capabilities polling → live inventory (Phase 3)
     │
     ├── prompts/
@@ -113,7 +115,7 @@ The package, env prefix and metric namespace all spell the repo name in full
 
 The estate is mid-migration on this point. `air-classifier` already ships an
 `air_classifier_service` package but kept `AIR_CLASSIFIER__` and `air_classifier_*` for its
-env prefix and metrics; `air-rag`, `air-tools`, `air-llm` and `air-infra` are still
+env prefix and metrics; `air-rag`, `air-tools`, `air-model-gateway` and `air-infra` are still
 `air_<name>` throughout. This repo's package name follows air-classifier; its prefix and
 metric namespace are spelled in full. Both are deliberate, and worth revisiting only as one
 estate-wide decision rather than per repo.
@@ -121,14 +123,14 @@ estate-wide decision rather than per repo.
 | Group | Keys | Notes |
 | --- | --- | --- |
 | `app` | `env`, `host`, `port`, `workers`, `root_path`, `docs_enabled`, `max_body_bytes`, `shutdown_grace_seconds` | `env` is `development`\|`staging`\|`production`\|`test` and drives fail-open/closed. Port **8081** (air-infra port map) |
-| `llm` | `base_url`, `api_key`, `timeout_s`, `health_timeout_s`, `max_retries`, `default_model` | air-llm :8083. **Mandatory** — no `enabled` flag, and `/v1/ready` gates on its probe |
+| `model_gateway` | `base_url`, `api_key`, `model_class`, `timeout_s`, `health_timeout_s`, `stream_idle_timeout_s` | air-model-gateway :8083. **Mandatory** — no `enabled` flag, and `/v1/ready` gates on its probe. `model_class` is `local`\|`auto`\|`cloud` (default `cloud`), never a model name. The retired `llm` group is refused at startup, naming its replacement |
 | `infra` | `base_url`, `api_key`, `timeout_s`, `health_timeout_s`, `max_retries` | air-infra :8080. Mandatory in shape, unused on the turn path until Phase 2b |
 | `downstream` | `classifier`, `rag`, `tools`, `action`, `recommender` → `{enabled, base_url, api_key, timeout_ms}` | Each independently disableable, and **all default to `enabled=false`**: a fresh checkout must not report itself degraded against services that do not exist. Disabled ⇒ capability absent, not an error |
 | `turn` | `deadline_ms`, `max_cost_usd`, `max_model_calls`, `window_turns` | Per-turn ceilings (§7) |
 | `guardrails` | `profiles.customer`, `profiles.business`, `competitor_names` | Which rules run, and in which direction |
 | `cache` | `enabled`, `backend`, `similarity_threshold`, `ttl_seconds` | `memory`\|`redis`; off, and unread, until Phase 5 |
 | `session` | `backend`, `ttl_seconds`, `proposal_ttl_seconds`, `max_cost_usd` | `memory`\|`redis`; asking for `redis` today logs a warning and falls back |
-| `prompts` | `registry_path`, `pins` | route → pinned prompt version. `registry_path` is reserved: the registry ships built-in defaults and does not load files yet |
+| `prompts` | `registry_path`, `pins`, `persona.{brand_name, agent_name}` | prompt name (`customer_care`, `business_analyst`) → pinned version, checked at boot. `persona` fills the brand and assistant name into both prompts (spec 0006). `registry_path` is reserved: the registry ships built-in prompts and does not load files yet |
 | `security` | `api_keys_inline`, `api_keys_file`, `hash_salt`, `allow_unauthenticated`, `anonymous_channel`, `default_rate_limit_rpm`, `log_raw_text` | Key records carry `channel`, `tenant`, `scopes`, `allow_actions` |
 | `obs` | `service_name`, `log_format`, `log_level`, `metrics_enabled`, `metrics_path` | |
 
@@ -143,7 +145,7 @@ All routes require `X-API-Key`; errors are RFC 9457 `application/problem+json`.
 | Method | Path | Purpose | Guard |
 | --- | --- | --- | --- |
 | GET | `/v1/health` | liveness (process up) | none |
-| GET | `/v1/ready` | readiness — gates on **air-llm** alone; air-infra and the optional services are reported but do not affect it | none |
+| GET | `/v1/ready` | readiness — gates on **air-model-gateway** alone (reachable, accepting this service's token, serving its model class); air-infra and the optional services are reported but do not affect it | none |
 | GET | `/v1/capabilities` | version, channel, live routes, guardrail profile, stream shapes, session/turn ceilings — reported **per principal** | authN + `admin:read` |
 | POST | `/v1/chat` | conversational turn | authN + `channel=customer` |
 | POST | `/v1/query` | business query, structured output | authN + `channel=business` |
@@ -173,7 +175,7 @@ from idling the connection out.
 | `route` | `{routes[], reason, capabilities[]}` | Planner has decided |
 | `citation` | `{source_id, title, uri?, snippet}` | Per retrieved source actually used |
 | `proposal` | `{proposal_id, action, arguments, risk, summary, expires_at}` | A mutation is proposed. **Nothing has executed** |
-| `answer.delta` | `{text}` | **Reserved.** Emitted only once air-llm can stream (HLD §5, §9) |
+| `answer.delta` | `{text}` | SSE callers only, before `answer`. **Provisional**: already through the output guardrail, but `answer` is authoritative and replaces the deltas (spec 0004) |
 | `answer` | `{text, structured?, grounded, refusal}` | Terminal answer. `structured` on the business channel |
 | `usage` | `{model_calls, tokens, cost_usd, cache_hit}` | Before `turn.end` |
 | `error` | `{code, detail, retryable}` | A stage failed unrecoverably |
@@ -183,7 +185,7 @@ Three rules make this survivable for clients:
 
 1. **`turn.start` and `turn.end` always bracket a turn**, even a refused or errored one. A
    client can rely on the frame rather than on inferring completion from silence.
-2. **Unknown event names must be ignored.** This is what lets `answer.delta` arrive later
+2. **Unknown event names must be ignored.** This is what let `answer.delta` start arriving
    without a contract version bump, and it is stated in the client-facing docs, not assumed.
 3. **An error mid-stream does not become an HTTP error.** Headers are already sent by the
    time most stages run, so failure is an `error` event followed by `turn.end`. Only a
@@ -284,7 +286,8 @@ that call's own timeout rather than a fixed configured one — and checks it *be
 call, so an already-exhausted budget skips the call instead of starting it. Per-turn and
 per-session cost ceilings are checked the same way.
 
-Cost is read back from air-llm's own `cost_usd` on each response, so this service's accounting
+Cost is read back from air-model-gateway's own `cost_usd` on each response (from `done` on a
+streamed one), so this service's accounting
 cannot drift from the gateway's.
 
 Extracting a `TurnBudget` object earns its keep once Phase 3 fans out to several services at
@@ -375,20 +378,22 @@ rule that fired, so the false-refusal rate in Plan §6 is measurable.
 retry on idempotent calls only, a circuit breaker, and the `TurnBudget` deadline applied as
 the effective timeout. Request id and tenant propagate on every call.
 
-**Every AIR service is a service dependency, not a package one.** `clients/llm.py` and
-`clients/infra.py` speak HTTP over `httpx` rather than importing a client SDK. That follows
-air-classifier's precedent — its [`providers/air_llm_provider.py`](../../air-classifier/src/air_classifier_service/providers/air_llm_provider.py)
-does the same — and avoids a build-time coupling between repos that a path dependency would
-create, given no SDK is published anywhere. The contract is the other service's published API;
+**Every AIR service is a service dependency, not a package one.** `clients/model_gateway.py`,
+`clients/classifier.py` and `clients/infra.py` speak HTTP over `httpx` rather than importing a
+client package — even though air-model-gateway ships one (`air_model_gateway_client`), since
+importing another repo's code couples the release of both. air-classifier makes the same call
+for its own gateway client. The contract is the other service's published API;
 `httpx` is the transport. The trade is real: a change to a downstream's request shape is not
 caught by a type checker here, so the contract is pinned by tests instead.
 
-**`clients/llm.py` probes `/v1/ready`, not `/v1/health`.** air-llm's health route is
-dependency-free liveness and never reflects whether a provider actually answers; its ready
-route is gated on "at least one provider reachable" — the only signal that answers "can a turn
-be synthesised right now."
+**`clients/model_gateway.py` probes `/v1/ready` *and* `/v1/capabilities`.** The gateway's
+ready route answers "does any provider respond?" for any caller — it stayed green through the
+whole period every call from this service 404'd. `/v1/capabilities`, authenticated with this
+service's token, answers what readiness means here: is the token accepted, and is the
+configured model class granted to this service and backed by a provider (spec 0003).
 
-`DownstreamClient` (`clients/base.py`) and the five capability clients are **Phase 3**. The
+`DownstreamClient` (`clients/base.py`) and the remaining capability clients are **Phase 3**;
+`clients/classifier.py` came first, with one bounded attempt and no breaker (spec 0005). The
 guard/breaker/bulkhead primitives are to be **lifted from air-classifier's
 [`resilience/`](../../air-classifier/src/air_classifier_service/resilience/)** rather than rewritten —
 fan-out here has the same failure modes its tier ladder does, and a second implementation
@@ -422,7 +427,7 @@ than the HTTP status.
 `TurnBudgetExceeded(429)`, `DependencyUnavailable(503)` — rendering to
 `application/problem+json` with `request_id`, exactly as air-infra and air-classifier do.
 
-`DependencyUnavailable` is reserved for **air-llm being unreachable** — the one dependency
+`DependencyUnavailable` is reserved for **air-model-gateway being unreachable** — the one dependency
 without which no answer exists. Every other downstream is a degradation, not an error
 (HLD §7). Note that a turn whose synthesis call fails does *not* raise it: the turn degrades
 to an honest fallback answer with `turn.end{status=degraded}`, and the 503 belongs to
@@ -462,8 +467,11 @@ to an honest fallback answer with `turn.end{status=degraded}`, and the 503 belon
 
 ## 14. Testing
 
-178 tests, all under `tests/unit/`, all hermetic — `pytest` needs nothing running. The
-air-infra and air-llm probes are stubbed **in both directions** by `tests/conftest.py`
+244 tests, all hermetic — `pytest` needs nothing running. `tests/unit/` patches clients;
+`tests/integration/` runs the real app against respx doubles of air-model-gateway and
+air-classifier that enforce their `extra="forbid"` request contracts, so a wire break fails
+before a deploy rather than after. The air-infra and air-model-gateway probes are stubbed
+**in both directions** by `tests/conftest.py`
 (`reachable_*` / `unreachable_*`), and their base URLs point at `.invalid` hosts so a probe
 that escapes a stub fails loudly instead of quietly reaching a real service. An earlier
 version let the "unreachable" case simply happen, on the reasoning that a fresh checkout has
@@ -495,18 +503,19 @@ table wins.
 
 | Phase | State |
 | --- | --- |
-| 0 — Skeleton | **Shipped.** config · auth (channel + tenant on the key record) · middleware · RFC 9457 errors · `/v1/health` `/v1/ready` `/v1/capabilities` · metrics · air-infra and air-llm probes · Dockerfile · compose · Makefile |
+| 0 — Skeleton | **Shipped.** config · auth (channel + tenant on the key record) · middleware · RFC 9457 errors · `/v1/health` `/v1/ready` `/v1/capabilities` · metrics · air-infra and model-gateway probes · Dockerfile · compose · Makefile |
 | 1 — Contracts | **Shipped.** `/v1/chat` · `/v1/query` · `/v1/sessions/{id}` · the §4 event contract (`api/sse.py`) · every §5 schema · session store with tenant-namespaced keys · the propose → confirm → execute gate |
-| 2a — Turn engine | **Shipped.** `engine/turn.py`: guardrails in and out · prompt registry · real synthesis through air-llm · enforced turn deadline and per-turn/per-session cost ceilings · escalation on an explicit request for a human. **The event contract did not change** |
+| 2a — Turn engine | **Shipped.** `engine/turn.py`: guardrails in and out · prompt registry · real synthesis through air-model-gateway (spec 0003), streamed as `answer.delta` to SSE callers (spec 0004) · enforced turn deadline and per-turn/per-session cost ceilings, the turn ceiling checked against a pre-call estimate on both channels with air-classifier's spend counted (spec 0008) · payment cards masked on input (spec 0007) · an unknown `session_id` is a 404 and blank or malformed bodies are 422s after auth (spec 0009) · escalation on an explicit request for a human. **The event contract did not change** |
 | 2b — Durable sessions | **Not started.** Redis behind the existing `SessionStore` protocol; the key shape is already tenant-namespaced, so this is a backend swap |
-| 3 — Read path | **Not started.** Clients for air-classifier/air-rag/air-tools/air-recommender, capability discovery, parallel fan-out, grounding checks. Turns `CLASSIFY` and `GATHER` real |
+| 3 — Read path | **Started.** `clients/classifier.py` turns `CLASSIFY` real on the customer channel (spec 0005; acting on the verdict is deferred). Still to come: air-rag/air-tools/air-recommender clients, the shared `clients/base.py`, capability discovery, parallel fan-out, grounding checks, and `GATHER` |
 | 4 — Write path | **Not started.** `clients/action.py` behind the gate that already exists |
 | 5 — Semantic cache + business channel | **Not started.** Turns `CACHE` real; adds output-schema validation and the audit sink |
 | 6 — Evaluation, hardening & ops | **Not started.** Eval suites, OTel tracing, load test, runbook |
 
 ### Stubbed stages announce themselves
 
-`CACHE`, `CLASSIFY` and `GATHER` emit `stage{status=skipped}` with a reason — never `ok`.
+`CACHE` and `GATHER` emit `stage{status=skipped}` with a reason — never `ok`. `CLASSIFY` does
+the same when air-classifier is not configured, or on the business channel.
 That is deliberate and load-bearing: a client must be able to tell a stubbed turn from a real
 one, and this service must never be mistaken for a complete one in a demo. `_STUBBED` in
 `engine/turn.py` is the single list; deleting an entry there is what "turning a stage on"
@@ -519,17 +528,23 @@ stand-in must not appear to understand intent it does not.
 ### Claims proved by tests, not by assertion
 
 - **A fresh checkout with nothing else running boots, serves, and reports itself unready** —
-  air-llm down is a 503 on `/v1/ready` with a named cause, not a crash loop.
+  air-model-gateway down — or up but rejecting this service's token — is a 503 on `/v1/ready`
+  with a named cause, not a crash loop.
 - **Two keys in one process describe the service differently.** `/v1/capabilities` returns a
   different channel and guardrail profile per credential, and no header or query parameter can
   change which one you get (`test_channels.py`).
 - **Prose that reads as consent executes nothing.** Only the structured `confirm` field can,
   a proposal is single-use, and any unrelated turn cancels it (`test_turns.py`).
 - **`turn.start` and `turn.end` bracket every turn**, a mid-stream failure is an `error` event
-  rather than an HTTP status, and `answer.delta` is defined but never emitted
-  (`test_events.py`).
-- **A provider failure degrades rather than errors.** air-llm being slow or down produces an
-  honest fallback answer and `turn.end{status=degraded}`, not a 5xx (`test_turns.py`).
+  rather than an HTTP status (`test_events.py`).
+- **No `answer.delta` carries text the output guardrail would redact**, under every split of a
+  PII-dense text, and `answer` retracts deltas on a refusal (`test_guardrails_pii.py`,
+  `test_streaming.py`).
+- **A provider failure degrades rather than errors.** air-model-gateway being slow, down or
+  refusing produces an honest fallback answer and `turn.end{status=degraded}` naming it, not a
+  5xx (`test_turns.py`, `test_streaming.py`).
+- **The wire contract is pinned.** The integration doubles 404 the retired `/v1/inference` and
+  422 any field outside each downstream's request model (`tests/integration/`).
 
 ## 16. Marked TODOs (fill-in points for later phases)
 
@@ -537,10 +552,9 @@ stand-in must not appear to understand intent it does not.
 - `memory/window.py` — summarisation of older turns (Phase 2 ships truncation).
 - `guardrails/injection.py` — heuristics ship first; a model-based classifier is Phase 6.
 - `observability/audit.py` — durable append-only sink for the business channel (Phase 5).
-- `engine/planner.py` — **native tool-calling, wanted from air-llm ([HLD §9](01-hld.md)).**
-  Ships as schema-constrained JSON decomposition using air-llm's existing `json_schema`
+- `engine/planner.py` — **native tool-calling, wanted from air-model-gateway ([HLD §9](01-hld.md)).**
+  Ships as schema-constrained JSON decomposition using the gateway's existing `json_schema`
   support, behind the same `Planner` interface, so the migration is an implementation swap.
-- `api/sse.py` — `answer.delta` emission, blocked on air-llm streaming (HLD §5, §9).
 - `prompts/registry.py` — file-backed versioned prompts. The registry ships built-in defaults
   so a fresh checkout answers with no prompt files configured; `PromptSettings.registry_path`
   is reserved and not read yet. A file format and a reload story are the real work.

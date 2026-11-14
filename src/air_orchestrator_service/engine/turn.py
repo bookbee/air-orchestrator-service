@@ -8,15 +8,18 @@ render progress before the answer exists.
 
 **What this engine actually does today.** Guardrails (injection screening, a
 scope guard, PII masking in both directions, an escalation path), the prompt
-registry, and synthesis through air-llm are real. So are the ceilings: a
+registry, and synthesis through air-model-gateway are real. So are the ceilings: a
 turn-level deadline computed once and decremented before the synthesis call —
 bound to that call's own timeout, and checked *before* a call is made so an
 exhausted budget skips the call rather than starting it — plus per-turn and
-per-session cost ceilings.
+per-session cost ceilings. The turn ceiling is enforced the same way, before the
+money is spent: each paid call is priced from configured rates first, and skipped
+if it could take the turn past the ceiling (spec 0008). Cost is otherwise only
+known once a call returns, which is too late for a cap.
 
-**What is stubbed, and why it says so.** ``CACHE`` (Phase 5) and ``CLASSIFY`` /
-``GATHER`` (Phase 3, pending clients for air-classifier/air-rag/air-tools) report
-``StageStatus.SKIPPED`` with a reason, never ``ok`` — see ``_STUBBED``. A client
+**What is stubbed, and why it says so.** ``CACHE`` (Phase 5) and ``GATHER``
+(Phase 3, pending clients for air-rag/air-tools) report ``StageStatus.SKIPPED``
+with a reason, never ``ok`` — see ``_STUBBED``. A client
 must always be able to tell a stubbed turn from a real one, and this engine must
 never be mistaken for a complete one in a demo. Routing is still the literal
 ``/propose`` trigger for the same reason: with ``GATHER`` stubbed there is
@@ -24,10 +27,14 @@ nothing to route to besides a direct answer, and a stand-in must not appear to
 understand intent it does not.
 
 **Status vocabulary is load-bearing.** ``TurnStatus.DEGRADED`` covers a provider
-failure — air-llm being slow or down is the system coping, and the turn still
-answers. ``TurnStatus.ERROR`` is reserved for genuinely unexpected exceptions.
-Collapsing the two would make an outage and a bug indistinguishable on a
-dashboard.
+failure — the model gateway being slow, down, or refusing this service's
+credentials is the system coping, and the turn still answers; the degraded stage
+names the gateway so ``TurnResult.degraded`` says what was missing.
+``TurnStatus.REFUSED`` covers a refusal, whether this service's own guardrail or
+the model provider's safety layer said no — the gateway's ``refusal`` flag is a
+verdict, not an empty answer. ``TurnStatus.ERROR`` is reserved for genuinely
+unexpected exceptions. Collapsing any two would make an outage, a policy decision
+and a bug indistinguishable on a dashboard.
 
 Content that did not originate in this service's own code is demarcated by
 ``guardrails/boundary.py`` before it reaches a prompt, and the prompt version
@@ -42,10 +49,23 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any, Final
 
-from air_orchestrator_service.clients.llm import LlmCallError, LlmClient
+from air_orchestrator_service.api.errors import SessionNotFoundError
+from air_orchestrator_service.clients.classifier import (
+    MIN_CALL_MS,
+    ClassifierClient,
+    ClassifierError,
+    label_slug,
+)
+from air_orchestrator_service.clients.model_gateway import (
+    GenerateResult,
+    ModelGatewayClient,
+    ModelGatewayError,
+    StreamDelta,
+)
 from air_orchestrator_service.config import Settings
 from air_orchestrator_service.constants import (
     Channel,
+    DownstreamService,
     EscalationReason,
     EventType,
     Route,
@@ -56,12 +76,12 @@ from air_orchestrator_service.constants import (
 from air_orchestrator_service.guardrails.boundary import delimit
 from air_orchestrator_service.guardrails.escalation import wants_human
 from air_orchestrator_service.guardrails.injection import screen_input
-from air_orchestrator_service.guardrails.pii import mask_input, scan_output
+from air_orchestrator_service.guardrails.pii import StreamRedactor, mask_input, scan_output
 from air_orchestrator_service.guardrails.scope import screen_scope
 from air_orchestrator_service.memory.session import InMemorySessionStore
 from air_orchestrator_service.observability import metrics
 from air_orchestrator_service.observability.logging import get_logger, safe_text_fields
-from air_orchestrator_service.prompts.registry import PromptRegistry
+from air_orchestrator_service.prompts.registry import Prompt, PromptRegistry, prompt_for
 from air_orchestrator_service.schemas.chat import (
     ChatRequest,
     Proposal,
@@ -72,6 +92,7 @@ from air_orchestrator_service.schemas.chat import (
 )
 from air_orchestrator_service.schemas.common import Principal, Usage
 from air_orchestrator_service.schemas.events import (
+    AnswerDeltaEvent,
     AnswerEvent,
     ErrorEvent,
     Event,
@@ -102,15 +123,8 @@ PROPOSE_TRIGGER: Final[str] = "/propose"
 #: more — see the module docstring.
 _STUBBED: Final[dict[Stage, str]] = {
     Stage.CACHE: "semantic cache is Phase 5",
-    Stage.CLASSIFY: "air-classifier has no client here yet (Phase 3)",
     Stage.GATHER: "no downstream services called yet (Phase 3)",
 }
-
-#: air-llm routing alias for synthesis — a role-scoped alias
-#: (`routing.yaml`), not a literal model name, matching the per-role LLM
-#: inference pattern in docs/01-hld.md §1 ("the enterprise reference diagram's
-#: per-role LLM Inference layer"). Each alias is a config edit in air-llm.
-_SYNTHESIS_MODEL: Final[str] = "generative"
 
 _SYNTHESIS_MAX_TOKENS: Final[int] = 800
 
@@ -119,9 +133,19 @@ _INJECTION_REFUSAL: Final[str] = (
     "how I'm instructed to behave, rather than a question. Rephrase it and "
     "I'll try again."
 )
+#: The model provider's safety layer declined. Fixed text rather than the
+#: gateway's content, which is empty on a refusal (and, streamed, may be partial).
+_PROVIDER_REFUSAL: Final[str] = (
+    "I'm not able to help with that one. If you think that's a mistake, try "
+    "rephrasing, or ask to speak with a person."
+)
 _DEGRADED_ANSWER: Final[str] = (
     "I'm having trouble putting together a full answer right now. Please try "
     "again in a moment — nothing about your account or order has changed."
+)
+_COST_CEILING_ANSWER: Final[str] = (
+    "I can't put together an answer within this request's cost limit. Try again "
+    "with a higher limit — nothing about your account or order has changed."
 )
 _SESSION_BUDGET_EXHAUSTED: Final[str] = (
     "This conversation has reached its budget for now. Please start a new "
@@ -132,7 +156,7 @@ _SESSION_BUDGET_EXHAUSTED: Final[str] = (
 class TurnRequest:
     """The two route bodies, normalised to what the engine actually needs."""
 
-    __slots__ = ("confirm", "options", "output_schema", "session_id", "text")
+    __slots__ = ("confirm", "options", "output_schema", "session_id", "stream", "text")
 
     def __init__(
         self,
@@ -142,29 +166,36 @@ class TurnRequest:
         options: TurnOptions | None,
         confirm: object | None = None,
         output_schema: dict[str, Any] | None = None,
+        stream: bool = False,
     ) -> None:
         self.text = text
         self.session_id = session_id
         self.options = options or TurnOptions()
         self.confirm = confirm
         self.output_schema = output_schema
+        #: The caller is reading Server-Sent Events, so the prose answer is
+        #: streamed as `answer.delta` (spec 0004). A JSON caller's turn makes the
+        #: non-streaming call, which keeps the gateway's full failover.
+        self.stream = stream
 
     @classmethod
-    def from_chat(cls, body: ChatRequest) -> TurnRequest:
+    def from_chat(cls, body: ChatRequest, *, stream: bool = False) -> TurnRequest:
         return cls(
             text=body.message,
             session_id=body.session_id,
             options=body.options,
             confirm=body.confirm,
+            stream=stream,
         )
 
     @classmethod
-    def from_query(cls, body: QueryRequest) -> TurnRequest:
+    def from_query(cls, body: QueryRequest, *, stream: bool = False) -> TurnRequest:
         return cls(
             text=body.query,
             session_id=body.session_id,
             options=body.options,
             output_schema=body.output_schema,
+            stream=stream,
         )
 
 
@@ -173,10 +204,18 @@ class TurnEngine:
     (currently absent — GATHER is still stubbed) without changing this
     signature."""
 
-    def __init__(self, settings: Settings, sessions: InMemorySessionStore, llm: LlmClient) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        sessions: InMemorySessionStore,
+        model_gateway: ModelGatewayClient,
+        classifier: ClassifierClient | None = None,
+    ) -> None:
         self._settings = settings
         self._sessions = sessions
-        self._llm = llm
+        self._gateway = model_gateway
+        #: ``None`` when air-classifier is not configured (spec 0005).
+        self._classifier = classifier
         self._prompts = PromptRegistry(settings)
         #: Set by `_pipeline` when it degrades a turn — an async generator has
         #: no return value, so this is how `run()` learns the outcome once
@@ -185,13 +224,33 @@ class TurnEngine:
         #: built fresh per request (`api/v1/chat.py`), so there is no
         #: cross-request state here to worry about.
         self._last_status: TurnStatus = TurnStatus.OK
+        #: What air-classifier reported spending on this turn (spec 0008,
+        #: ``REQ-COST-005``). Per request, like `_last_status`.
+        self._classifier_cost_usd = 0.0
+        #: Set by `open()`: the turn's clock and its session.
+        self._opened: tuple[float, Session] | None = None
+
+    async def open(self, request: TurnRequest, principal: Principal) -> None:
+        """Start the turn's clock and resolve its session, before any event.
+
+        Raises :class:`SessionNotFoundError` for a ``session_id`` this caller cannot
+        see (spec 0009, ``REQ-VAL-001``). A route awaits this *before* it picks a
+        response shape, so on a streaming request the 404 is the status line, not an
+        ``error`` event after headers have gone. :meth:`run` calls it when a caller
+        did not.
+        """
+        started = time.perf_counter()
+        session = await self._resolve_session(request.session_id, principal)
+        self._opened = (started, session)
 
     async def run(self, request: TurnRequest, principal: Principal) -> AsyncIterator[Event]:
         turn_id = f"{_TURN_ID_PREFIX}{uuid.uuid4().hex}"
-        started = time.perf_counter()
         status = TurnStatus.OK
 
-        session = await self._resolve_session(request.session_id, principal)
+        if self._opened is None:
+            await self.open(request, principal)
+        assert self._opened is not None
+        started, session = self._opened
 
         yield TurnStartEvent(
             turn_id=turn_id, session_id=session.session_id, channel=principal.channel
@@ -375,7 +434,14 @@ class TurnEngine:
             yield event
         async for event in self._stage(Stage.CACHE):
             yield event
-        async for event in self._stage(Stage.CLASSIFY):
+        async for event in self._classify(
+            request,
+            masked_text,
+            principal,
+            session,
+            deadline_at=turn_started + deadline_s,
+            deadline_s=deadline_s,
+        ):
             yield event
 
         async for event in self._stage(Stage.PLAN):
@@ -402,8 +468,7 @@ class TurnEngine:
         # confirm/propose reply never calls the model, so the deadline is
         # irrelevant to it — only a real synthesis call is bounded. ──
         needs_model = confirmed is None and not propose
-        elapsed_s = time.perf_counter() - turn_started
-        remaining_s = deadline_s - elapsed_s
+        remaining_s = deadline_s - (time.perf_counter() - turn_started)
 
         if needs_model and remaining_s <= 0:
             self._last_status = TurnStatus.DEGRADED
@@ -420,23 +485,73 @@ class TurnEngine:
             return
 
         synth_started = time.perf_counter()
+        outcome = _Synthesis()
         try:
-            text, structured, usage, prompt_version = await self._answer(
+            async for delta in self._answer(
                 request,
                 masked_text,
                 principal,
                 session,
                 confirmed,
                 propose,
-                timeout_s=remaining_s if needs_model else None,
-            )
-        except LlmCallError as exc:
+                outcome,
+                deadline_at=turn_started + deadline_s if needs_model else None,
+            ):
+                yield delta
+        except TimeoutError:
+            # The turn's own deadline ran out while the answer streamed (spec 0004,
+            # REQ-STRM-006). Ours, not the gateway's: no `downstream` is named.
             self._last_status = TurnStatus.DEGRADED
             yield StageEvent(
                 stage=Stage.SYNTHESISE,
                 status=StageStatus.DEGRADED,
                 latency_ms=round((time.perf_counter() - synth_started) * 1000, 3),
-                detail=f"air-llm unavailable (retryable={exc.retryable}): {exc}",
+                detail="turn deadline reached while the answer was streaming",
+            )
+            async for event in self._finish_with_answer(
+                turn_id, masked_text, principal, session, text=_DEGRADED_ANSWER
+            ):
+                yield event
+            return
+        except _CostCeilingError as exc:
+            # Spec 0008, REQ-COST-002: the call was never made. Ours, not the
+            # gateway's, so no `downstream` is named.
+            self._last_status = TurnStatus.DEGRADED
+            yield StageEvent(
+                stage=Stage.SYNTHESISE,
+                status=StageStatus.DEGRADED,
+                latency_ms=round((time.perf_counter() - synth_started) * 1000, 3),
+                detail=str(exc),
+            )
+            async for event in self._finish_with_answer(
+                turn_id, masked_text, principal, session, text=_COST_CEILING_ANSWER
+            ):
+                yield event
+            return
+        except ModelGatewayError as exc:
+            self._last_status = TurnStatus.DEGRADED
+            if exc.timed_out and outcome.deadline_bound:
+                # REQ-MGW-018: earlier stages left this call too little of the
+                # turn, so the deadline ran out, not the gateway.
+                yield StageEvent(
+                    stage=Stage.SYNTHESISE,
+                    status=StageStatus.DEGRADED,
+                    latency_ms=round((time.perf_counter() - synth_started) * 1000, 3),
+                    detail="turn deadline reached during the model call",
+                )
+                async for event in self._finish_with_answer(
+                    turn_id, masked_text, principal, session, text=_DEGRADED_ANSWER
+                ):
+                    yield event
+                return
+            yield StageEvent(
+                stage=Stage.SYNTHESISE,
+                status=StageStatus.DEGRADED,
+                latency_ms=round((time.perf_counter() - synth_started) * 1000, 3),
+                # `str(exc)` is safe by construction: the client builds it from a
+                # status code and a slug-checked problem code, never a URL or body.
+                detail=f"model gateway failed (retryable={exc.retryable}): {exc}",
+                downstream=DownstreamService.MODEL_GATEWAY,
             )
             async for event in self._finish_with_answer(
                 turn_id, masked_text, principal, session, text=_DEGRADED_ANSWER
@@ -444,14 +559,31 @@ class TurnEngine:
                 yield event
             return
 
+        # A provider refusal is `blocked`, like a guardrail of our own refusing —
+        # the system working, not coping — so it never reads as an outage.
+        detail = "model provider refused" if outcome.refused else None
+        if detail is None and outcome.prompt_version:
+            detail = f"prompt={outcome.prompt_version}"
+            if outcome.streamed:
+                detail += " streamed"
         yield StageEvent(
             stage=Stage.SYNTHESISE,
-            status=StageStatus.OK,
+            status=StageStatus.BLOCKED if outcome.refused else StageStatus.OK,
             latency_ms=round((time.perf_counter() - synth_started) * 1000, 3),
-            detail=f"prompt={prompt_version}" if prompt_version else None,
+            detail=detail,
         )
+        # The answer event carries the *complete* text, scanned whole by
+        # `_finish_with_answer` — so it is authoritative over any deltas: equal to
+        # their concatenation on a normal turn, the refusal text on a refusal.
         async for event in self._finish_with_answer(
-            turn_id, masked_text, principal, session, text=text, structured=structured, usage=usage
+            turn_id,
+            masked_text,
+            principal,
+            session,
+            text=outcome.text,
+            structured=outcome.structured,
+            usage=outcome.usage,
+            refusal=outcome.refused,
         ):
             yield event
 
@@ -537,6 +669,15 @@ class TurnEngine:
         session.append(Turn(turn_id=turn_id, role="user", content=masked_text), window=window)
         session.append(Turn(turn_id=turn_id, role="assistant", content=text), window=window)
         resolved_usage = usage or Usage(model_calls=0, cost_usd=0.0, cache_hit=False)
+        if self._classifier_cost_usd:
+            # Every path that ran `CLASSIFY` passes through here, so its spend is
+            # reported even on a turn that degraded afterwards (REQ-COST-005).
+            resolved_usage = resolved_usage.model_copy(
+                update={
+                    "cost_usd": resolved_usage.cost_usd + self._classifier_cost_usd,
+                    "classifier_cost_usd": self._classifier_cost_usd,
+                }
+            )
         session.total_cost_usd += resolved_usage.cost_usd
         await self._sessions.save(session)
         yield StageEvent(
@@ -554,6 +695,79 @@ class TurnEngine:
         latency_ms = round((time.perf_counter() - started) * 1000, 3)
         metrics.record_stage(stage=stage, status=status, duration_s=latency_ms / 1000)
         yield StageEvent(stage=stage, status=status, latency_ms=latency_ms, detail=detail)
+
+    async def _classify(
+        self,
+        request: TurnRequest,
+        masked_text: str,
+        principal: Principal,
+        session: Session,
+        *,
+        deadline_at: float,
+        deadline_s: float,
+    ) -> AsyncIterator[Event]:
+        """The ``CLASSIFY`` stage (spec 0005): one stage event, whatever happens.
+
+        The verdict is observed, not yet acted on: it reaches the stage detail and
+        the log, and nothing downstream reads it (``REQ-CLS-011``/``012`` are
+        deferred). So every failure here is soft by construction. The stage says
+        what went wrong and the turn's status is untouched (HLD §7, "Turn
+        unaffected"). The customer channel only — see the spec's §3 on why a
+        business query is not classified.
+
+        Enrichment, so it yields to the answer twice over: it gets at most a share
+        of the turn's deadline (``REQ-CLS-014``), and only the cost the ceiling
+        leaves once the synthesis call that follows is reserved (``REQ-CLS-015``).
+        """
+        started = time.perf_counter()
+        status, detail, downstream = StageStatus.SKIPPED, None, None
+        if self._classifier is None:
+            detail = "air-classifier is not configured"
+        elif principal.channel is not Channel.CUSTOMER:
+            detail = "not used on the business channel"
+        else:
+            bound_s = self._classifier.bound_s(_remaining(deadline_at), deadline_s=deadline_s)
+            _, messages = self._prose_messages(principal, session, masked_text)
+            affordable = self._turn_ceiling(request) - self._estimate(
+                messages, _SYNTHESIS_MAX_TOKENS
+            )
+            if bound_s * 1000 < MIN_CALL_MS:
+                # Ours, not the classifier's: no `downstream` is named.
+                status, detail = StageStatus.DEGRADED, "turn deadline too close to classify"
+            elif affordable <= 0:
+                status, detail = StageStatus.DEGRADED, "cost ceiling: nothing left to classify"
+            else:
+                try:
+                    verdict = await self._classifier.classify(
+                        masked_text,
+                        tenant=principal.tenant,
+                        timeout_s=bound_s,
+                        max_cost_usd=affordable,
+                    )
+                except ClassifierError as exc:
+                    status, detail = StageStatus.DEGRADED, str(exc)
+                    downstream = DownstreamService.CLASSIFIER
+                else:
+                    status, detail = StageStatus.OK, verdict.summary()
+                    self._classifier_cost_usd = verdict.usage.est_cost_usd
+                    _log.info(
+                        "classifier.verdict",
+                        sentiment=label_slug(verdict.sentiment.label),
+                        intent=label_slug(verdict.intent.label) if verdict.intent else None,
+                        urgency=label_slug(verdict.urgency.label),
+                        requires_human=verdict.requires_human,
+                        decided_by=label_slug(verdict.decided_by),
+                        cost_usd=verdict.usage.est_cost_usd,
+                    )
+        latency_ms = round((time.perf_counter() - started) * 1000, 3)
+        metrics.record_stage(stage=Stage.CLASSIFY, status=status, duration_s=latency_ms / 1000)
+        yield StageEvent(
+            stage=Stage.CLASSIFY,
+            status=status,
+            latency_ms=latency_ms,
+            detail=detail,
+            downstream=downstream,
+        )
 
     def _should_redact(self, request: TurnRequest, principal: Principal) -> bool:
         """Customer channel: unconditional — `chat.py`'s `reject_privileged_options`
@@ -575,14 +789,75 @@ class TurnEngine:
         effective_ms = ceiling_ms if requested_ms is None else min(requested_ms, ceiling_ms)
         return effective_ms / 1000
 
+    def _turn_ceiling(self, request: TurnRequest) -> float:
+        """The effective per-turn cost ceiling (``REQ-COST-001``): the configured
+        one, narrowed (never widened) by the caller's ``options.max_cost_usd``."""
+        configured = self._settings.turn.max_cost_usd
+        requested = request.options.max_cost_usd
+        return configured if requested is None else min(requested, configured)
+
+    def _estimate(self, messages: list[dict[str, str]], max_tokens: int) -> float:
+        """An upper bound on what one call could cost (``REQ-COST-004``): the
+        prompt counted generously from its characters, and the whole ``max_tokens``
+        assumed spent."""
+        rates = self._settings.turn.estimate
+        chars = sum(len(message["content"]) for message in messages)
+        prompt_tokens = chars / rates.chars_per_token
+        return (
+            prompt_tokens * rates.input_usd_per_mtok + max_tokens * rates.output_usd_per_mtok
+        ) / 1_000_000
+
+    def _check_ceiling(
+        self, request: TurnRequest, call: str, estimate: float, spent: float
+    ) -> str | None:
+        """``None`` if a call estimated at ``estimate`` fits under the ceiling
+        after ``spent``; otherwise the reason, logged."""
+        ceiling = self._turn_ceiling(request)
+        if spent + estimate <= ceiling:
+            return None
+        _log.info(
+            "turn.cost_ceiling_reached",
+            call=call,
+            spent_usd=round(spent, 6),
+            estimate_usd=round(estimate, 6),
+            ceiling_usd=ceiling,
+        )
+        left = max(ceiling - spent, 0.0)
+        return f"cost ceiling: estimated ${estimate:.6f}, ${left:.6f} left"
+
+    def _prose_messages(
+        self, principal: Principal, session: Session, masked_text: str
+    ) -> tuple[Prompt, list[dict[str, str]]]:
+        """The prose synthesis call's messages, for the call and for its estimate.
+
+        The channel alone picks the persona (spec 0006, Article I): nothing in the
+        request can name a prompt, and the message itself arrives as delimited data.
+        """
+        prompt, system = self._prompts.render(prompt_for(principal.channel))
+        messages = [{"role": "system", "content": system}]
+        for turn in session.turns:
+            messages.append({"role": turn.role, "content": turn.content})
+        # Only the newest turn is demarcated, not replayed history: prior
+        # assistant turns are this service's own output, and prior user turns
+        # already went through this same boundary once when they were new.
+        messages.append(
+            {"role": "user", "content": delimit(masked_text, source="customer_message")}
+        )
+        return prompt, messages
+
     # ── Pieces ────────────────────────────────────────────────────────────────
 
     async def _resolve_session(self, session_id: str | None, principal: Principal) -> Session:
-        if session_id is not None:
-            existing = await self._sessions.get(session_id, principal)
-            if existing is not None:
-                return existing
-        return await self._sessions.create(principal)
+        """No id starts a session. An id that does not resolve is a 404, never a
+        silent new session: a client that sent one believes it is continuing a
+        conversation (``REQ-VAL-001``). Absent, expired and another tenant's are the
+        same 404, as on ``GET /v1/sessions/{id}`` (Article IV)."""
+        if session_id is None:
+            return await self._sessions.create(principal)
+        existing = await self._sessions.get(session_id, principal)
+        if existing is None:
+            raise SessionNotFoundError("No such session.")
+        return existing
 
     async def _resolve_confirmation(
         self, request: TurnRequest, session: Session
@@ -635,135 +910,238 @@ class TurnEngine:
         session: Session,
         confirmed: PendingProposal | None,
         proposed: bool,
+        outcome: _Synthesis,
         *,
-        timeout_s: float | None,
-    ) -> tuple[str, dict[str, Any] | None, Usage, str | None]:
-        """Synthesis proper. Confirmation/proposal replies stay canned —
-        there is no model call to make for a scripted
-        stand-in mutation that touches nothing real, so `timeout_s` and the
-        prompt registry are irrelevant to those two branches.
+        deadline_at: float | None,
+    ) -> AsyncIterator[AnswerDeltaEvent]:
+        """Synthesis proper. Fills ``outcome``; yields ``answer.delta`` events only
+        when the caller is streaming (an async generator has no return value, hence
+        the holder).
 
-        Raises `LlmCallError` on a real synthesis failure — the caller
-        decides the degraded fallback; this method's job is only to try.
+        Confirmation/proposal replies stay canned — there is no model call to make
+        for a scripted stand-in mutation that touches nothing real, so the deadline
+        and the prompt registry are irrelevant to those two branches.
+
+        Raises `ModelGatewayError` on a real synthesis failure, and `TimeoutError`
+        when the turn's deadline passes mid-stream — the caller decides the degraded
+        fallback; this method's job is only to try.
         """
         if confirmed is not None:
-            text = (
+            outcome.text = (
                 f"Executed {confirmed.action} "
                 "(no air-action client exists yet — nothing actually changed)."
             )
-            return text, None, Usage(model_calls=0, cost_usd=0.0, cache_hit=False), None
+            return
         if proposed:
-            text = (
+            outcome.text = (
                 "That would change something, so here is a proposal rather than an action. "
                 "Confirm it by sending the next turn with "
                 '`"confirm": {"proposal_id": "…", "approve": true}`.'
             )
-            return text, None, Usage(model_calls=0, cost_usd=0.0, cache_hit=False), None
+            return
 
-        prompt = self._prompts.get("direct")
-        messages = [{"role": "system", "content": prompt.system}]
-        for turn in session.turns:
-            messages.append({"role": turn.role, "content": turn.content})
-        # Only the newest turn is demarcated, not replayed history: prior
-        # assistant turns are this service's own output, and prior user turns
-        # already went through this same boundary once when they were new.
-        messages.append(
-            {"role": "user", "content": delimit(masked_text, source="customer_message")}
+        prompt, messages = self._prose_messages(principal, session, masked_text)
+        reason = self._check_ceiling(
+            request,
+            "prose",
+            self._estimate(messages, _SYNTHESIS_MAX_TOKENS),
+            spent=self._classifier_cost_usd,
         )
+        if reason is not None:
+            raise _CostCeilingError(reason)
+        outcome.prompt_version = prompt.ref
+        _log.info("turn.synthesised", prompt=prompt.ref, history_turns=len(session.turns))
 
-        result = await self._llm.chat(
-            model=_SYNTHESIS_MODEL,
-            messages=messages,
-            max_tokens=_SYNTHESIS_MAX_TOKENS,
-            timeout=timeout_s,
-        )
+        if request.stream:
+            outcome.streamed = True
+            result: GenerateResult | None = None
+            async for event in self._stream_prose(messages, deadline_at, outcome):
+                if isinstance(event, AnswerDeltaEvent):
+                    yield event
+                else:
+                    result = event
+            assert result is not None  # `_stream_prose` always ends with the summary
+        else:
+            timeout = _remaining(deadline_at)
+            # REQ-MGW-018: given less than half the turn, a timeout is the
+            # deadline's. With at least half, the gateway was slow.
+            outcome.deadline_bound = (
+                timeout is not None and timeout < self._deadline_seconds(request) / 2
+            )
+            result = await self._gateway.generate(
+                messages=messages, max_tokens=_SYNTHESIS_MAX_TOKENS, timeout=timeout
+            )
+        outcome.usage = _usage(result)
+        if result.refusal:
+            # Billed, so the usage stands; the content (empty on a refusal, partial
+            # and already-streamed on a streamed one) does not. No structured
+            # follow-up: a second call on a refused question would spend money to be
+            # refused again.
+            outcome.text = _PROVIDER_REFUSAL
+            outcome.refused = True
+            return
         text = result.content or "I don't have an answer for that."
-        usage = Usage(
-            model_calls=1,
-            prompt_tokens=result.usage.prompt_tokens,
-            completion_tokens=result.usage.completion_tokens,
-            total_tokens=result.usage.prompt_tokens + result.usage.completion_tokens,
-            cost_usd=result.cost_usd,
-            cache_hit=result.usage.cache_read_tokens > 0,
-        )
-        prompt_version = f"{prompt.route}:{prompt.version}"
+        outcome.text = text
 
-        structured: dict[str, Any] | None = None
-        if principal.channel is Channel.BUSINESS:
-            turn_ceiling = request.options.max_cost_usd or self._settings.turn.max_cost_usd
-            if request.output_schema is None:
-                # The business channel's contract is structured output, so it
-                # gets a body shaped like one even without a caller-supplied
-                # schema — no second model call needed to wrap the same answer.
-                structured = {"answer": text}
-            elif usage.cost_usd >= turn_ceiling:
-                # The per-turn ceiling is already met by the first call — cost
-                # can only be known after a call completes, so enforcement is
-                # of the *next* one: skip it and degrade to the free fallback
-                # rather than spending further, uncontrolled.
-                structured = {"answer": text}
-                _log.info(
-                    "turn.cost_ceiling_reached",
-                    session_id=session.session_id,
-                    cost_usd=usage.cost_usd,
-                    ceiling_usd=turn_ceiling,
-                )
-            else:
-                structured, schema_usage = await self._structured_answer(
-                    masked_text, request.output_schema, timeout_s=timeout_s
-                )
-                usage.model_calls += schema_usage.model_calls
-                usage.prompt_tokens += schema_usage.prompt_tokens
-                usage.completion_tokens += schema_usage.completion_tokens
-                usage.total_tokens += schema_usage.total_tokens
-                usage.cost_usd += schema_usage.cost_usd
+        if principal.channel is not Channel.BUSINESS:
+            return
+        if request.output_schema is None:
+            # The business channel's contract is structured output, so it
+            # gets a body shaped like one even without a caller-supplied
+            # schema — no second model call needed to wrap the same answer.
+            outcome.structured = {"answer": text}
+        elif self._check_ceiling(
+            request,
+            "structured",
+            self._estimate(_structured_messages(masked_text), _SYNTHESIS_MAX_TOKENS),
+            spent=self._classifier_cost_usd + outcome.usage.cost_usd,
+        ):
+            # REQ-COST-003: the answer was given, so only this field narrows, and
+            # the turn's status is unaffected.
+            outcome.structured = {"answer": text}
+        else:
+            remaining = _remaining(deadline_at)
+            if remaining is not None and remaining <= 0:
+                return  # the prose answer spent the deadline; `structured` stays null
+            structured, schema_usage = await self._structured_answer(
+                masked_text, request.output_schema, timeout_s=remaining
+            )
+            outcome.structured = structured
+            usage = outcome.usage
+            usage.model_calls += schema_usage.model_calls
+            usage.prompt_tokens += schema_usage.prompt_tokens
+            usage.completion_tokens += schema_usage.completion_tokens
+            usage.total_tokens += schema_usage.total_tokens
+            usage.cost_usd += schema_usage.cost_usd
 
-        return text, structured, usage, prompt_version
+    async def _stream_prose(
+        self, messages: list[dict[str, str]], deadline_at: float | None, outcome: _Synthesis
+    ) -> AsyncIterator[AnswerDeltaEvent | GenerateResult]:
+        """The prose call, streamed (spec 0004): guardrailed deltas, then the
+        gateway's summary with ``content`` set to the whole raw text.
+
+        Every delta passes through :class:`StreamRedactor`, which only ever releases
+        a prefix of the final redacted answer — PII split across model chunks never
+        streams (REQ-STRM-003). On a refusal nothing more is released: the
+        authoritative answer that follows replaces what was sent (REQ-STRM-004).
+
+        The deadline is checked on every read rather than wrapped around the loop:
+        this generator is resumed from a different task for each event
+        (``api/sse.py``), so a single ``asyncio.timeout`` would cancel the wrong one.
+        Leaving the ``async with`` — normally, on the deadline, or because the client
+        disconnected and the generator was closed — closes the gateway connection.
+        """
+        redactor = StreamRedactor()
+        async with self._gateway.stream(
+            messages=messages, max_tokens=_SYNTHESIS_MAX_TOKENS
+        ) as stream:
+            while True:
+                remaining = _remaining(deadline_at)
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError
+                item = await stream.next(timeout=remaining)
+                if isinstance(item, StreamDelta):
+                    safe = redactor.feed(item.text)
+                    if safe:
+                        yield AnswerDeltaEvent(text=safe)
+                    continue
+                result = item.result
+                break
+        if not result.refusal:
+            tail = redactor.finish()
+            if tail:
+                yield AnswerDeltaEvent(text=tail)
+        yield result.model_copy(update={"content": redactor.text})
 
     async def _structured_answer(
         self, masked_text: str, output_schema: dict[str, Any], *, timeout_s: float | None
     ) -> tuple[dict[str, Any] | None, Usage]:
         """A second, schema-constrained call for the business channel's
-        `structured` field — air-llm is asked to conform via `json_schema`
+        `structured` field — the gateway is asked to conform via `json_schema`
         rather than validated after the fact and rejected, matching
         docs/02-lld.md's framing of schema enforcement as an output-guardrail
-        concern, not a post-hoc filter."""
+        concern, not a post-hoc filter.
+
+        The gateway forwards the schema but does not check the answer, and says
+        to treat a cut-off (`finish_reason: length`) or refused answer as no
+        answer: truncated JSON can still parse into a plausible, wrong object."""
         try:
-            result = await self._llm.chat(
-                model=_SYNTHESIS_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "Answer as JSON matching the given schema exactly.",
-                    },
-                    {
-                        "role": "user",
-                        "content": delimit(masked_text, source="customer_message"),
-                    },
-                ],
+            result = await self._gateway.generate(
+                messages=_structured_messages(masked_text),
                 max_tokens=_SYNTHESIS_MAX_TOKENS,
                 json_schema=output_schema,
                 schema_name="business_query",
                 timeout=timeout_s,
             )
-        except LlmCallError:
+        except ModelGatewayError:
             # A failure here degrades this one field, not the whole turn —
             # the prose answer already succeeded, so the turn still answers.
             return None, Usage(model_calls=0, cost_usd=0.0, cache_hit=False)
 
+        usage = _usage(result)
+        if result.refusal or result.cut_off:
+            return None, usage
         try:
             structured = json.loads(result.content) if result.content else None
         except json.JSONDecodeError:
             structured = None
-        usage = Usage(
-            model_calls=1,
-            prompt_tokens=result.usage.prompt_tokens,
-            completion_tokens=result.usage.completion_tokens,
-            total_tokens=result.usage.prompt_tokens + result.usage.completion_tokens,
-            cost_usd=result.cost_usd,
-            cache_hit=result.usage.cache_read_tokens > 0,
-        )
         return structured if isinstance(structured, dict) else None, usage
+
+
+class _Synthesis:
+    """What synthesis produced — the holder `_answer` fills, since an async
+    generator cannot return a value."""
+
+    __slots__ = (
+        "deadline_bound",
+        "prompt_version",
+        "refused",
+        "streamed",
+        "structured",
+        "text",
+        "usage",
+    )
+
+    def __init__(self) -> None:
+        self.text = ""
+        self.structured: dict[str, Any] | None = None
+        self.usage = Usage(model_calls=0, cost_usd=0.0, cache_hit=False)
+        self.prompt_version: str | None = None
+        self.refused = False
+        self.streamed = False
+        #: The prose call was given less than half the turn's deadline, so a
+        #: timeout is the deadline's, not the gateway's (REQ-MGW-018).
+        self.deadline_bound = False
+
+
+class _CostCeilingError(Exception):
+    """A paid call was not made because its estimate could take the turn past its
+    cost ceiling (spec 0008). The message is the stage detail."""
+
+
+def _structured_messages(masked_text: str) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": "Answer as JSON matching the given schema exactly."},
+        {"role": "user", "content": delimit(masked_text, source="customer_message")},
+    ]
+
+
+def _remaining(deadline_at: float | None) -> float | None:
+    """Seconds left before ``deadline_at`` (a ``perf_counter`` instant), or ``None``
+    for an unbounded call."""
+    return None if deadline_at is None else deadline_at - time.perf_counter()
+
+
+def _usage(result: GenerateResult) -> Usage:
+    """The gateway's wire counters, as this service's ``Usage`` for one call."""
+    return Usage(
+        model_calls=1,
+        prompt_tokens=result.usage.prompt_tokens,
+        completion_tokens=result.usage.completion_tokens,
+        total_tokens=result.usage.prompt_tokens + result.usage.completion_tokens,
+        cost_usd=result.cost_usd,
+        cache_hit=result.cached or result.usage.cache_read_tokens > 0,
+    )
 
 
 async def collect(events: AsyncIterator[Event], *, include_trace: bool) -> TurnResult:
@@ -772,6 +1150,7 @@ async def collect(events: AsyncIterator[Event], *, include_trace: bool) -> TurnR
     only adapter over it."""
     result = TurnResult(turn_id="", session_id="", answer="")
     trace: list[StageRecord] = []
+    degraded: list[str] = []
 
     async for event in events:
         match event.event:
@@ -779,6 +1158,14 @@ async def collect(events: AsyncIterator[Event], *, include_trace: bool) -> TurnR
                 result.turn_id = event.turn_id
                 result.session_id = event.session_id
             case EventType.STAGE:
+                # Only a stage degraded *by a downstream* names one: `degraded` is
+                # "what was missing", and an exhausted deadline is not a service.
+                if (
+                    event.status is StageStatus.DEGRADED
+                    and event.downstream is not None
+                    and event.downstream.value not in degraded
+                ):
+                    degraded.append(event.downstream.value)
                 trace.append(
                     StageRecord(
                         stage=event.stage,
@@ -807,6 +1194,7 @@ async def collect(events: AsyncIterator[Event], *, include_trace: bool) -> TurnR
             case EventType.TURN_END:
                 result.status = event.status
 
+    result.degraded = degraded
     if include_trace:
         result.trace = trace
     return result

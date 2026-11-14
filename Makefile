@@ -20,7 +20,7 @@ help: ## Show this help
 		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo
 	@echo "Overridable: HOST=$(HOST) PORT=$(PORT)"
-	@echo "A real answer needs air-llm on :8083 — see ../air-llm (make up)."
+	@echo "A real answer needs air-model-gateway on :8083 — see ../air-model-gateway (make up)."
 	@echo "make up additionally needs air-infra's air-net — see ../air-infra."
 
 # ---- dev inner loop --------------------------------------------------------
@@ -47,7 +47,7 @@ env: ## Create .env from .env.example, if absent
 	fi
 
 .PHONY: run
-run: ## Run the service with reload (a real answer needs air-llm on :8083)
+run: ## Run the service with reload (a real answer needs air-model-gateway on :8083)
 	$(UVICORN) air_orchestrator_service.main:app --reload --host $(HOST) --port $(PORT)
 
 .PHONY: test
@@ -74,6 +74,11 @@ typecheck: ## Mypy (strict)
 .PHONY: trace
 trace: ## Check every spec requirement names a test that exists
 	$(PY) tools/trace.py
+
+.PHONY: prompt-review
+prompt-review: ## Run the customer-care review set against a live service (paid model calls)
+	$(PY) tools/prompt_review.py --base-url $(or $(BASE_URL),http://127.0.0.1:8081) \
+		--key $(or $(KEY),airo_local_customer_key) $(if $(ONLY),--only $(ONLY))
 
 .PHONY: spec
 spec: ## Scaffold a new spec: make spec NAME=my-feature
@@ -128,11 +133,13 @@ status: ## Report this service's own readiness
 	@printf 'health:   http://localhost:$(PORT)/v1/health\n'
 	@code=$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:$(PORT)/v1/ready 2>/dev/null); \
 	if [ "$$code" = "200" ]; then \
-		printf 'ready:    yes — air-llm reachable\n'; \
+		printf 'ready:    yes — air-model-gateway serves this service\n'; \
 	elif [ "$$code" = "503" ]; then \
-		printf 'ready:    NO (503) — air-llm unreachable. The service is up and will\n'; \
-		printf '          serve as soon as the model gateway returns; no restart needed.\n'; \
-		printf '          Start it with: cd ../air-llm && make up\n'; \
+		printf 'ready:    NO (503) — air-model-gateway cannot serve this service (down,\n'; \
+		printf '          token rejected, or model class unavailable — see /v1/ready).\n'; \
+		printf '          The service is up and will serve as soon as that is fixed;\n'; \
+		printf '          no restart needed.\n'; \
+		printf '          Start it with: cd ../air-model-gateway && make up\n'; \
 	else \
 		printf 'ready:    could not probe (curl said "%s") — try: make logs\n' "$$code"; \
 	fi

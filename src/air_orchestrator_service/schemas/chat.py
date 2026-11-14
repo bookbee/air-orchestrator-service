@@ -12,12 +12,65 @@ never raise it.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from air_orchestrator_service.constants import Route, Stage, StageStatus, TurnStatus
 from air_orchestrator_service.schemas.common import Usage
+
+
+def _not_blank(value: str) -> str:
+    """Refuse text that is only whitespace (spec 0009, ``REQ-VAL-003``).
+
+    ``min_length=1`` counts spaces, so ``"   "`` was classified, synthesised and
+    billed. The text itself is not stripped: what the caller sent is what is masked
+    and stored."""
+    if not value.strip():
+        raise ValueError("must contain more than whitespace")
+    return value
+
+
+#: Turn text: 1 to 32,000 characters, not all of them whitespace.
+TurnText = Annotated[str, Field(min_length=1, max_length=32_000), AfterValidator(_not_blank)]
+
+_JSON_SCHEMA_TYPES = frozenset(
+    {"string", "number", "integer", "boolean", "object", "array", "null"}
+)
+
+
+def _check_schema(schema: object, path: str = "output_schema") -> None:
+    """The structural part of a JSON Schema check (``REQ-VAL-004``): the keywords
+    that shape a structured answer, recursively. Not the full metaschema, which
+    needs the ``jsonschema`` dependency (``REQ-VAL-007``, spec 0009 Q2)."""
+    if isinstance(schema, bool):
+        return  # `true`/`false` are valid schemas
+    if not isinstance(schema, dict):
+        raise ValueError(f"{path} must be a JSON Schema object")
+    kind = schema.get("type")
+    if kind is not None:
+        kinds = kind if isinstance(kind, list) else [kind]
+        if not kinds or not all(isinstance(k, str) and k in _JSON_SCHEMA_TYPES for k in kinds):
+            raise ValueError(f"{path}.type must be one of {sorted(_JSON_SCHEMA_TYPES)}")
+    properties = schema.get("properties")
+    if properties is not None:
+        if not isinstance(properties, dict):
+            raise ValueError(f"{path}.properties must be an object")
+        for name, sub in properties.items():
+            _check_schema(sub, f"{path}.properties.{name}")
+    if "items" in schema:
+        _check_schema(schema["items"], f"{path}.items")
+    required = schema.get("required")
+    if required is not None and not (
+        isinstance(required, list) and all(isinstance(r, str) for r in required)
+    ):
+        raise ValueError(f"{path}.required must be a list of strings")
+
+
+def _valid_schema(value: dict[str, Any] | None) -> dict[str, Any] | None:
+    if value is not None:
+        _check_schema(value)
+    return value
 
 
 class TurnOptions(BaseModel):
@@ -29,7 +82,11 @@ class TurnOptions(BaseModel):
     max_cost_usd: float | None = Field(default=None, gt=0)
     allow_routes: list[Route] | None = Field(
         default=None,
-        description="Restrict the planner to these routes. Cannot add a route that is not live.",
+        min_length=1,
+        description=(
+            "Restrict the planner to these routes. Cannot add a route that is not live. "
+            "Omit it for the default; an empty list is refused."
+        ),
     )
     use_cache: bool | None = None
     redact_pii: bool | None = Field(
@@ -67,7 +124,7 @@ class ChatRequest(BaseModel):
         max_length=128,
         description="Absent starts a new session, whose id is returned on `turn.start`.",
     )
-    message: str = Field(min_length=1, max_length=32_000)
+    message: TurnText
     confirm: Confirmation | None = None
     options: TurnOptions | None = None
 
@@ -78,8 +135,8 @@ class QueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     session_id: str | None = Field(default=None, max_length=128)
-    query: str = Field(min_length=1, max_length=32_000)
-    output_schema: dict[str, Any] | None = Field(
+    query: TurnText
+    output_schema: Annotated[dict[str, Any] | None, AfterValidator(_valid_schema)] = Field(
         default=None,
         description="JSON Schema the answer must satisfy; enforced by the output guardrail.",
     )

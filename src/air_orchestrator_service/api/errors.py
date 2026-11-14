@@ -13,7 +13,7 @@ Two rules hold everywhere in this module, and everything else is plumbing:
 Note what the catalogue does *not* contain: there is no "rag unavailable" or
 "tools unavailable". A downstream being down narrows what a turn can answer and is
 reported in the turn's own `degraded` list with a 200 (docs/01-hld.md §7). The one
-dependency whose absence is fatal is air-llm — without it no answer can be
+dependency whose absence is fatal is air-model-gateway — without it no answer can be
 synthesised — and it lands on 503 ``dependency-unavailable``.
 
 A second asymmetry matters for the streaming routes: a response that has already
@@ -37,7 +37,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.responses import Response
 
-from air_orchestrator_service.constants import HEADER_REQUEST_ID
+from air_orchestrator_service.constants import HEADER_API_KEY, HEADER_REQUEST_ID
 from air_orchestrator_service.observability.logging import get_logger
 from air_orchestrator_service.schemas.errors import FieldError, ProblemDetail
 
@@ -245,10 +245,10 @@ class InternalError(AppError):
 
 
 class DependencyUnavailableError(AppError):
-    """air-llm is unreachable, so no turn can be synthesised.
+    """air-model-gateway cannot serve this service, so no turn can be synthesised.
 
-    The only 5xx this service raises for a dependency, and reserved for air-llm
-    alone — see this module's docstring.
+    The only 5xx this service raises for a dependency, and reserved for the model
+    gateway alone — see this module's docstring.
     """
 
     slug = "dependency-unavailable"
@@ -361,12 +361,46 @@ async def _app_error_handler(request: Request, exc: Exception) -> Response:
 
 
 async def _validation_error_handler(request: Request, exc: Exception) -> Response:
-    """Pydantic's per-field failures, flattened into ``errors``."""
+    """Pydantic's per-field failures, flattened into ``errors`` — for a caller who
+    may see them.
+
+    FastAPI parses and validates the body *before* it resolves dependencies, so a
+    malformed body on an authenticated route used to answer 422 before
+    ``require_principal`` ran, describing the route's contract to a caller who had
+    not proved who they were. On such a route, a request without a valid key gets
+    the 401 ``require_principal`` would have given (spec 0009, ``REQ-VAL-006``)."""
     assert isinstance(exc, RequestValidationError)
+    if _requires_principal(request) and not _has_valid_key(request):
+        return await _app_error_handler(
+            request, MissingApiKeyError("A valid X-API-Key header is required.")
+        )
     field_errors = [_as_field_error(raw) for raw in exc.errors()]
     first = field_errors[0] if field_errors else None
     detail = f"{first.field}: {first.message}" if first and first.message else None
     return await _app_error_handler(request, ValidationError(detail, errors=field_errors))
+
+
+def _requires_principal(request: Request) -> bool:
+    """Whether the matched route depends, at any depth, on ``require_principal``."""
+    from air_orchestrator_service.api.deps import require_principal  # deps imports this module
+
+    dependant = getattr(request.scope.get("route"), "dependant", None)
+    pending = [dependant] if dependant is not None else []
+    while pending:
+        current = pending.pop()
+        if current.call is require_principal:
+            return True
+        pending.extend(current.dependencies)
+    return False
+
+
+def _has_valid_key(request: Request) -> bool:
+    from air_orchestrator_service.api.deps import STATE_ATTR
+
+    state = getattr(request.app.state, STATE_ATTR, None)
+    if state is None:  # pragma: no cover — an app not built by create_app
+        return False
+    return state.key_store.lookup(request.headers.get(HEADER_API_KEY)) is not None
 
 
 async def _http_exception_handler(request: Request, exc: Exception) -> Response:

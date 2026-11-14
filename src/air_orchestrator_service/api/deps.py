@@ -25,8 +25,9 @@ from air_orchestrator_service.api.errors import (
     MissingApiKeyError,
 )
 from air_orchestrator_service.api.middleware import KEY_ID_ATTR
+from air_orchestrator_service.clients.classifier import ClassifierClient
 from air_orchestrator_service.clients.infra import InfraClient
-from air_orchestrator_service.clients.llm import LlmClient
+from air_orchestrator_service.clients.model_gateway import ModelGatewayClient
 from air_orchestrator_service.config import Settings
 from air_orchestrator_service.constants import Channel
 from air_orchestrator_service.memory.session import InMemorySessionStore
@@ -62,8 +63,11 @@ class AppState:
     settings: Settings
     key_store: ApiKeyStore
     infra: InfraClient
-    llm: LlmClient
+    model_gateway: ModelGatewayClient
     sessions: InMemorySessionStore
+    #: ``None`` unless ``downstream.classifier`` is configured — absent is a
+    #: value, not a client that always fails (spec 0005).
+    classifier: ClassifierClient | None = None
 
 
 def get_app_state(request: Request) -> AppState:

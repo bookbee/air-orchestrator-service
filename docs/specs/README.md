@@ -92,6 +92,13 @@ and gains `**Status:** Superseded by NNNN` — the id is a permanent address.
 | --- | --- |
 | `MUT` | [0001 — mutation gate](0001-mutation-gate/spec.md) |
 | `SESS` | [0002 — durable sessions](0002-durable-sessions/spec.md) |
+| `MGW` | [0003 — air-model-gateway integration](0003-model-gateway/spec.md) |
+| `STRM` | [0004 — streaming the answer](0004-answer-streaming/spec.md) |
+| `CLS` | [0005 — air-classifier client](0005-classifier-client/spec.md) |
+| `PRM` | [0006 — channel prompts](0006-channel-prompts/spec.md) |
+| `PII` | [0007 — payment cards masked on input](0007-input-card-masking/spec.md) |
+| `COST` | [0008 — turn cost ceiling](0008-turn-cost-ceiling/spec.md) |
+| `VAL` | [0009 — request validation](0009-request-validation/spec.md) |
 
 Ids are never reused or renumbered. A withdrawn requirement stays in the table marked
 `Withdrawn`, because commit messages and test docstrings still point at it.

@@ -8,7 +8,8 @@ This file is deliberately short. It holds only what must never drift. Rationale 
 [`docs/00-plan.md`](../00-plan.md); design lives in the HLD and LLD; testable behaviour lives
 in the numbered specs beside this file.
 
-**Version:** 1.0.0 · **Ratified:** 2026-09-12 · **Amendment:** see §Amendment below.
+**Version:** 1.1.0 · **Ratified:** 2026-09-12 · **Amended:** 2026-11-14 · **Amendment:** see
+§Amendment below.
 
 ---
 
@@ -81,12 +82,19 @@ a version bump, and it only works if existing names never change meaning.
 
 *Derives from:* G2 · LLD §4.
 
-## Article VII — All model traffic goes through air-llm
+## Article VII — All model traffic goes through air-model-gateway
 
-No provider SDK and no provider key enters this repository. `air-llm` on :8083 is the only
-model path, reached directly over HTTP and never through air-infra.
+No provider SDK and no provider key enters this repository. `air-model-gateway` on :8083 is
+the only model path, reached directly over HTTP and never through air-infra or through another
+AIR service. This service asks for a model **class** (`local`, `auto`, `cloud`), never a model
+or provider name: which models serve a class is the gateway owner's decision, made in the
+gateway's own routing file, so changing it never requires a change here.
 
-*Derives from:* G7 · Plan §3.
+Services that make their own model calls — air-classifier among them — reach the same gateway
+on their own credential. This service calls *them* for their capability and never classifies,
+retrieves or embeds by calling a model itself on their behalf.
+
+*Derives from:* G7 · Plan §3 · Amended 1.1.0 (spec [0003](0003-model-gateway/spec.md)).
 
 ## Article VIII — Nothing is a module-level singleton
 
@@ -126,3 +134,9 @@ Amending an article requires:
 
 Articles I, II and IV are load-bearing for safety. Weakening any of them is a platform
 decision, not a repository one.
+
+### Amendment log
+
+| Version | Date | Article | Change | Specs re-checked |
+| --- | --- | --- | --- | --- |
+| 1.1.0 | 2026-11-14 | VII | The model path is air-model-gateway (air-llm was retired and its `/v1/inference` removed); callers choose a class, never a model; capability services make their own model calls. MINOR: the article's intent (one model path, over HTTP, no provider keys here) is unchanged, its named service and its model-choice rule are new. | 0001 (unaffected: no model call), 0002 (unaffected: sessions only), 0003, 0004, 0005 |

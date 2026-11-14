@@ -6,12 +6,16 @@ stays in rotation while broken:
 
 * ``/v1/health`` — is this process alive? Dependency-free, so a downstream having a
   bad minute cannot make every replica look dead and get killed.
-* ``/v1/ready`` — can this replica serve a turn *at all*? Gates on air-llm alone —
-  the model gateway, and the one dependency without which no answer can be
-  synthesised — because every other service being down narrows the answer rather
-  than preventing one (docs/01-hld.md §7). air-infra is reported alongside it for
-  operator visibility but does not gate: nothing in this service calls air-infra
-  yet, since the Redis-backed session store that will need it is Phase 2 work.
+* ``/v1/ready`` — can this replica serve a turn *at all*? Gates on air-model-gateway
+  alone — the one dependency without which no answer can be synthesised — because
+  every other service being down narrows the answer rather than preventing one
+  (docs/01-hld.md §7). "The gateway is up" is not enough: the probe also proves this
+  service's token and that its model class is granted and backed by a provider
+  (``clients/model_gateway.py``), since a gateway that is up but cannot serve *this*
+  service is, from here, exactly as useless as one that is down. air-infra is
+  reported alongside it for operator visibility but does not gate: nothing in this
+  service calls air-infra yet, since the Redis-backed session store that will need
+  it is Phase 2 work.
 
 * ``/v1/capabilities`` — what can this deployment do *for the caller in front of
   it*? Per-principal, because a customer key and a business key see different
@@ -59,7 +63,8 @@ async def health(state: Annotated[AppState, Depends(get_app_state)]) -> HealthRe
     response_model=ReadyResponse,
     summary="Readiness",
     description=(
-        "Whether this replica can serve a turn. Gates on air-llm, which is the one "
+        "Whether this replica can serve a turn. Gates on air-model-gateway serving this "
+        "service — reachable, accepting its token, and offering its model class — the one "
         "dependency without which no answer can be synthesised. Other services, "
         "including air-infra, are reported for operator visibility but do not "
         "affect readiness."
@@ -70,11 +75,11 @@ async def ready(
     response: Response,
     state: Annotated[AppState, Depends(get_app_state)],
 ) -> ReadyResponse:
-    llm = await state.llm.probe()
+    gateway = await state.model_gateway.probe()
     infra = await state.infra.probe()
-    dependencies = [llm, infra, *_configured_downstreams(state)]
+    dependencies = [gateway, infra, *_configured_downstreams(state)]
 
-    ready_now = bool(llm.reachable)
+    ready_now = bool(gateway.reachable)
     if not ready_now:
         # A body on the 503 as well as the status: an orchestrator reads the status,
         # but the human paged at 3am needs to know *which* dependency, and a bare
@@ -159,10 +164,11 @@ async def capabilities(
         streaming={
             "sse": True,
             "stage_events": True,
-            # False until air-llm grows a streaming endpoint. Reported rather
-            # than assumed so a client can tell a build that cannot stream tokens
-            # from one that simply did not this time (docs/01-hld.md §5, §9).
-            "token_deltas": False,
+            # An SSE turn streams its prose answer as `answer.delta` (spec 0004).
+            # Reported rather than assumed so a client can tell a build that
+            # cannot stream tokens from one that simply did not this time (a
+            # canned reply, or a stream that failed before its first delta).
+            "token_deltas": True,
         },
         session={
             "backend": settings.session.backend,

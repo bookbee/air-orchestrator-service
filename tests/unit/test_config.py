@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from air_orchestrator_service.config import Settings
-from air_orchestrator_service.constants import Channel, DownstreamService, Route
+from air_orchestrator_service.constants import Channel, DownstreamService, ModelClass, Route
 
 
 def _settings(**overrides: object) -> Settings:
@@ -98,32 +98,69 @@ def test_air_infra_is_not_in_the_optional_group() -> None:
     assert _settings().downstream.for_service(DownstreamService.INFRA) is None
 
 
-def test_air_llm_is_not_in_the_optional_group() -> None:
-    """Same reasoning as air-infra: air-llm is mandatory, not one of the optional five."""
-    assert _settings().downstream.for_service(DownstreamService.LLM) is None
+def test_the_model_gateway_is_not_in_the_optional_group() -> None:
+    """Same reasoning as air-infra: the gateway is mandatory, not one of the optional five."""
+    assert _settings().downstream.for_service(DownstreamService.MODEL_GATEWAY) is None
 
 
 def test_direct_is_always_available() -> None:
-    """air-llm alone can answer a direct turn, so the route never disappears."""
+    """The model gateway alone can answer a direct turn, so the route never disappears."""
     assert _settings().downstream.routes() == frozenset({Route.DIRECT})
 
 
 def test_air_rag_defaults_to_its_port_map_slot() -> None:
-    """8083 now belongs to air-llm; air-rag was bumped to 8087 (air-infra/README.md)."""
+    """8083 belongs to air-model-gateway; air-rag was bumped to 8087 (air-infra/README.md)."""
     assert _settings().downstream.rag.base_url == "http://localhost:8087"
 
 
-# ── air-llm ──────────────────────────────────────────────────────────────────
+# ── air-model-gateway (spec 0003) ─────────────────────────────────────────────
 
 
-def test_llm_defaults_to_its_port_map_slot() -> None:
-    assert _settings().llm.base_url == "http://localhost:8083"
+def test_model_gateway_defaults_to_its_port_map_slot() -> None:
+    assert _settings().model_gateway.base_url == "http://localhost:8083"
 
 
-def test_llm_is_unconfigured_without_an_api_key() -> None:
+def test_model_gateway_is_unconfigured_without_an_api_key() -> None:
     """Same shape as air-infra: configured means an api_key is set, nothing else."""
-    assert _settings().llm.configured is False
-    assert _settings(llm={"api_key": "secret"}).llm.configured is True
+    assert _settings().model_gateway.configured is False
+    assert _settings(model_gateway={"api_key": "secret"}).model_gateway.configured is True
+
+
+def test_model_class_defaults_to_cloud() -> None:
+    """REQ-MGW-003: `cloud` is the class the gateway owner assigned this service when
+    the `generative` alias was retired (air-model-gateway docs/06-consumer-migration.md)."""
+    assert _settings().model_gateway.model_class is ModelClass.CLOUD
+    assert _settings(model_gateway={"model_class": "local"}).model_gateway.model_class is (
+        ModelClass.LOCAL
+    )
+
+
+@pytest.mark.parametrize("value", ["generative", "claude-sonnet-5", "anthropic:claude-sonnet-5"])
+def test_a_retired_model_alias_fails_validation(value: str) -> None:
+    """REQ-MGW-004: an alias or a model name is a 422 on every call at the gateway, so it
+    must be a boot failure here — the previous contract break hid behind a green probe."""
+    with pytest.raises(ValidationError, match="model_class"):
+        _settings(model_gateway={"model_class": value})
+
+
+def test_legacy_llm_settings_fail_validation_naming_the_replacement() -> None:
+    """REQ-MGW-005: silently ignoring `AIR_ORCHESTRATOR_SERVICE__LLM__*` would boot with
+    no token; accepting it as an alias would give one secret two names."""
+    with pytest.raises(ValidationError, match="MODEL_GATEWAY"):
+        _settings(llm={"api_key": "old-token", "base_url": "http://air-llm:8083"})
+
+
+def test_a_settings_error_never_renders_a_secret() -> None:
+    """REQ-MGW-017: the error is printed at boot into the pod log; pydantic would otherwise
+    echo the input verbatim, and the input is where every secret lives."""
+    with pytest.raises(ValidationError) as caught:
+        _settings(
+            llm={"api_key": "sk-old-gateway-token"},
+            security={"hash_salt": "salt-that-must-not-leak"},
+        )
+    rendered = str(caught.value)
+    assert "sk-old-gateway-token" not in rendered
+    assert "salt-that-must-not-leak" not in rendered
 
 
 def test_enabling_a_service_adds_exactly_its_route() -> None:

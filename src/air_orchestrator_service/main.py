@@ -16,7 +16,7 @@ still unbuilt, that is the normal case rather than the degraded one.
 
 The only things that can stop this service from starting are the ones no turn could
 survive: settings that will not validate, or an API key file that will not parse.
-Notably **neither air-infra nor air-llm being down is one of them** — the service
+Notably **neither air-infra nor air-model-gateway being down is one of them** — the service
 starts, reports itself unready, and becomes ready when the model gateway returns.
 Refusing to boot would turn a recoverable dependency outage into a crash loop.
 
@@ -40,11 +40,13 @@ from air_orchestrator_service.api.errors import install_error_handlers
 from air_orchestrator_service.api.middleware import install_middleware
 from air_orchestrator_service.api.v1.router import build_v1_router
 from air_orchestrator_service.api.v1.system import build_metrics_router
+from air_orchestrator_service.clients.classifier import ClassifierClient
 from air_orchestrator_service.clients.infra import InfraClient
-from air_orchestrator_service.clients.llm import LlmClient
+from air_orchestrator_service.clients.model_gateway import ModelGatewayClient
 from air_orchestrator_service.config import Settings, get_settings
 from air_orchestrator_service.memory.session import build_session_store
 from air_orchestrator_service.observability.logging import configure_logging, get_logger
+from air_orchestrator_service.prompts.registry import PromptRegistry
 from air_orchestrator_service.security.api_keys import ApiKeyStore
 
 __all__ = ["OrjsonResponse", "app", "create_app"]
@@ -60,7 +62,7 @@ Send a message; the platform decides what it needs, gathers it from the speciali
 services, and streams back a grounded answer. It orchestrates and owns no
 capability of its own — retrieval is `air-rag`'s, classification
 `air-classifier`'s, read-only calls `air-tools`', mutations `air-action`'s, models
-`air-llm`'s, and stores `air-infra`'s.
+`air-model-gateway`'s, and stores `air-infra`'s.
 
 **Two channels, one engine.** `POST /v1/chat` serves public conversational traffic
 through the customer gateway; `POST /v1/query` serves internal business queries
@@ -76,8 +78,13 @@ header.
 **Streaming.** Responses are Server-Sent Events, content-negotiated: send
 `Accept: text/event-stream` to stream, anything else to receive the terminal result
 as one JSON body. Every pipeline stage emits as it completes, bracketed by
-`turn.start` and `turn.end`. Ignore event names you do not recognise — that is what
-lets token deltas arrive later without a contract change.
+`turn.start` and `turn.end`. Ignore event names you do not recognise.
+
+The answer streams as `answer.delta` events, then one `answer` event. **`answer` is
+authoritative:** deltas are provisional. On a normal turn `answer` equals the deltas
+concatenated. When the model provider refuses, the stream fails, or the deadline passes,
+`answer` carries the refusal or fallback text instead, and a client that rendered the
+deltas must replace them with it.
 
 Errors are RFC 9457 `application/problem+json`.
 """.strip()
@@ -140,7 +147,9 @@ def _build_lifespan(state: AppState) -> Any:
             # hook's job to close it; leaving it open logs an "unclosed client"
             # warning on every reload and leaks sockets in tests.
             await state.infra.aclose()
-            await state.llm.aclose()
+            await state.model_gateway.aclose()
+            if state.classifier is not None:
+                await state.classifier.aclose()
             _log.info("shutdown.complete")
 
     return lifespan
@@ -160,13 +169,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Fallible construction, before the server exists. An unparseable key file is a
     # deployment defect and must fail loudly at boot, not as a 401 in production.
     key_store = ApiKeyStore.load(resolved)
+    # Same rule for prompt pins: a stale pin is a deployment defect (spec 0006).
+    PromptRegistry(resolved).validate_pins()
 
     state = AppState(
         settings=resolved,
         key_store=key_store,
         infra=InfraClient(resolved),
-        llm=LlmClient(resolved),
+        model_gateway=ModelGatewayClient(resolved),
         sessions=build_session_store(resolved),
+        classifier=(
+            ClassifierClient(resolved.downstream.classifier)
+            if resolved.downstream.classifier.configured
+            else None
+        ),
     )
 
     app = FastAPI(

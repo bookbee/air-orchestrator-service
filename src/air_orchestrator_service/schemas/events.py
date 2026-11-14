@@ -6,8 +6,13 @@ Two properties are load-bearing and are asserted in ``tests/unit/test_events.py`
 * **``turn.start`` and ``turn.end`` always bracket a turn**, including a refused or
   errored one. A client relies on the frame rather than inferring completion from
   silence.
-* **A client ignores event names it does not know.** That is what lets
-  ``answer.delta`` start arriving once air-llm can stream, with no version bump.
+* **A client ignores event names it does not know.** That is what let
+  ``answer.delta`` start arriving (spec 0004) with no version bump: it was defined
+  in v1 and only emitted once air-model-gateway could stream.
+* **``answer`` is authoritative over ``answer.delta``.** Deltas are provisional — a
+  provider's refusal verdict arrives only after the text has streamed, and a stream
+  can break midway — so a client that renders deltas replaces them with the
+  ``answer`` event's text. On a normal turn the two are identical.
 
 Each event carries its own ``event`` discriminator so that a consumer decoding the
 `data:` payload alone — without reading the SSE `event:` line — still knows what it
@@ -23,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from air_orchestrator_service.constants import (
     Channel,
+    DownstreamService,
     EventType,
     Route,
     Stage,
@@ -50,6 +56,11 @@ class StageEvent(BaseModel):
     status: StageStatus
     latency_ms: float
     detail: str | None = None
+    #: The service whose failure degraded this stage, when that is the cause.
+    #: Absent for a stage degraded by this service's own limits (an exhausted turn
+    #: deadline): ``TurnResult.degraded`` is built from this field, and blaming a
+    #: healthy gateway for our own budget would send an operator to the wrong team.
+    downstream: DownstreamService | None = None
 
 
 class RouteEvent(BaseModel):
@@ -80,10 +91,16 @@ class ProposalEvent(BaseModel):
 
 
 class AnswerDeltaEvent(BaseModel):
-    """Reserved; not emitted in v1.
+    """A provisional slice of the answer, emitted to SSE callers while the model
+    generates it (spec 0004).
 
-    Defined now so the contract, the tests and the client-facing docs all describe
-    the same shape when air-llm grows a streaming endpoint (docs/01-hld.md §5, §9).
+    Every delta has passed the streaming output guardrail
+    (:class:`~air_orchestrator_service.guardrails.pii.StreamRedactor`), so none
+    carries text the final scan would redact. They are *provisional*: the
+    ``answer`` event that follows is authoritative and replaces them — equal to their
+    concatenation on a normal turn, the refusal or fallback text when the provider
+    refused, the stream broke, or the deadline passed. A client that renders deltas
+    must replace them with ``answer``; one that ignores them loses nothing.
     """
 
     event: Literal[EventType.ANSWER_DELTA] = EventType.ANSWER_DELTA
