@@ -12,7 +12,10 @@ registry, and synthesis through air-model-gateway are real. So are the ceilings:
 turn-level deadline computed once and decremented before the synthesis call —
 bound to that call's own timeout, and checked *before* a call is made so an
 exhausted budget skips the call rather than starting it — plus per-turn and
-per-session cost ceilings.
+per-session cost ceilings. The turn ceiling is enforced the same way, before the
+money is spent: each paid call is priced from configured rates first, and skipped
+if it could take the turn past the ceiling (spec 0008). Cost is otherwise only
+known once a call returns, which is too late for a cap.
 
 **What is stubbed, and why it says so.** ``CACHE`` (Phase 5) and ``GATHER``
 (Phase 3, pending clients for air-rag/air-tools) report ``StageStatus.SKIPPED``
@@ -77,7 +80,7 @@ from air_orchestrator_service.guardrails.scope import screen_scope
 from air_orchestrator_service.memory.session import InMemorySessionStore
 from air_orchestrator_service.observability import metrics
 from air_orchestrator_service.observability.logging import get_logger, safe_text_fields
-from air_orchestrator_service.prompts.registry import PromptRegistry, prompt_for
+from air_orchestrator_service.prompts.registry import Prompt, PromptRegistry, prompt_for
 from air_orchestrator_service.schemas.chat import (
     ChatRequest,
     Proposal,
@@ -138,6 +141,10 @@ _PROVIDER_REFUSAL: Final[str] = (
 _DEGRADED_ANSWER: Final[str] = (
     "I'm having trouble putting together a full answer right now. Please try "
     "again in a moment — nothing about your account or order has changed."
+)
+_COST_CEILING_ANSWER: Final[str] = (
+    "I can't put together an answer within this request's cost limit. Try again "
+    "with a higher limit — nothing about your account or order has changed."
 )
 _SESSION_BUDGET_EXHAUSTED: Final[str] = (
     "This conversation has reached its budget for now. Please start a new "
@@ -216,6 +223,9 @@ class TurnEngine:
         #: built fresh per request (`api/v1/chat.py`), so there is no
         #: cross-request state here to worry about.
         self._last_status: TurnStatus = TurnStatus.OK
+        #: What air-classifier reported spending on this turn (spec 0008,
+        #: ``REQ-COST-005``). Per request, like `_last_status`.
+        self._classifier_cost_usd = 0.0
 
     async def run(self, request: TurnRequest, principal: Principal) -> AsyncIterator[Event]:
         turn_id = f"{_TURN_ID_PREFIX}{uuid.uuid4().hex}"
@@ -407,7 +417,12 @@ class TurnEngine:
         async for event in self._stage(Stage.CACHE):
             yield event
         async for event in self._classify(
-            masked_text, principal, deadline_at=turn_started + deadline_s
+            request,
+            masked_text,
+            principal,
+            session,
+            deadline_at=turn_started + deadline_s,
+            deadline_s=deadline_s,
         ):
             yield event
 
@@ -480,8 +495,37 @@ class TurnEngine:
             ):
                 yield event
             return
+        except _CostCeilingError as exc:
+            # Spec 0008, REQ-COST-002: the call was never made. Ours, not the
+            # gateway's, so no `downstream` is named.
+            self._last_status = TurnStatus.DEGRADED
+            yield StageEvent(
+                stage=Stage.SYNTHESISE,
+                status=StageStatus.DEGRADED,
+                latency_ms=round((time.perf_counter() - synth_started) * 1000, 3),
+                detail=str(exc),
+            )
+            async for event in self._finish_with_answer(
+                turn_id, masked_text, principal, session, text=_COST_CEILING_ANSWER
+            ):
+                yield event
+            return
         except ModelGatewayError as exc:
             self._last_status = TurnStatus.DEGRADED
+            if exc.timed_out and outcome.deadline_bound:
+                # REQ-MGW-018: earlier stages left this call too little of the
+                # turn, so the deadline ran out, not the gateway.
+                yield StageEvent(
+                    stage=Stage.SYNTHESISE,
+                    status=StageStatus.DEGRADED,
+                    latency_ms=round((time.perf_counter() - synth_started) * 1000, 3),
+                    detail="turn deadline reached during the model call",
+                )
+                async for event in self._finish_with_answer(
+                    turn_id, masked_text, principal, session, text=_DEGRADED_ANSWER
+                ):
+                    yield event
+                return
             yield StageEvent(
                 stage=Stage.SYNTHESISE,
                 status=StageStatus.DEGRADED,
@@ -607,6 +651,15 @@ class TurnEngine:
         session.append(Turn(turn_id=turn_id, role="user", content=masked_text), window=window)
         session.append(Turn(turn_id=turn_id, role="assistant", content=text), window=window)
         resolved_usage = usage or Usage(model_calls=0, cost_usd=0.0, cache_hit=False)
+        if self._classifier_cost_usd:
+            # Every path that ran `CLASSIFY` passes through here, so its spend is
+            # reported even on a turn that degraded afterwards (REQ-COST-005).
+            resolved_usage = resolved_usage.model_copy(
+                update={
+                    "cost_usd": resolved_usage.cost_usd + self._classifier_cost_usd,
+                    "classifier_cost_usd": self._classifier_cost_usd,
+                }
+            )
         session.total_cost_usd += resolved_usage.cost_usd
         await self._sessions.save(session)
         yield StageEvent(
@@ -626,7 +679,14 @@ class TurnEngine:
         yield StageEvent(stage=stage, status=status, latency_ms=latency_ms, detail=detail)
 
     async def _classify(
-        self, masked_text: str, principal: Principal, *, deadline_at: float
+        self,
+        request: TurnRequest,
+        masked_text: str,
+        principal: Principal,
+        session: Session,
+        *,
+        deadline_at: float,
+        deadline_s: float,
     ) -> AsyncIterator[Event]:
         """The ``CLASSIFY`` stage (spec 0005): one stage event, whatever happens.
 
@@ -636,6 +696,10 @@ class TurnEngine:
         what went wrong and the turn's status is untouched (HLD §7, "Turn
         unaffected"). The customer channel only — see the spec's §3 on why a
         business query is not classified.
+
+        Enrichment, so it yields to the answer twice over: it gets at most a share
+        of the turn's deadline (``REQ-CLS-014``), and only the cost the ceiling
+        leaves once the synthesis call that follows is reserved (``REQ-CLS-015``).
         """
         started = time.perf_counter()
         status, detail, downstream = StageStatus.SKIPPED, None, None
@@ -644,20 +708,30 @@ class TurnEngine:
         elif principal.channel is not Channel.CUSTOMER:
             detail = "not used on the business channel"
         else:
-            bound_s = self._classifier.bound_s(_remaining(deadline_at))
+            bound_s = self._classifier.bound_s(_remaining(deadline_at), deadline_s=deadline_s)
+            _, messages = self._prose_messages(principal, session, masked_text)
+            affordable = self._turn_ceiling(request) - self._estimate(
+                messages, _SYNTHESIS_MAX_TOKENS
+            )
             if bound_s * 1000 < MIN_CALL_MS:
                 # Ours, not the classifier's: no `downstream` is named.
                 status, detail = StageStatus.DEGRADED, "turn deadline too close to classify"
+            elif affordable <= 0:
+                status, detail = StageStatus.DEGRADED, "cost ceiling: nothing left to classify"
             else:
                 try:
                     verdict = await self._classifier.classify(
-                        masked_text, tenant=principal.tenant, timeout_s=bound_s
+                        masked_text,
+                        tenant=principal.tenant,
+                        timeout_s=bound_s,
+                        max_cost_usd=affordable,
                     )
                 except ClassifierError as exc:
                     status, detail = StageStatus.DEGRADED, str(exc)
                     downstream = DownstreamService.CLASSIFIER
                 else:
                     status, detail = StageStatus.OK, verdict.summary()
+                    self._classifier_cost_usd = verdict.usage.est_cost_usd
                     _log.info(
                         "classifier.verdict",
                         sentiment=label_slug(verdict.sentiment.label),
@@ -665,6 +739,7 @@ class TurnEngine:
                         urgency=label_slug(verdict.urgency.label),
                         requires_human=verdict.requires_human,
                         decided_by=label_slug(verdict.decided_by),
+                        cost_usd=verdict.usage.est_cost_usd,
                     )
         latency_ms = round((time.perf_counter() - started) * 1000, 3)
         metrics.record_stage(stage=Stage.CLASSIFY, status=status, duration_s=latency_ms / 1000)
@@ -695,6 +770,62 @@ class TurnEngine:
         requested_ms = request.options.deadline_ms
         effective_ms = ceiling_ms if requested_ms is None else min(requested_ms, ceiling_ms)
         return effective_ms / 1000
+
+    def _turn_ceiling(self, request: TurnRequest) -> float:
+        """The effective per-turn cost ceiling (``REQ-COST-001``): the configured
+        one, narrowed (never widened) by the caller's ``options.max_cost_usd``."""
+        configured = self._settings.turn.max_cost_usd
+        requested = request.options.max_cost_usd
+        return configured if requested is None else min(requested, configured)
+
+    def _estimate(self, messages: list[dict[str, str]], max_tokens: int) -> float:
+        """An upper bound on what one call could cost (``REQ-COST-004``): the
+        prompt counted generously from its characters, and the whole ``max_tokens``
+        assumed spent."""
+        rates = self._settings.turn.estimate
+        chars = sum(len(message["content"]) for message in messages)
+        prompt_tokens = chars / rates.chars_per_token
+        return (
+            prompt_tokens * rates.input_usd_per_mtok + max_tokens * rates.output_usd_per_mtok
+        ) / 1_000_000
+
+    def _check_ceiling(
+        self, request: TurnRequest, call: str, estimate: float, spent: float
+    ) -> str | None:
+        """``None`` if a call estimated at ``estimate`` fits under the ceiling
+        after ``spent``; otherwise the reason, logged."""
+        ceiling = self._turn_ceiling(request)
+        if spent + estimate <= ceiling:
+            return None
+        _log.info(
+            "turn.cost_ceiling_reached",
+            call=call,
+            spent_usd=round(spent, 6),
+            estimate_usd=round(estimate, 6),
+            ceiling_usd=ceiling,
+        )
+        left = max(ceiling - spent, 0.0)
+        return f"cost ceiling: estimated ${estimate:.6f}, ${left:.6f} left"
+
+    def _prose_messages(
+        self, principal: Principal, session: Session, masked_text: str
+    ) -> tuple[Prompt, list[dict[str, str]]]:
+        """The prose synthesis call's messages, for the call and for its estimate.
+
+        The channel alone picks the persona (spec 0006, Article I): nothing in the
+        request can name a prompt, and the message itself arrives as delimited data.
+        """
+        prompt, system = self._prompts.render(prompt_for(principal.channel))
+        messages = [{"role": "system", "content": system}]
+        for turn in session.turns:
+            messages.append({"role": turn.role, "content": turn.content})
+        # Only the newest turn is demarcated, not replayed history: prior
+        # assistant turns are this service's own output, and prior user turns
+        # already went through this same boundary once when they were new.
+        messages.append(
+            {"role": "user", "content": delimit(masked_text, source="customer_message")}
+        )
+        return prompt, messages
 
     # ── Pieces ────────────────────────────────────────────────────────────────
 
@@ -786,18 +917,15 @@ class TurnEngine:
             )
             return
 
-        # The channel alone picks the persona (spec 0006, Article I): nothing in the
-        # request can name a prompt, and the message itself arrives as delimited data.
-        prompt, system = self._prompts.render(prompt_for(principal.channel))
-        messages = [{"role": "system", "content": system}]
-        for turn in session.turns:
-            messages.append({"role": turn.role, "content": turn.content})
-        # Only the newest turn is demarcated, not replayed history: prior
-        # assistant turns are this service's own output, and prior user turns
-        # already went through this same boundary once when they were new.
-        messages.append(
-            {"role": "user", "content": delimit(masked_text, source="customer_message")}
+        prompt, messages = self._prose_messages(principal, session, masked_text)
+        reason = self._check_ceiling(
+            request,
+            "prose",
+            self._estimate(messages, _SYNTHESIS_MAX_TOKENS),
+            spent=self._classifier_cost_usd,
         )
+        if reason is not None:
+            raise _CostCeilingError(reason)
         outcome.prompt_version = prompt.ref
         _log.info("turn.synthesised", prompt=prompt.ref, history_turns=len(session.turns))
 
@@ -811,10 +939,14 @@ class TurnEngine:
                     result = event
             assert result is not None  # `_stream_prose` always ends with the summary
         else:
+            timeout = _remaining(deadline_at)
+            # REQ-MGW-018: given less than half the turn, a timeout is the
+            # deadline's. With at least half, the gateway was slow.
+            outcome.deadline_bound = (
+                timeout is not None and timeout < self._deadline_seconds(request) / 2
+            )
             result = await self._gateway.generate(
-                messages=messages,
-                max_tokens=_SYNTHESIS_MAX_TOKENS,
-                timeout=_remaining(deadline_at),
+                messages=messages, max_tokens=_SYNTHESIS_MAX_TOKENS, timeout=timeout
             )
         outcome.usage = _usage(result)
         if result.refusal:
@@ -830,24 +962,20 @@ class TurnEngine:
 
         if principal.channel is not Channel.BUSINESS:
             return
-        turn_ceiling = request.options.max_cost_usd or self._settings.turn.max_cost_usd
         if request.output_schema is None:
             # The business channel's contract is structured output, so it
             # gets a body shaped like one even without a caller-supplied
             # schema — no second model call needed to wrap the same answer.
             outcome.structured = {"answer": text}
-        elif outcome.usage.cost_usd >= turn_ceiling:
-            # The per-turn ceiling is already met by the first call — cost
-            # can only be known after a call completes, so enforcement is
-            # of the *next* one: skip it and degrade to the free fallback
-            # rather than spending further, uncontrolled.
+        elif self._check_ceiling(
+            request,
+            "structured",
+            self._estimate(_structured_messages(masked_text), _SYNTHESIS_MAX_TOKENS),
+            spent=self._classifier_cost_usd + outcome.usage.cost_usd,
+        ):
+            # REQ-COST-003: the answer was given, so only this field narrows, and
+            # the turn's status is unaffected.
             outcome.structured = {"answer": text}
-            _log.info(
-                "turn.cost_ceiling_reached",
-                session_id=session.session_id,
-                cost_usd=outcome.usage.cost_usd,
-                ceiling_usd=turn_ceiling,
-            )
         else:
             remaining = _remaining(deadline_at)
             if remaining is not None and remaining <= 0:
@@ -916,16 +1044,7 @@ class TurnEngine:
         answer: truncated JSON can still parse into a plausible, wrong object."""
         try:
             result = await self._gateway.generate(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "Answer as JSON matching the given schema exactly.",
-                    },
-                    {
-                        "role": "user",
-                        "content": delimit(masked_text, source="customer_message"),
-                    },
-                ],
+                messages=_structured_messages(masked_text),
                 max_tokens=_SYNTHESIS_MAX_TOKENS,
                 json_schema=output_schema,
                 schema_name="business_query",
@@ -950,7 +1069,15 @@ class _Synthesis:
     """What synthesis produced — the holder `_answer` fills, since an async
     generator cannot return a value."""
 
-    __slots__ = ("prompt_version", "refused", "streamed", "structured", "text", "usage")
+    __slots__ = (
+        "deadline_bound",
+        "prompt_version",
+        "refused",
+        "streamed",
+        "structured",
+        "text",
+        "usage",
+    )
 
     def __init__(self) -> None:
         self.text = ""
@@ -959,6 +1086,21 @@ class _Synthesis:
         self.prompt_version: str | None = None
         self.refused = False
         self.streamed = False
+        #: The prose call was given less than half the turn's deadline, so a
+        #: timeout is the deadline's, not the gateway's (REQ-MGW-018).
+        self.deadline_bound = False
+
+
+class _CostCeilingError(Exception):
+    """A paid call was not made because its estimate could take the turn past its
+    cost ceiling (spec 0008). The message is the stage detail."""
+
+
+def _structured_messages(masked_text: str) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": "Answer as JSON matching the given schema exactly."},
+        {"role": "user", "content": delimit(masked_text, source="customer_message")},
+    ]
 
 
 def _remaining(deadline_at: float | None) -> float | None:

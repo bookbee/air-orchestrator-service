@@ -141,6 +141,18 @@ class ServiceSettings(BaseModel):
         return self.enabled and bool(self.base_url)
 
 
+class ClassifierSettings(ServiceSettings):
+    """air-classifier (spec 0005), with the two limits this service passes on."""
+
+    #: The highest rung of air-classifier's ladder a call may reach
+    #: (``REQ-CLS-016``). ``None`` sends nothing, and the classifier's own default
+    #: applies. ``t2_local_llm`` keeps customer text on-premises and free.
+    max_tier: Literal["t0_rules", "t1_classifier", "t2_local_llm", "t3_cloud_llm"] | None = None
+    #: The most of the turn's whole deadline classification may use
+    #: (``REQ-CLS-014``). Classification is enrichment; the answer is the product.
+    deadline_share: float = Field(default=0.25, gt=0, le=1)
+
+
 class DownstreamSettings(BaseModel):
     """Defaults are *off*: air-rag, air-tools and air-action are empty repos.
 
@@ -149,8 +161,8 @@ class DownstreamSettings(BaseModel):
     ignore the degraded signal.
     """
 
-    classifier: ServiceSettings = Field(
-        default_factory=lambda: ServiceSettings(base_url="http://localhost:8082")
+    classifier: ClassifierSettings = Field(
+        default_factory=lambda: ClassifierSettings(base_url="http://localhost:8082")
     )
     rag: ServiceSettings = Field(
         default_factory=lambda: ServiceSettings(base_url="http://localhost:8087")
@@ -212,6 +224,24 @@ _SERVICE_ATTR: dict[DownstreamService, str] = {
 # ── Turn budget ───────────────────────────────────────────────────────────────
 
 
+class CostEstimateSettings(BaseModel):
+    """The rates a model call is priced at *before* it is made (spec 0008).
+
+    air-model-gateway owns the price table and publishes none of it, and it takes
+    no per-call cost cap, so the turn ceiling can only be enforced here from an
+    estimate. The estimate must be an upper bound: an over-estimate stops a turn
+    early, while an under-estimate overspends silently. Hence the defaults are list
+    prices of the dearest model the ``cloud`` class reaches (claude-sonnet-5 in the
+    gateway's ``deploy/pricing.yaml``), and three characters per token, fewer than
+    typical English text, so the prompt is counted as more tokens than it is. A
+    deployment that routes to a dearer model must raise them.
+    """
+
+    input_usd_per_mtok: float = Field(default=3.0, ge=0)
+    output_usd_per_mtok: float = Field(default=15.0, ge=0)
+    chars_per_token: float = Field(default=3.0, gt=0)
+
+
 class TurnSettings(BaseModel):
     """Ceilings applied to a single turn.
 
@@ -222,6 +252,7 @@ class TurnSettings(BaseModel):
 
     deadline_ms: int = Field(default=15_000, ge=100, le=300_000)
     max_cost_usd: float = Field(default=0.25, gt=0)
+    estimate: CostEstimateSettings = Field(default_factory=CostEstimateSettings)
     max_model_calls: int = Field(default=4, ge=1, le=32)
     #: Turns of history assembled into the prompt. Older turns are summarised
     #: (Phase 2 ships truncation — docs/02-lld.md §15).

@@ -217,3 +217,62 @@ async def test_ready_ignores_the_classifier(
 
     assert response.status_code == 200
     assert route.call_count == 0
+
+
+async def test_a_short_deadline_leaves_synthesis_the_larger_share(
+    client: httpx.AsyncClient, mock: respx.MockRouter
+) -> None:
+    """REQ-CLS-014 (SIT OR-003): at ``deadline_ms: 2000`` classification may use a
+    quarter of it, 500 ms, so its budget is 500 less the headroom, and the turn
+    answers without degrading."""
+    route = mock.post(_URL).mock(return_value=httpx.Response(200, json=verdict()))
+
+    response = await client.post(
+        "/v1/chat",
+        headers=auth(CUSTOMER_KEY),
+        json={"message": "My parcel is damaged, what now?", "options": {"deadline_ms": 2000}},
+    )
+    body = response.json()
+
+    assert json.loads(route.calls.last.request.content)["options"]["latency_budget_ms"] == 250
+    assert body["status"] == "ok"
+    assert body["degraded"] == []
+
+
+async def test_the_classifier_is_given_what_is_left_of_the_ceiling(
+    client: httpx.AsyncClient, mock: respx.MockRouter
+) -> None:
+    """REQ-CLS-015: the turn's ceiling less the synthesis call's estimate, which is
+    at least its whole ``max_tokens`` at the output rate (800 x $15/Mtok)."""
+    route = mock.post(_URL).mock(return_value=httpx.Response(200, json=verdict()))
+
+    response = await client.post(
+        "/v1/chat",
+        headers=auth(CUSTOMER_KEY),
+        json={"message": "where is my order?", "options": {"max_cost_usd": 0.05}},
+    )
+
+    sent = json.loads(route.calls.last.request.content)["options"]["max_cost_usd"]
+    assert 0 < sent < 0.05 - 800 * 15 / 1_000_000
+    assert response.json()["status"] == "ok"
+
+
+async def test_no_cost_left_skips_the_call_without_blaming_the_classifier(
+    client: httpx.AsyncClient, mock: respx.MockRouter
+) -> None:
+    """REQ-CLS-015: a ceiling that cannot cover synthesis leaves nothing to
+    classify with; the classifier is not called and not named."""
+    route = mock.post(_URL).mock(return_value=httpx.Response(200, json=verdict()))
+
+    response = await client.post(
+        "/v1/chat",
+        headers=auth(CUSTOMER_KEY),
+        json={"message": "where is my order?", "options": {"max_cost_usd": 0.001}},
+    )
+    body = response.json()
+    stage = _classify_stage(body)
+
+    assert route.call_count == 0
+    assert stage["status"] == "degraded"
+    assert stage["detail"].startswith("cost ceiling")
+    assert "air-classifier" not in body["degraded"]

@@ -89,6 +89,7 @@ gateway `air-llm`, in code, configuration, labels or docs.
 | `REQ-MGW-015` | MUST | A schema-constrained answer cut off (`finish_reason: length`) or refused yields `structured: null`; the prose answer is unaffected. |
 | `REQ-MGW-016` | MUST | The real application, against an HTTP-level double of the gateway's contract, answers a chat turn with the gateway's content. |
 | `REQ-MGW-017` | MUST NOT | A settings validation error — the retired-section refusal included — renders any input value. Found while writing `REQ-MGW-005`: pydantic echoed the old token verbatim, and had always echoed whatever settings input failed (the hash salt, inline key records). |
+| `REQ-MGW-018` | MUST NOT | A synthesis call that times out after being given less than half of the turn's deadline, because earlier stages used the rest, names the gateway in `degraded`. The turn ran out of time, not the gateway, and the stage says `turn deadline`. A call that had at least half and still timed out does name the gateway: that is a slow gateway. Added 2026-11-14 from SIT bug OR-003, where a slow classification left synthesis 244 ms of 2,000 and the turn blamed `air-model-gateway`. |
 
 ## 6. Acceptance criteria
 
@@ -169,3 +170,4 @@ gateway `air-llm`, in code, configuration, labels or docs.
 | `REQ-MGW-015` | `tests/unit/test_turns.py::test_a_cut_off_structured_answer_is_dropped` |
 | `REQ-MGW-016` | `tests/integration/test_model_gateway_wiring.py::test_a_chat_turn_is_answered_through_the_gateway` |
 | `REQ-MGW-017` | `tests/unit/test_config.py::test_a_settings_error_never_renders_a_secret` |
+| `REQ-MGW-018` | `tests/unit/test_turns.py::test_a_call_cut_short_by_the_turn_deadline_does_not_blame_the_gateway` |

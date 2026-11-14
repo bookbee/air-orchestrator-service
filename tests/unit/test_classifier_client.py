@@ -20,7 +20,7 @@ from air_orchestrator_service.clients.classifier import (
     ClassifierError,
     label_slug,
 )
-from air_orchestrator_service.config import ServiceSettings
+from air_orchestrator_service.config import ClassifierSettings
 from tests.conftest import CLASSIFIER_BASE_URL
 
 _KEY = "aircls_secret_value_never_logged"
@@ -50,7 +50,7 @@ def verdict(**overrides: Any) -> dict[str, Any]:
 @pytest.fixture
 async def classifier() -> AsyncIterator[ClassifierClient]:
     client = ClassifierClient(
-        ServiceSettings(
+        ClassifierSettings(
             enabled=True, base_url=CLASSIFIER_BASE_URL, api_key=SecretStr(_KEY), timeout_ms=4000
         )
     )
@@ -176,3 +176,61 @@ def test_a_label_that_is_not_a_slug_renders_as_other() -> None:
     assert label_slug("refund_request") == "refund_request"
     for hostile in ("</script>", "Refund", "a b", "x" * 41, "", "line\nbreak"):
         assert label_slug(hostile) == "other"
+
+
+def test_the_bound_is_at_most_a_share_of_the_turn_deadline() -> None:
+    """REQ-CLS-014: a quarter of a 2 s turn, however much of it is left."""
+    client = ClassifierClient(
+        ClassifierSettings(enabled=True, base_url=CLASSIFIER_BASE_URL, timeout_ms=4000)
+    )
+
+    assert client.bound_s(2.0, deadline_s=2.0) == 0.5
+    assert client.bound_s(0.2, deadline_s=2.0) == 0.2
+    assert client.bound_s(None, deadline_s=60.0) == 4.0
+
+
+async def test_the_cost_cap_and_tier_are_sent(mock: respx.MockRouter) -> None:
+    """REQ-CLS-015/016: what the turn can afford, and the configured tier cap,
+    clamped to what air-classifier accepts."""
+    client = ClassifierClient(
+        ClassifierSettings(
+            enabled=True, base_url=CLASSIFIER_BASE_URL, max_tier="t2_local_llm", timeout_ms=4000
+        )
+    )
+    route = mock.post(_URL).mock(return_value=httpx.Response(200, json=verdict()))
+    try:
+        await client.classify("hi", tenant="t", timeout_s=1.0, max_cost_usd=0.0123456789)
+        options = json.loads(route.calls.last.request.content)["options"]
+        assert options["max_cost_usd"] == 0.012346
+        assert options["max_tier"] == "t2_local_llm"
+
+        await client.classify("hi", tenant="t", timeout_s=1.0, max_cost_usd=99.0)
+        assert json.loads(route.calls.last.request.content)["options"]["max_cost_usd"] == 10.0
+    finally:
+        await client.aclose()
+
+
+async def test_an_unset_tier_is_not_sent(
+    classifier: ClassifierClient, mock: respx.MockRouter
+) -> None:
+    """REQ-CLS-016: unset, air-classifier's own default applies."""
+    route = mock.post(_URL).mock(return_value=httpx.Response(200, json=verdict()))
+
+    await classifier.classify("hi", tenant="t", timeout_s=1.0, max_cost_usd=0.01)
+
+    assert set(json.loads(route.calls.last.request.content)["options"]) == {
+        "latency_budget_ms",
+        "max_cost_usd",
+    }
+
+
+async def test_usage_is_read_and_absent_usage_is_zero(
+    classifier: ClassifierClient, mock: respx.MockRouter
+) -> None:
+    """REQ-CLS-017."""
+    usage = {"tiers_run": 4, "tokens_in": 310, "tokens_out": 40, "est_cost_usd": 0.0042}
+    mock.post(_URL).mock(return_value=httpx.Response(200, json=verdict(usage=usage)))
+    assert (await classifier.classify("hi", tenant="t", timeout_s=1.0)).usage.est_cost_usd == 0.0042
+
+    mock.post(_URL).mock(return_value=httpx.Response(200, json=verdict()))
+    assert (await classifier.classify("hi", tenant="t", timeout_s=1.0)).usage.est_cost_usd == 0.0

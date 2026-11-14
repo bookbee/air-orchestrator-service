@@ -43,7 +43,12 @@ class Usage(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
-    cost_usd: float = 0.0
+    cost_usd: float = Field(
+        default=0.0, description="Everything the turn spent, `classifier_cost_usd` included."
+    )
+    classifier_cost_usd: float = Field(
+        default=0.0, description="What air-classifier reported spending on this turn."
+    )
     cache_hit: bool = False
 
 

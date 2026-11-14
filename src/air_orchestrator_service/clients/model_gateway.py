@@ -167,12 +167,21 @@ class ModelGatewayError(Exception):
     """
 
     def __init__(
-        self, message: str, *, retryable: bool, status: int | None = None, code: str | None = None
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        status: int | None = None,
+        code: str | None = None,
+        timed_out: bool = False,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.status = status
         self.code = code
+        #: No response within the call's timeout. The caller decides whose fault:
+        #: a timeout narrowed to the turn's deadline is the deadline's (``REQ-MGW-018``).
+        self.timed_out = timed_out
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,7 +390,9 @@ class ModelGatewayClient:
             )
         except httpx.TimeoutException as exc:
             metrics.record_downstream_call(service=_SERVICE, outcome="timeout")
-            raise ModelGatewayError(f"no response within {call_timeout}s", retryable=True) from exc
+            raise ModelGatewayError(
+                f"no response within {call_timeout}s", retryable=True, timed_out=True
+            ) from exc
         except httpx.HTTPError as exc:
             metrics.record_downstream_call(service=_SERVICE, outcome="unavailable")
             raise ModelGatewayError(

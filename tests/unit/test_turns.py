@@ -12,6 +12,7 @@ import asyncio
 from typing import Any
 
 import httpx
+import pytest
 from fastapi import FastAPI
 
 from air_orchestrator_service.clients.model_gateway import GenerateResult, ModelGatewayError
@@ -470,6 +471,51 @@ async def test_an_exhausted_deadline_does_not_blame_the_gateway(
     assert body["status"] == "degraded"
     assert body["degraded"] == []
     assert called is False
+
+
+@pytest.mark.parametrize(
+    ("deadline_ms", "eaten_s", "blamed"),
+    [
+        (1000, 0.7, []),  # earlier stages left the call 30% of the turn
+        (1000, 0.0, ["air-model-gateway"]),  # the call had the whole turn: a slow gateway
+    ],
+)
+async def test_a_call_cut_short_by_the_turn_deadline_does_not_blame_the_gateway(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    deadline_ms: int,
+    eaten_s: float,
+    blamed: list[str],
+) -> None:
+    """REQ-MGW-018 (SIT OR-003): a timeout on a call given less than half the
+    turn is the deadline's; one given more is the gateway's."""
+    from air_orchestrator_service.api.deps import STATE_ATTR
+
+    sessions = getattr(app.state, STATE_ATTR).sessions
+    original_create = sessions.create
+
+    async def slow_create(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(eaten_s)
+        return await original_create(*args, **kwargs)
+
+    async def times_out(**_: object) -> Any:
+        raise ModelGatewayError("no response within 0.3s", retryable=True, timed_out=True)
+
+    sessions.create = slow_create
+    _gateway(app).generate = times_out
+
+    response = await client.post(
+        "/v1/chat",
+        headers=auth(CUSTOMER_KEY),
+        json={"message": "hi", "options": {"deadline_ms": deadline_ms}},
+    )
+
+    body = response.json()
+    synthesise = next(s for s in body["trace"] if s["stage"] == "synthesise")
+    assert body["status"] == "degraded"
+    assert body["degraded"] == blamed
+    if not blamed:
+        assert synthesise["detail"] == "turn deadline reached during the model call"
 
 
 async def test_a_gateway_refusal_is_a_refused_turn(app: FastAPI, client: httpx.AsyncClient) -> None:

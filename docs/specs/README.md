@@ -97,6 +97,7 @@ and gains `**Status:** Superseded by NNNN` — the id is a permanent address.
 | `CLS` | [0005 — air-classifier client](0005-classifier-client/spec.md) |
 | `PRM` | [0006 — channel prompts](0006-channel-prompts/spec.md) |
 | `PII` | [0007 — payment cards masked on input](0007-input-card-masking/spec.md) |
+| `COST` | [0008 — turn cost ceiling](0008-turn-cost-ceiling/spec.md) |
 
 Ids are never reused or renumbered. A withdrawn requirement stays in the table marked
 `Withdrawn`, because commit messages and test docstrings still point at it.

@@ -1208,6 +1208,13 @@
           "cost_usd": {
             "type": "number",
             "title": "Cost Usd",
+            "description": "Everything the turn spent, `classifier_cost_usd` included.",
+            "default": 0.0
+          },
+          "classifier_cost_usd": {
+            "type": "number",
+            "title": "Classifier Cost Usd",
+            "description": "What air-classifier reported spending on this turn.",
             "default": 0.0
           },
           "cache_hit": {

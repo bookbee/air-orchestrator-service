@@ -45,8 +45,12 @@ answers exactly as it does today, and its status is unaffected.
   is the right failure mode for a stage that degrades softly.
 - **Readiness and capabilities.** air-classifier is optional, so `/v1/ready` keeps gating on
   air-model-gateway alone (Article III). Live capability discovery is a separate Phase 3 item.
-- **Classifier cost controls.** air-classifier clamps tiers and cost per API key. Cost
-  governance belongs to the key it issues this service, not to a second set of knobs here.
+- **Classifier cost controls beyond the turn's own.** air-classifier clamps tiers and cost
+  per API key, and that stays its job. This service only passes on the limits it already has:
+  what is left of the turn's cost ceiling (`REQ-CLS-015`) and an optional tier cap
+  (`REQ-CLS-016`). *Revised 2026-11-14:* the first version passed neither. SIT (OR-003)
+  showed the classifier's spend was invisible to the turn and its ceilings, and that the
+  per-key cap was not enforced upstream either.
 
 ## 4. Constitution check
 
@@ -77,6 +81,14 @@ answers exactly as it does today, and its status is unaffected.
 | `REQ-CLS-011` | SHOULD | A verdict with `requires_human` or low sentiment confidence escalates the turn. |
 | `REQ-CLS-012` | SHOULD | The verdict calibrates the tone of the synthesised answer. |
 | `REQ-CLS-013` | SHOULD | Transient failures are retried under a shared circuit breaker. |
+| `REQ-CLS-014` | MUST | The bound in `REQ-CLS-004` is also at most `deadline_share` (default 0.25) of the turn's whole deadline, so synthesis keeps the larger part of the turn's time. Classification is enrichment; the answer is the product. |
+| `REQ-CLS-015` | MUST | The call carries `options.max_cost_usd`: the turn's effective cost ceiling less the estimated cost of the synthesis call that follows (spec 0008). When nothing is left, the call is not made and the stage degrades with a `cost ceiling` detail, naming no downstream. |
+| `REQ-CLS-016` | MUST | With `downstream.classifier.max_tier` set, the call carries it as `options.max_tier`. Unset, the field is not sent and air-classifier's own default applies. |
+| `REQ-CLS-017` | MUST | The verdict's `usage.est_cost_usd` is read, and is what spec 0008 counts. A verdict without `usage` counts as zero. |
+
+**Added 2026-11-14 (`REQ-CLS-014`–`017`), from SIT bug OR-003.** With `deadline_ms: 2000`,
+classification climbed to the cloud tier for 1,759 ms and left synthesis 244 ms, which timed
+out. Its spend, often more than the synthesis call's, appeared in no `usage`.
 
 **Revised 2026-11-14 (`REQ-CLS-004`).** The first version passed the bound itself as the
 budget. In console testing against a live air-classifier, any turn that used its whole budget
@@ -110,6 +122,7 @@ after the budget, by which point this service had already stopped waiting. The h
 | Business channel | `CLASSIFY` `skipped`, "not used on the business channel" | unchanged |
 | Unreachable / timeout / non-200 / unreadable body | `CLASSIFY` `degraded`, `downstream: air-classifier` | unchanged |
 | Less than 300 ms left before the deadline | `CLASSIFY` `degraded`, no downstream named; no call | unchanged |
+| No cost left once synthesis is reserved | `CLASSIFY` `degraded`, `cost ceiling`, no downstream named; no call | unchanged |
 | air-classifier itself degraded (`degraded: true` in the verdict) | `CLASSIFY` `ok`; detail says `classifier_degraded` | unchanged |
 
 "Unchanged" is deliberate (HLD §7: "Turn unaffected"). A degraded `CLASSIFY` still names
@@ -146,3 +159,7 @@ contribute, not whether the answer suffered.
 | `REQ-CLS-011` | DEFERRED — acting on the verdict changes what users see; needs its own spec and evals (Phase 3) |
 | `REQ-CLS-012` | DEFERRED — tone calibration needs a prompt change and an eval set (Phase 3) |
 | `REQ-CLS-013` | DEFERRED — lands with the shared `clients/base.py` resilience lift (Phase 3) |
+| `REQ-CLS-014` | `tests/unit/test_classifier_client.py::test_the_bound_is_at_most_a_share_of_the_turn_deadline` · `tests/unit/test_classify_stage.py::test_a_short_deadline_leaves_synthesis_the_larger_share` |
+| `REQ-CLS-015` | `tests/unit/test_classifier_client.py::test_the_cost_cap_and_tier_are_sent` · `tests/unit/test_classify_stage.py::test_the_classifier_is_given_what_is_left_of_the_ceiling` · `tests/unit/test_classify_stage.py::test_no_cost_left_skips_the_call_without_blaming_the_classifier` |
+| `REQ-CLS-016` | `tests/unit/test_classifier_client.py::test_the_cost_cap_and_tier_are_sent` · `tests/unit/test_classifier_client.py::test_an_unset_tier_is_not_sent` |
+| `REQ-CLS-017` | `tests/unit/test_classifier_client.py::test_usage_is_read_and_absent_usage_is_zero` |
