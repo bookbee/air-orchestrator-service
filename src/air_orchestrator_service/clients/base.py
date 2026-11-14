@@ -44,6 +44,7 @@ from enum import StrEnum
 from typing import Any, Final
 
 import httpx
+from pydantic import SecretStr
 
 from air_orchestrator_service.config import ServiceSettings
 from air_orchestrator_service.constants import (
@@ -230,14 +231,24 @@ class DownstreamClient:
         return bound if remaining_s is None else min(bound, remaining_s)
 
     async def post_json[T](
-        self, path: str, body: dict[str, Any], *, timeout_s: float, parse: Callable[[Any], T]
+        self,
+        path: str,
+        body: dict[str, Any],
+        *,
+        timeout_s: float,
+        parse: Callable[[Any], T],
+        api_key: SecretStr | None = None,
     ) -> T:
         """POST ``body`` and return ``parse(response JSON)``, or raise
         :class:`DownstreamError`. ``parse`` runs inside the breaker's verdict: a body
-        that does not validate is a failure like a 500 (``REQ-CLB-002``)."""
+        that does not validate is a failure like a 500 (``REQ-CLB-002``). ``api_key``
+        replaces the configured key for this call only: a service that scopes by key
+        (air-rag) is called with the caller's tenant's key."""
         if not self.breaker.admit():
             raise self._failed("breaker_open", f"{self._service.value} circuit is open")
         headers = {}
+        if api_key is not None:
+            headers[HEADER_API_KEY] = api_key.get_secret_value()
         if (request_id := current_request_id()) is not None:
             headers[HEADER_REQUEST_ID] = request_id
         try:

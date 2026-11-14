@@ -26,7 +26,7 @@
     {
       "name": "returns-question",
       "turns": ["How do returns work?"],
-      "expect": "Does not invent a return window, fee or address; says what it can in general terms and offers a next step."
+      "expect": "States a return window, fee or address only from a cited knowledge-base source ([n]); with no source (air-rag off or down), says the terms are on the help pages instead of inventing them. Offers a next step."
     },
     {
       "name": "cancel-request",

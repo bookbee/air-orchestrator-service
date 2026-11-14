@@ -50,7 +50,9 @@ async def query(
     if not principal.has_scope(SCOPE_QUERY_WRITE):
         raise InsufficientScopeError(f"This key lacks the '{SCOPE_QUERY_WRITE}' scope.")
 
-    engine = TurnEngine(state.settings, state.sessions, state.model_gateway, state.classifier)
+    engine = TurnEngine(
+        state.settings, state.sessions, state.model_gateway, state.classifier, state.rag
+    )
     streaming = wants_stream(accept)
     turn = TurnRequest.from_query(body, stream=streaming)
     # Before the response shape is chosen, so an unknown session is a 404 status

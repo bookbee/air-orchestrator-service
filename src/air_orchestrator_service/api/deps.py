@@ -29,6 +29,7 @@ from air_orchestrator_service.clients.base import DownstreamClient
 from air_orchestrator_service.clients.classifier import ClassifierClient
 from air_orchestrator_service.clients.infra import InfraClient
 from air_orchestrator_service.clients.model_gateway import ModelGatewayClient
+from air_orchestrator_service.clients.rag import RagClient
 from air_orchestrator_service.config import Settings
 from air_orchestrator_service.constants import Channel
 from air_orchestrator_service.memory.session import InMemorySessionStore
@@ -69,10 +70,12 @@ class AppState:
     #: ``None`` unless ``downstream.classifier`` is configured — absent is a
     #: value, not a client that always fails (spec 0005).
     classifier: ClassifierClient | None = None
+    #: ``None`` unless ``downstream.rag`` is configured (spec 0011).
+    rag: RagClient | None = None
 
     def optional_clients(self) -> list[DownstreamClient]:
         """The optional downstreams this deployment has clients for (spec 0010)."""
-        return [client for client in (self.classifier,) if client is not None]
+        return [client for client in (self.classifier, self.rag) if client is not None]
 
 
 def get_app_state(request: Request) -> AppState:

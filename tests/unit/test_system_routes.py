@@ -235,10 +235,13 @@ async def test_metrics_is_absent_from_the_openapi_document(app: FastAPI) -> None
 
 @pytest.mark.usefixtures("reachable_model_gateway", "reachable_infra")
 async def test_capabilities_report_live_downstream_status(settings: Settings) -> None:
-    """REQ-CLB-007: a configured optional service is probed live, and reported down
-    when it does not answer. air-classifier backs no route, so `routes` is unchanged."""
+    """REQ-CLB-007 / spec 0010 AC-2: air-rag configured but down drops the `rag` route;
+    air-classifier up is reported reachable."""
     downstream = settings.downstream.model_copy(
         update={
+            "rag": settings.downstream.rag.model_copy(
+                update={"enabled": True, "base_url": "http://air-rag.invalid:8087"}
+            ),
             "classifier": settings.downstream.classifier.model_copy(
                 update={"enabled": True, "base_url": CLASSIFIER_BASE_URL}
             ),
@@ -247,21 +250,26 @@ async def test_capabilities_report_live_downstream_status(settings: Settings) ->
     app = build_app(settings.model_copy(update={"downstream": downstream}))
     transport = httpx.ASGITransport(app=app)
     with respx.mock(assert_all_called=False) as mock:
-        mock.get(f"{CLASSIFIER_BASE_URL}/v1/health").mock(side_effect=httpx.ConnectError("x"))
+        mock.get("http://air-rag.invalid:8087/v1/health").mock(
+            side_effect=httpx.ConnectError("refused")
+        )
+        mock.get(f"{CLASSIFIER_BASE_URL}/v1/health").mock(return_value=httpx.Response(200))
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get("/v1/capabilities", headers=auth(CUSTOMER_KEY))
 
     body = response.json()
     reported = {d["service"]: d for d in body["downstreams"]}
-    assert reported["air-classifier"]["reachable"] is False
-    assert reported["air-classifier"]["detail"] == "connection failed (ConnectError)"
+    assert reported["air-rag"]["reachable"] is False
+    assert reported["air-rag"]["detail"] == "connection failed (ConnectError)"
+    assert reported["air-classifier"]["reachable"] is True
     assert body["routes"] == ["direct"]
 
     with respx.mock(assert_all_called=False) as mock:
+        mock.get("http://air-rag.invalid:8087/v1/health").mock(return_value=httpx.Response(200))
         mock.get(f"{CLASSIFIER_BASE_URL}/v1/health").mock(return_value=httpx.Response(200))
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get("/v1/capabilities", headers=auth(CUSTOMER_KEY))
-    assert response.json()["downstreams"][0]["reachable"] is True
+    assert response.json()["routes"] == ["direct", "rag"]
 
 
 async def test_ready_does_not_probe_optional_downstreams(settings: Settings) -> None:

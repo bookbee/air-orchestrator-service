@@ -43,6 +43,7 @@ from air_orchestrator_service.api.v1.system import build_metrics_router
 from air_orchestrator_service.clients.classifier import ClassifierClient
 from air_orchestrator_service.clients.infra import InfraClient
 from air_orchestrator_service.clients.model_gateway import ModelGatewayClient
+from air_orchestrator_service.clients.rag import RagClient
 from air_orchestrator_service.config import Settings, get_settings
 from air_orchestrator_service.memory.session import build_session_store
 from air_orchestrator_service.observability.logging import configure_logging, get_logger
@@ -183,6 +184,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if resolved.downstream.classifier.configured
             else None
         ),
+        rag=RagClient(resolved.downstream.rag) if resolved.downstream.rag.configured else None,
     )
 
     app = FastAPI(

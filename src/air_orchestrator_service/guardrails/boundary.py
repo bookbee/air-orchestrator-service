@@ -13,7 +13,15 @@ which screens the *original* message — this covers content that only exists
 
 from __future__ import annotations
 
+import re
+from typing import Final
+
 __all__ = ["delimit"]
+
+#: An opening or closing ``data`` tag inside the content. Left alone, a passage that
+#: says ``</data>`` ends the block early, and whatever follows reads as this
+#: service's own text (spec 0011, ``REQ-RAG-007``).
+_TAG: Final = re.compile(r"<(/?)(\s*)data", re.IGNORECASE)
 
 
 def delimit(content: str, *, source: str) -> str:
@@ -23,6 +31,7 @@ def delimit(content: str, *, source: str) -> str:
     ``"retrieved_passage"``) recorded in the tag itself, so a transcript
     review can see which boundary a given block of text crossed.
     """
+    content = _TAG.sub(r"&lt;\1\2data", content)
     return (
         f'<data source="{source}">\n'
         f"{content}\n"

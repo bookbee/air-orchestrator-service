@@ -45,7 +45,7 @@ async def test_each_channel_synthesises_with_its_own_prompt(
     assert customer_system["role"] == business_system["role"] == "system"
     assert customer_system["content"].startswith("You are a customer care assistant")
     assert business_system["content"].startswith("You are an analyst assistant")
-    assert _synthesise(chat.json())["detail"] == "prompt=customer_care:v1"
+    assert _synthesise(chat.json())["detail"] == "prompt=customer_care:v2"
     assert _synthesise(query.json())["detail"] == "prompt=business_analyst:v1"
 
 

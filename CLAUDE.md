@@ -93,15 +93,19 @@ downstream coping) so a refusal spike does not look like an outage.
 Real today: guardrails both ways, per-channel prompts (spec 0006), synthesis via `ModelGatewayClient.generate`
 (JSON callers) or `.stream` (SSE callers, as `answer.delta` through `pii.StreamRedactor` —
 spec 0004), `CLASSIFY` via air-classifier when configured (customer channel, fail-soft — spec
-0005), per-turn and per-session cost ceilings, and a turn deadline that bounds every downstream
-call. Stubbed: `CACHE` (Phase 5), `GATHER` (Phase 3). Routing is still the literal `/propose`
-trigger — a stand-in must not appear to understand intent it does not.
+0005), `GATHER` via air-rag when configured (customer channel: passages screened, numbered and
+delimited into the prompt, cited answers emitted as `citation` events — spec 0011), per-turn
+and per-session cost ceilings, and a turn deadline that bounds every downstream call. Every
+optional client builds on `clients/base.py` (one attempt, four failure reasons, a
+per-service circuit breaker — spec 0010). Stubbed: `CACHE` (Phase 5). Routing is still a rule
+(customer → `rag` when configured) plus the literal `/propose` trigger — a stand-in must not
+appear to understand intent it does not.
 
 ### Wiring (`main.py` + `api/deps.py`)
 
 Nothing is a module-level singleton. `create_app` assembles one frozen `AppState` dataclass —
 settings, `ApiKeyStore`, `InfraClient`, `ModelGatewayClient`, the session store, and a
-`ClassifierClient` that is `None` unless configured — and hangs it on
+`ClassifierClient` and a `RagClient`, each `None` unless configured — and hangs it on
 `app.state.air_state` (`deps.STATE_ATTR`). Routes reach it via `Depends(get_app_state)` and
 take settings from `get_settings_dep`, never the `get_settings()` process singleton. It is a
 dataclass rather than loose `app.state` attributes so a misspelled field fails at import
@@ -203,11 +207,12 @@ The near-term work, in order:
   Spec `0002-durable-sessions` is still **Draft**, and its `tasks.md` T0 gates all code on
   resolving open questions Q1/Q2 (which change `REQ-SESS-007`/`008`). Start there, not in
   `memory/`.
-- **Phase 3 — read path.** air-classifier's client exists (spec 0005; acting on its verdict
-  is `DEFERRED` there). Next: air-rag/air-tools/air-recommender behind a shared
-  `clients/base.py`, capability discovery, and turning `GATHER` real. The
-  resilience primitives are meant to be lifted from air-classifier's `resilience/`, not
-  rewritten.
+- **Phase 3 — read path.** air-classifier's and air-rag's clients exist on the shared
+  `clients/base.py` (specs 0005, 0010, 0011). Next: air-tools behind the same base, a planner
+  (schema-constrained JSON decomposition — HLD §9 item 2), inventory discovery from each
+  service's `/v1/capabilities`, and parallel fan-out in `GATHER`. air-rag scopes by key, so
+  `RagSettings.tenant_keys` picks the air-rag key by the principal's tenant (`REQ-RAG-016`).
+  Spec 0011's open gap is the grounding check (`REQ-RAG-014`).
 - **Phase 4 — write path.** `clients/action.py` behind the propose→confirm→execute gate that
   already exists and is tested.
 

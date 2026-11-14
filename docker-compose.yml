@@ -52,6 +52,9 @@ services:
       # env_file, so `make run` on the host keeps using .env unchanged.
       AIR_ORCHESTRATOR_SERVICE__INFRA__BASE_URL: http://air-infrastructure-service:8080
       AIR_ORCHESTRATOR_SERVICE__DOWNSTREAM__CLASSIFIER__BASE_URL: http://air-classifier-service:8080
+      # air-rag runs on its own compose network, not air-net, so it is reached over the
+      # host like air-model-gateway.
+      AIR_ORCHESTRATOR_SERVICE__DOWNSTREAM__RAG__BASE_URL: http://host.docker.internal:8087
       # air-model-gateway is reached over the host — see the header above.
       AIR_ORCHESTRATOR_SERVICE__MODEL_GATEWAY__BASE_URL: http://host.docker.internal:8083
       # The gateway's own .env.example issues this exact token to this service
