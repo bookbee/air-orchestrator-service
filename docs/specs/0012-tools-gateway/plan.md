@@ -105,7 +105,7 @@ text is built from the gateway's `summary`. Having the model word them is spec 0
 | `api/deps.py`, `main.py`, `api/v1/chat.py`, `api/v1/query.py` | modified | `AppState.tools_gateway`, `AppState.action_executor`; passed to the engine; lifespan closes both |
 | `api/v1/system.py` | modified | `/v1/capabilities` filters `tools`/`action` by the caller's channel inventory (`REQ-TGW-005`); `/v1/ready`'s not-probed list loses `TOOLS`/`ACTION` and gains `TOOLS_GATEWAY` |
 | `observability/metrics.py` | modified | `record_capability_call(capability, kind, outcome)` (`REQ-TGW-022`) |
-| `prompts/registry.py` | modified | `customer_care:v3`: rules for a lookups block (facts about the customer's orders come only from it; a notice means say you could not check). New version, so `make prompt-review` before and after |
+| `prompts/registry.py` | unchanged | `customer_care` stays v2. The lookup rules travel in the engine's lookups message (`REQ-TGW-027`), so a turn without lookups keeps the reviewed prompt (tasks T7) |
 | `pyproject.toml` | modified | runtime `jsonschema>=4.23` (Draft 2020-12 validation of capability arguments); dev `pyyaml`, `types-PyYAML` (the test double loads the contract) |
 | `.env.example`, `docker-compose.yml` | modified | `DOWNSTREAM__TOOLS_GATEWAY__*`; air-tools-gateway on air-net as `http://air-tools-gateway:8080` |
 | `docs/02-lld.md` §1, §8, §15; `docs/openapi.json` | modified | layout, the two-object split, status; regenerated |
@@ -248,7 +248,7 @@ was sent, so prompt content is asserted directly. Expiry uses an injected clock.
 | --- | --- | --- |
 | A tool result carries an injection (an order note written by an attacker) | Medium | Screened and delimited like a passage (`REQ-TGW-009`); worst case is a proposal the customer never confirms, because execute needs the structured field |
 | The two stage-event fields cannot name two failed services | Certain, when both fail | Detail names both; `turn.end.degraded` comes from stage events, so it names one. Recorded here; a list-valued field would be an additive change if it starts to matter |
-| A slow gateway inventory fetch adds latency to every turn | Medium | Cached per tenant; fetched inside `GATHER`'s bound, never before the first event; a miss on a cold cache is one call per tenant per TTL |
+| A slow gateway inventory fetch adds latency to every turn | Medium | Cached per tenant; fetched at `PLAN` within the gateway's deadline share (so the planner chooses from it and the `route` event is checked against it, `REQ-TGW-025`), never before the first event, and not at all on a confirmation turn or for a channel with an empty allow-list; a miss on a cold cache is one call per tenant per TTL |
 | `jsonschema` adds a runtime dependency | Low | The reference implementation of the standard the contract names; pure Python; schemas are compiled once per inventory refresh |
 | An execute times out and the customer is told "unknown" | Medium | Honest by design (`REQ-TGW-017`). The answer tells them how to check (`orders.get`). The gateway's idempotency makes a later re-proposal safe |
 | A breaking label change surprises a consumer | Low | Neither label ever carried data; flagged in §3 and the PR |

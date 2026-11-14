@@ -1,8 +1,9 @@
 """What every optional downstream call has in common — spec 0010.
 
-air-classifier, air-rag-service, and air-tools after them, are each reached the same way: one POST
-of JSON, the key in ``X-API-Key``, the turn's request id in ``X-Request-ID``, and a bound
-taken from the turn's deadline. What can go wrong is also the same: no connection, no
+air-classifier, air-rag-service and air-tools-gateway are each reached the same way: one
+request (a POST of JSON, or a GET for air-tools-gateway's inventory), the key in
+``X-API-Key``, the turn's request id in ``X-Request-ID``, and a bound taken from the turn's
+deadline. What can go wrong is also the same: no connection, no
 answer in time, a status that is not 2xx, a body that does not parse. This module is the
 one place that turns those into a :class:`DownstreamError` carrying one of four reason
 words. Each reason word is also the metric's outcome label. It is the one place, too,
@@ -23,6 +24,18 @@ breaker, failure reopens it. Lifted from air-classifier's ``resilience/breaker.p
 its bulkhead and its multi-probe half-open, which a per-turn call with one attempt does
 not need. Timing is on a monotonic clock, so a wall-clock step never opens or closes it.
 
+**Why GET and POST share one private ``_request()``.** The four reasons, the breaker's
+verdict and the metric are the contract (spec 0010); a ``get_json()`` with its own copy of
+the ``try`` blocks is how a GET would one day count a 404 as ``ok`` or leak its URL into a
+message. The public methods differ only in the verb and the body.
+
+**Why extra headers may not name a reserved one.** A call may add a header, such as
+air-tools-gateway's ``Idempotency-Key`` (spec 0012). It may not set ``X-API-Key`` or
+``X-Request-ID`` that way: the key is chosen by ``api_key=`` alone, so there is one place to
+audit which key a request carried (``REQ-TGW-016``), and the request id is the turn's, not
+the caller's. Naming one is a programming error, raised before any request or breaker
+change.
+
 **Why cancellation is not a failure.** A customer closing the tab cancels the turn's task,
 and with it the downstream call. That says nothing about the downstream's health.
 ``asyncio.CancelledError`` is a ``BaseException``, and only ``Exception`` counts.
@@ -39,7 +52,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from enum import StrEnum
 from typing import Any, Final
 
@@ -66,6 +79,10 @@ __all__ = [
 logger = get_logger(__name__)
 
 _HEALTH_PATH: Final[str] = "/v1/health"
+#: Set by this module alone, never through ``headers=`` (see the module docstring).
+_RESERVED_HEADERS: Final[frozenset[str]] = frozenset(
+    {HEADER_API_KEY.lower(), HEADER_REQUEST_ID.lower()}
+)
 
 
 class DownstreamError(Exception):
@@ -238,23 +255,71 @@ class DownstreamClient:
         timeout_s: float,
         parse: Callable[[Any], T],
         api_key: SecretStr | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> T:
         """POST ``body`` and return ``parse(response JSON)``, or raise
         :class:`DownstreamError`. ``parse`` runs inside the breaker's verdict: a body
         that does not validate is a failure like a 500 (``REQ-CLB-002``). ``api_key``
         replaces the configured key for this call only: a service that scopes by key
-        (air-rag-service) is called with the caller's tenant's key."""
+        (air-rag-service, air-tools-gateway) is called with the caller's tenant's key.
+        ``headers`` are added to this request and may not name a reserved header."""
+        return await self._request(
+            "POST",
+            path,
+            body=body,
+            timeout_s=timeout_s,
+            parse=parse,
+            api_key=api_key,
+            headers=headers,
+        )
+
+    async def get_json[T](
+        self,
+        path: str,
+        *,
+        timeout_s: float,
+        parse: Callable[[Any], T],
+        api_key: SecretStr | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> T:
+        """GET ``path`` and return ``parse(response JSON)``, failing exactly as
+        :meth:`post_json` does."""
+        return await self._request(
+            "GET",
+            path,
+            body=None,
+            timeout_s=timeout_s,
+            parse=parse,
+            api_key=api_key,
+            headers=headers,
+        )
+
+    async def _request[T](
+        self,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any] | None,
+        timeout_s: float,
+        parse: Callable[[Any], T],
+        api_key: SecretStr | None,
+        headers: Mapping[str, str] | None,
+    ) -> T:
+        sent = dict(headers or {})
+        if reserved := {name for name in sent if name.lower() in _RESERVED_HEADERS}:
+            raise ValueError(f"headers= may not set {sorted(reserved)}; use api_key= instead")
         if not self.breaker.admit():
             raise self._failed("breaker_open", f"{self._service.value} circuit is open")
-        headers = {}
         if api_key is not None:
-            headers[HEADER_API_KEY] = api_key.get_secret_value()
+            sent[HEADER_API_KEY] = api_key.get_secret_value()
         if (request_id := current_request_id()) is not None:
-            headers[HEADER_REQUEST_ID] = request_id
+            sent[HEADER_REQUEST_ID] = request_id
         try:
             client = await self._http()
             try:
-                response = await client.post(path, json=body, headers=headers, timeout=timeout_s)
+                response = await client.request(
+                    method, path, json=body, headers=sent, timeout=timeout_s
+                )
             except httpx.TimeoutException as exc:
                 raise self._failed("timeout", f"{self._service.value} timed out") from exc
             except httpx.HTTPError as exc:

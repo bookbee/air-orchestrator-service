@@ -64,13 +64,17 @@ class StageEvent(BaseModel):
 
 
 class RouteEvent(BaseModel):
-    """What the planner decided, and what it had available to decide from."""
+    """What the planner decided, and the capabilities its plan uses."""
 
     event: Literal[EventType.ROUTE] = EventType.ROUTE
     routes: list[Route]
     reason: str
     capabilities: list[str] = Field(
-        default_factory=list, description="Live capability names the planner could choose among."
+        default_factory=list,
+        description=(
+            "The capabilities this turn's plan uses. Never the whole inventory it chose "
+            "from: that is admin-scoped (spec 0012, REQ-TGW-025)."
+        ),
     )
 
 

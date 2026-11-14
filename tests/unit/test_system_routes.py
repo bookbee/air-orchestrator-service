@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 import pytest
 import respx
@@ -92,8 +94,8 @@ async def test_ready_is_503_even_when_infra_alone_is_reachable(client: httpx.Asy
 async def test_ready_ignores_optional_downstreams(client: httpx.AsyncClient) -> None:
     """Every optional service is disabled in the test settings, and readiness holds.
 
-    This is docs/01-hld.md §7 as an executable claim: air-rag-service, air-tools and
-    air-action being absent narrows what a turn can answer, and must not gate
+    This is docs/01-hld.md §7 as an executable claim: air-rag-service and
+    air-tools-gateway being absent narrows what a turn can answer, and must not gate
     readiness — otherwise the service would never be ready in its own repo's
     default configuration.
     """
@@ -101,10 +103,41 @@ async def test_ready_ignores_optional_downstreams(client: httpx.AsyncClient) -> 
 
     assert response.json()["ready"] is True
     reported = {d["service"]: d for d in response.json()["dependencies"]}
-    for service in ("air-rag", "air-tools", "air-action", "air-recommender"):
+    for service in ("air-rag", "air-tools-gateway", "air-recommender"):
         assert reported[service]["configured"] is False
         # Not probed, and the schema says so rather than implying "down".
         assert reported[service]["reachable"] is None
+
+
+async def test_the_gateway_is_labelled_air_tools_gateway(client: httpx.AsyncClient) -> None:
+    """REQ-TGW-023: one label for the one service, and neither retired name."""
+    response = await client.get("/v1/ready")
+
+    services = {d["service"] for d in response.json()["dependencies"]}
+    assert "air-tools-gateway" in services
+    assert "air-tools" not in services
+    assert "air-action" not in services
+
+
+def test_an_old_env_file_boots_with_one_warning_per_retired_section(
+    settings: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A ``.env`` from an older ``make env`` sets ``DOWNSTREAM__TOOLS__ENABLED=false``
+    and ``DOWNSTREAM__ACTION__ENABLED=false``. It must still boot (spec 0012), and say
+    so rather than drop the sections silently."""
+    old = settings.model_copy(
+        update={
+            "downstream": settings.downstream.model_copy(
+                update={"tools": {"enabled": "false"}, "action": {"enabled": "false"}}
+            )
+        }
+    )
+
+    with caplog.at_level(logging.WARNING):
+        build_app(old)
+
+    assert caplog.text.count("settings.retired_section") == 2
+    assert "downstream.tools_gateway" in caplog.text
 
 
 @pytest.mark.usefixtures("unreachable_model_gateway", "unreachable_infra")

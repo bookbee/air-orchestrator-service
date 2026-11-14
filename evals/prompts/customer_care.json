@@ -1,5 +1,5 @@
 {
-  "about": "Multi-turn customer conversations for reviewing the customer_care prompt (spec 0006, REQ-PRM-007). Run with `make prompt-review` against a live service. Each conversation is one session; each string is one customer turn. `expect` is what a human reviewer should check that the flags cannot.",
+  "about": "Multi-turn customer conversations for reviewing the customer_care prompt (spec 0006, REQ-PRM-007). Run with `make prompt-review` against a live service. Each conversation is one session; each string is one customer turn. `expect` is what a human reviewer should check that the flags cannot. A conversation with `requires: lookups` runs only with `make prompt-review LOOKUPS=1`, against a deployment whose turns can look things up (spec 0012).",
   "conversations": [
     {
       "name": "late-order-frustrated",
@@ -12,7 +12,10 @@
     },
     {
       "name": "vague-opening",
-      "turns": ["hi", "I have a problem with something I bought"],
+      "turns": [
+        "hi",
+        "I have a problem with something I bought"
+      ],
       "expect": "A short greeting that invites the customer to say more; then one clarifying question."
     },
     {
@@ -25,23 +28,49 @@
     },
     {
       "name": "returns-question",
-      "turns": ["How do returns work?"],
+      "turns": [
+        "How do returns work?"
+      ],
       "expect": "States a return window, fee or address only from a cited knowledge-base source ([n]); with no source (air-rag-service off or down), says the terms are on the help pages instead of inventing them. Offers a next step."
     },
     {
       "name": "cancel-request",
-      "turns": ["Please cancel my order 55120.", "So is it cancelled now?"],
+      "turns": [
+        "Please cancel my order 55120.",
+        "So is it cancelled now?"
+      ],
       "expect": "Never says the order is cancelled; is clear it cannot change orders here and what the customer can do."
     },
     {
       "name": "repeat-contact",
-      "turns": ["This is the third time I'm writing about this. Nothing ever gets fixed."],
+      "turns": [
+        "This is the third time I'm writing about this. Nothing ever gets fixed."
+      ],
       "expect": "Takes the frustration seriously without grovelling; asks what the issue is; offers a person."
     },
     {
       "name": "spanish",
-      "turns": ["Hola, ¿dónde está mi pedido?"],
+      "turns": [
+        "Hola, ¿dónde está mi pedido?"
+      ],
       "expect": "Replies in Spanish."
+    },
+    {
+      "name": "order-status-with-lookup",
+      "requires": "lookups",
+      "turns": [
+        "Where is my order?",
+        "And when will it get here?"
+      ],
+      "expect": "States the order number, status and expected delivery exactly as the lookups block gives them, and nothing the block does not hold (no carrier, tracking number or time of day unless given). May say it checked. Does not ask for an order number the block already shows. Ends on a next step."
+    },
+    {
+      "name": "order-status-lookup-fails",
+      "requires": "lookups",
+      "turns": [
+        "Where is my order 48213?"
+      ],
+      "expect": "Run with the gateway stopped, so GATHER is degraded and the prompt carries the 'could not be made' notice. Says briefly it could not check just now; states no status, date or amount; does not claim to have checked; offers to try again in a little while or to ask to speak to a person."
     }
   ]
 }

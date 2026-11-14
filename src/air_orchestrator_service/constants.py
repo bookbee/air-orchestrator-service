@@ -128,8 +128,12 @@ class DownstreamService(StrEnum):
     #: The repo is now air-rag-service. This value stays: it is a wire and metric
     #: label, and a repo rename is not a reason to break callers and dashboards.
     RAG = "air-rag"
-    TOOLS = "air-tools"
-    ACTION = "air-action"
+    #: One gateway for lookups and proposed changes (spec 0012, ``REQ-TGW-023``). It
+    #: replaced the planned ``TOOLS = "air-tools"`` and ``ACTION = "air-action"``,
+    #: which were removed on purpose: neither service was ever deployed, so no
+    #: dashboard holds data under them, and two labels for one service would split
+    #: its metrics (Article VI).
+    TOOLS_GATEWAY = "air-tools-gateway"
     RECOMMENDER = "air-recommender"
 
 

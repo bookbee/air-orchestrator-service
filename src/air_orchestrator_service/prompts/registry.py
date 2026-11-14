@@ -21,6 +21,12 @@ the replacements for a stale ``direct`` pin.
 to one short plain line. The *rules* stay here, because rules are what the review
 set (``make prompt-review``) is run against before a version ships.
 
+**Rules for data a turn may or may not have travel with that data.** The lookup rules
+of spec 0012 are in the engine's lookups message, not here (``REQ-TGW-027``). A rule
+that only applies when something is present belongs with the thing: a turn without it
+then reads a prompt that has already been reviewed, and adding the data does not need
+a new prompt version.
+
 **Built in, no ``PromptSettings.registry_path`` loading.** Built-in prompts are
 what let a fresh checkout answer with nothing configured. Loading prompts from
 files needs a file format and a reload story, and is a documented follow-up.

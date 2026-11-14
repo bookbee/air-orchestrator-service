@@ -45,6 +45,7 @@ from air_orchestrator_service.constants import (
     SCOPE_SESSION_READ,
     DownstreamService,
 )
+from air_orchestrator_service.engine.plan import Plan, PlanContext, Planner
 from air_orchestrator_service.main import create_app
 from air_orchestrator_service.schemas.common import DependencyStatus
 
@@ -57,6 +58,8 @@ INFRA_BASE_URL = "http://air-infra.invalid:8080"
 MODEL_GATEWAY_BASE_URL = "http://air-model-gateway.invalid:8083"
 #: Not localhost, for the same reason. Off by default, as in production.
 CLASSIFIER_BASE_URL = "http://air-classifier.invalid:8082"
+#: air-tools-gateway (spec 0012). ``.invalid`` like the rest: an escaping call fails loudly.
+TOOLS_GATEWAY_BASE_URL = "http://air-tools-gateway.invalid:8084"
 CUSTOMER_KEY = "airo_test_customer"
 BUSINESS_KEY = "airo_test_business"
 NO_SCOPE_KEY = "airo_test_noscope"
@@ -150,6 +153,32 @@ def build_app(settings: Settings) -> FastAPI:
         CANNED_ANSWER[:20], CANNED_ANSWER[20:], canned_summary()
     )
     return built
+
+
+class FixedPlanner:
+    """Plans the same thing for every turn: spec 0012's "injected plan" (§3).
+
+    Records each context it was asked about, so a test can check what the engine
+    let a planner see.
+    """
+
+    def __init__(self, plan: Plan) -> None:
+        self._plan = plan
+        self.seen: list[PlanContext] = []
+
+    async def plan(self, ctx: PlanContext) -> Plan:
+        self.seen.append(ctx)
+        return self._plan
+
+
+def use_planner(app: FastAPI, planner: Planner) -> None:
+    """Swap the planner on an otherwise real app. ``AppState`` is frozen, so it is
+    replaced whole, collaborators and all."""
+    from dataclasses import replace
+
+    from air_orchestrator_service.api.deps import STATE_ATTR
+
+    setattr(app.state, STATE_ATTR, replace(getattr(app.state, STATE_ATTR), planner=planner))
 
 
 @pytest.fixture

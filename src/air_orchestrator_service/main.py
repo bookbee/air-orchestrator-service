@@ -10,7 +10,7 @@ variable or clearing a cache. The process singleton is only the default.
 **A missing downstream is a deployment shape, not a failure.** air-orchestrator-service is
 designed to narrow its answer rather than refuse one (docs/01-hld.md §7), and that
 promise has to hold at *startup* as well as per request: a deployment with no
-air-rag-service, no air-tools and no air-action must boot, serve, and report itself
+air-rag-service and no air-tools-gateway must boot, serve, and report itself
 honestly on ``/v1/ready`` and ``/v1/capabilities``. Since most of the estate is
 still unbuilt, that is the normal case rather than the degraded one.
 
@@ -44,6 +44,7 @@ from air_orchestrator_service.clients.classifier import ClassifierClient
 from air_orchestrator_service.clients.infra import InfraClient
 from air_orchestrator_service.clients.model_gateway import ModelGatewayClient
 from air_orchestrator_service.clients.rag import RagClient
+from air_orchestrator_service.clients.tools_gateway import ToolsGatewayClient
 from air_orchestrator_service.config import Settings, get_settings
 from air_orchestrator_service.memory.session import build_session_store
 from air_orchestrator_service.observability.logging import configure_logging, get_logger
@@ -62,8 +63,8 @@ The AIR estate's conversational front door.
 Send a message; the platform decides what it needs, gathers it from the specialist
 services, and streams back a grounded answer. It orchestrates and owns no
 capability of its own — retrieval is `air-rag-service`'s, classification
-`air-classifier`'s, read-only calls `air-tools`', mutations `air-action`'s, models
-`air-model-gateway`'s, and stores `air-infra`'s.
+`air-classifier`'s, lookups and changes to business systems `air-tools-gateway`'s,
+models `air-model-gateway`'s, and stores `air-infra`'s.
 
 **Two channels, one engine.** `POST /v1/chat` serves public conversational traffic
 through the customer gateway; `POST /v1/query` serves internal business queries
@@ -172,6 +173,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     key_store = ApiKeyStore.load(resolved)
     # Same rule for prompt pins: a stale pin is a deployment defect (spec 0006).
     PromptRegistry(resolved).validate_pins()
+    # Retired settings sections that are present but disabled (an enabled one has
+    # already failed validation): seen, not silently dropped (spec 0012).
+    for section in resolved.downstream.retired_sections():
+        _log.warning(
+            "settings.retired_section",
+            section=f"downstream.{section}",
+            replacement="downstream.tools_gateway",
+        )
 
     state = AppState(
         settings=resolved,
@@ -185,6 +194,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else None
         ),
         rag=RagClient(resolved.downstream.rag) if resolved.downstream.rag.configured else None,
+        tools_gateway=(
+            ToolsGatewayClient(resolved.downstream.tools_gateway)
+            if resolved.downstream.tools_gateway.configured
+            else None
+        ),
     )
 
     app = FastAPI(

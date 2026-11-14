@@ -217,9 +217,10 @@ The near-term work, in order:
   `memory/`.
 - **Phase 3 — read path.** air-classifier's and air-rag-service's clients exist on the shared
   `clients/base.py` (specs 0005, 0010, 0011). Next: air-tools-gateway behind the same base
-  (spec 0012, **Accepted**, plan and tasks written; identity verification is spec 0014), a planner
-  (schema-constrained JSON decomposition — HLD §9 item 2), inventory discovery from each
-  service's `/v1/capabilities`, and parallel fan-out in `GATHER`. air-rag-service scopes by key, so
+  (spec 0012, **Accepted**, plan and tasks written, with inventory discovery from its
+  `/v1/capabilities` and parallel fan-out in `GATHER`), the planner (spec 0013, **Accepted**:
+  schema-constrained JSON decomposition, HLD §9 item 2) and the customer token that names the
+  shopper (spec 0014, **Accepted**). All three have `plan.md` and `tasks.md`; 0013 builds on 0012's T5/T6, and 0014's T2 and T3 ship together. air-rag-service scopes by key, so
   `RagSettings.tenant_keys` picks the air-rag-service key by the principal's tenant (`REQ-RAG-016`).
   Spec 0011's open gap is the grounding check (`REQ-RAG-014`).
 - **Phase 4 — write path.** air-tools-gateway's propose/execute (spec 0012) behind the

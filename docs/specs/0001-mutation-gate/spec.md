@@ -136,7 +136,7 @@ be indistinguishable from each other to the caller, so every row answers normall
 
 | # | Question | Blocks | Owner |
 | --- | --- | --- | --- |
-| Q1 | Should `REQ-MUT-012` refuse with a 403, or silently take the direct route? A 403 is clearer to a developer; silence reveals less to an attacker probing what a key can do. | Fixing the `REQ-MUT-012` gap | — |
+| Q1 | Should `REQ-MUT-012` refuse with a 403, or silently take the direct route? A 403 is clearer to a developer; silence reveals less to an attacker probing what a key can do. | Fixing the `REQ-MUT-012` gap | **Decided: the direct route**, as AC-5 states (spec 0012 T2). A 403 would tell a prober which keys can write |
 | Q2 | Does `REQ-MUT-007` cancellation survive Phase 2b's Redis backend atomically, or can two concurrent turns both consume one proposal? | 0002 durable sessions | — |
 | Q3 | Should a proposal carry the tenant explicitly, or is reaching it only through a tenant-scoped session sufficient? Spec 0012 `REQ-TGW-019` proposes binding it to the creating `key_id` and `subject` as well; settle both there. | Phase 4 | — |
 
@@ -155,7 +155,7 @@ be indistinguishable from each other to the caller, so every row answers normall
 | `REQ-MUT-009` | GAP — `PendingProposal.is_expired()` gates `take_pending`, but no test drives a confirmation against an expired proposal. `tests/unit/test_config.py::test_proposal_ttl_is_short_and_bounded` only checks the configured bound. Closing it needs an injectable clock or a directly constructed expired `PendingProposal`. |
 | `REQ-MUT-010` | GAP — holds in `engine/turn.py` by construction (`_resolve_confirmation` runs before the text is read), and is implied by `test_prose_that_reads_as_consent_executes_nothing`, but nothing pins the ordering. A refactor could reorder it silently. |
 | `REQ-MUT-011` | GAP — enforced by the data model (`Session.pending` is a single field, and `set_pending` overwrites), so it cannot currently be violated. Worth a test once Redis makes concurrent writes possible — see Q2. |
-| `REQ-MUT-012` | GAP — **unenforced.** `ApiKeyRecord.allow_actions` exists and `ApiKeyRecord.anonymous()` deliberately sets it `false`, but `Principal` does not carry the field and neither `engine/` nor `api/` reads it. `tests/unit/test_channels.py::test_anonymous_identity_cannot_propose_mutations` asserts the record's value, not the behaviour — the name claims more than the test proves. Latent today (nothing executes), a real authorisation hole the moment Phase 4 lands. |
+| `REQ-MUT-012` | `tests/unit/test_channels.py::test_anonymous_identity_cannot_propose_mutations` (drives a `/propose` turn as the anonymous identity) with `tests/unit/test_channels.py::test_a_principal_fails_closed_on_allow_actions` |
 | `REQ-MUT-013` | GAP — `metrics.record_proposal` is called on all four paths, but no test asserts it. |
 | `REQ-MUT-014` | `tests/unit/test_turns.py::test_a_structured_confirmation_executes` (proving the server holds it) with `tests/unit/test_turns.py::test_an_unrelated_turn_cancels_a_pending_proposal` (proving the client's copy is insufficient) |
 
@@ -169,6 +169,9 @@ code or the test names alone:
    anonymous identity's rationale all describe a control that does not exist. The test that
    appears to cover it asserts a dataclass field. This is harmless until `clients/action.py`
    lands and becomes an authorisation bypass the same day it does.
+   **Closed by spec 0012 T2:** `Principal` now carries `allow_actions` (defaulting to
+   `false`, so a principal built without it fails closed), and the engine routes a
+   `/propose` turn from such a key as a direct turn.
 2. **`REQ-MUT-009` — expiry — is implemented but unproved.** The TTL is configured, bounded and
    checked in `take_pending`; no test has ever driven it.
 

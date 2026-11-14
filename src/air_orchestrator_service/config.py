@@ -24,7 +24,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from air_orchestrator_service.constants import Channel, DownstreamService, ModelClass, Route
@@ -199,6 +199,112 @@ class RagSettings(ServiceSettings):
         return not self.tenant_keys or tenant in self.tenant_keys
 
 
+#: A capability name (spec 0012 ``REQ-TGW-002``), or a ``namespace.*`` pattern.
+_CAPABILITY_NAME: re.Pattern[str] = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
+_CAPABILITY_PATTERN: re.Pattern[str] = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*\.\*$")
+
+
+class GatewayKeyPair(BaseModel):
+    """One tenant's two air-tools-gateway keys (spec 0012 §9 Q2).
+
+    Two keys rather than one with two scopes, because the split is what keeps the
+    execute key out of reach of every request but an execute: the read key serves
+    the inventory, lookups and proposals, and the execute key serves execute alone.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    read: SecretStr
+    execute: SecretStr
+
+
+class ChannelAllowList(BaseModel):
+    """Which capabilities each channel may use (spec 0012 ``REQ-TGW-004``, §9 Q4).
+
+    Per channel, because Article I makes the channel decide the tool allow-list.
+    Empty by default: a capability the gateway advertises is usable only once a
+    deployment has said so. A pattern ``orders.*`` admits every capability whose
+    name starts ``orders.``, so a capability added there needs no change here
+    (``REQ-TGW-001``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    customer: list[str] = Field(default_factory=list)
+    business: list[str] = Field(default_factory=list)
+
+    @field_validator("customer", "business")
+    @classmethod
+    def _valid_entries(cls, entries: list[str]) -> list[str]:
+        for entry in entries:
+            if not (_CAPABILITY_NAME.match(entry) or _CAPABILITY_PATTERN.match(entry)):
+                raise ValueError(
+                    f"{entry!r} is neither a capability name nor a 'namespace.*' pattern"
+                )
+        return entries
+
+    def admits(self, channel: Channel, capability: str) -> bool:
+        entries = self.customer if channel is Channel.CUSTOMER else self.business
+        for entry in entries:
+            if entry.endswith(".*"):
+                if capability.startswith(entry[:-1]):
+                    return True
+            elif entry == capability:
+                return True
+        return False
+
+
+class ToolsGatewaySettings(ServiceSettings):
+    """air-tools-gateway (spec 0012): lookups and proposed changes, one service.
+
+    ``api_key`` / ``execute_key`` are a single-tenant pair, used only while
+    ``tenant_keys`` is empty, as ``RagSettings.api_key`` is (``REQ-TGW-007``).
+    """
+
+    timeout_ms: int = Field(default=3000, ge=100, le=30_000)
+    #: Execute talks to a system of record and is never retried
+    #: (``REQ-TGW-018``), so it gets more room than a lookup.
+    execute_timeout_ms: int = Field(default=8000, ge=100, le=30_000)
+    #: Lookups run alongside retrieval (0.2), not after it.
+    deadline_share: float = Field(default=0.3, gt=0, le=1)
+    execute_key: SecretStr | None = None
+    #: This service's tenant -> its gateway key pair. When set, a tenant missing
+    #: from it gets no capabilities. Set as JSON, e.g.
+    #: ``{"brightcart": {"read": "airtg_...", "execute": "airtg_..."}}``.
+    tenant_keys: dict[str, GatewayKeyPair] = Field(default_factory=dict)
+    #: How often a tenant's inventory is refetched, and how long the last good one
+    #: survives failed refreshes (``REQ-TGW-003``, §9 Q3).
+    inventory_ttl_s: int = Field(default=60, ge=5, le=3600)
+    inventory_grace_s: int = Field(default=300, ge=5, le=3600)
+    #: Bound on one lookup result in the prompt (``REQ-TGW-009``).
+    max_result_chars: int = Field(default=4000, ge=200, le=20_000)
+    allow: ChannelAllowList = Field(default_factory=ChannelAllowList)
+
+    @model_validator(mode="after")
+    def _grace_covers_the_ttl(self) -> Self:
+        if self.inventory_grace_s < self.inventory_ttl_s:
+            raise ValueError("inventory_grace_s must be at least inventory_ttl_s")
+        return self
+
+    def keys_for(self, tenant: str) -> GatewayKeyPair | None:
+        """``tenant``'s key pair, or ``None`` when it has no capabilities."""
+        if self.tenant_keys:
+            return self.tenant_keys.get(tenant)
+        if self.api_key is None or self.execute_key is None:
+            return None
+        return GatewayKeyPair(read=self.api_key, execute=self.execute_key)
+
+    def serves(self, tenant: str) -> bool:
+        return self.keys_for(tenant) is not None
+
+
+#: Sections of :class:`DownstreamSettings` that were removed, and what replaced them.
+_RETIRED_DOWNSTREAMS: dict[str, str] = {
+    "tools": "tools_gateway",
+    "action": "tools_gateway",
+}
+
+
 class DownstreamSettings(BaseModel):
     """Defaults are *off*: most of these services are not deployed everywhere.
 
@@ -211,15 +317,39 @@ class DownstreamSettings(BaseModel):
         default_factory=lambda: ClassifierSettings(base_url="http://localhost:8082")
     )
     rag: RagSettings = Field(default_factory=lambda: RagSettings(base_url="http://localhost:8087"))
-    tools: ServiceSettings = Field(
-        default_factory=lambda: ServiceSettings(base_url="http://localhost:8084")
-    )
-    action: ServiceSettings = Field(
-        default_factory=lambda: ServiceSettings(base_url="http://localhost:8085")
+    tools_gateway: ToolsGatewaySettings = Field(
+        default_factory=lambda: ToolsGatewaySettings(base_url="http://localhost:8084")
     )
     recommender: ServiceSettings = Field(
         default_factory=lambda: ServiceSettings(base_url="http://localhost:8086")
     )
+    #: Tombstones for the retired air-tools and air-action sections (spec 0012).
+    #: Typed loosely and excluded from dumps. They exist so that a deployment still
+    #: setting ``DOWNSTREAM__TOOLS__*`` or ``DOWNSTREAM__ACTION__*`` is *seen*
+    #: rather than silently dropped: ignored with a startup warning while disabled,
+    #: refused when enabled (:meth:`_refuse_enabled_retired`).
+    tools: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
+    action: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
+
+    @model_validator(mode="after")
+    def _refuse_enabled_retired(self) -> Self:
+        """Every ``.env`` made by an older ``make env`` sets these sections with
+        ``ENABLED=false``, so refusing them outright would break every checkout.
+        One that *enables* either meant something by it, and booting without the
+        service it asked for would be the quieter failure."""
+        for name, replacement in _RETIRED_DOWNSTREAMS.items():
+            section = getattr(self, name) or {}
+            if str(section.get("enabled", "false")).strip().lower() in {"true", "1", "yes", "on"}:
+                raise ValueError(
+                    f"the 'downstream.{name}' section was retired with spec 0012: "
+                    f"air-tools-gateway now serves it; set "
+                    f"AIR_ORCHESTRATOR_SERVICE__DOWNSTREAM__{replacement.upper()}__* instead"
+                )
+        return self
+
+    def retired_sections(self) -> list[str]:
+        """Retired sections present in the configuration, for a startup warning."""
+        return [name for name in _RETIRED_DOWNSTREAMS if getattr(self, name) is not None]
 
     def for_service(self, service: DownstreamService) -> ServiceSettings | None:
         """Settings for a service, or ``None`` for air-infra/air-model-gateway.
@@ -245,12 +375,14 @@ class DownstreamSettings(BaseModel):
         live: set[Route] = {Route.DIRECT}  # always available: the model gateway alone answers it
         if self.rag.configured:
             live.add(Route.RAG)
-        if self.tools.configured:
+        if self.tools_gateway.configured:
+            # The configuration half. Which of the two a caller is offered depends
+            # on the gateway's live inventory for that caller's channel
+            # (spec 0012, ``REQ-TGW-005``).
             live.add(Route.TOOLS)
+            live.add(Route.ACTION)
         if self.recommender.configured:
             live.add(Route.RECOMMEND)
-        if self.action.configured:
-            live.add(Route.ACTION)
         return frozenset(live)
 
 
@@ -259,8 +391,7 @@ class DownstreamSettings(BaseModel):
 _SERVICE_ATTR: dict[DownstreamService, str] = {
     DownstreamService.CLASSIFIER: "classifier",
     DownstreamService.RAG: "rag",
-    DownstreamService.TOOLS: "tools",
-    DownstreamService.ACTION: "action",
+    DownstreamService.TOOLS_GATEWAY: "tools_gateway",
     DownstreamService.RECOMMENDER: "recommender",
 }
 

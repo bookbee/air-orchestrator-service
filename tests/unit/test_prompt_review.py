@@ -39,6 +39,11 @@ def _review() -> ModuleType:
         ("Would you like me to connect you with someone?", ["offers_to_act"]),
         ("Want me to flag that for you now?", ["offers_to_act"]),
         ("I'll make sure it's handled. Anything else?", ["offers_to_act"]),
+        # Promises a check it cannot make (found reviewing spec 0012; v2 does it too).
+        ("Can you share your order number so I can look into what's going on?", ["promises_check"]),
+        ("What's the order number, so we can see where things stand?", ["promises_check"]),
+        ("Let me check that for you. What's the order number?", ["promises_check"]),
+        ("What's your order number? A person can look into it for you.", []),
         # Runs long.
         ("One. Two. Three. Four. Five. Six?", ["too_long"]),
         # Dead end.
@@ -57,3 +62,28 @@ def test_the_review_set_loads() -> None:
     assert all(c["turns"] and c.get("expect") for c in conversations)
     # Multi-turn on purpose: the persona is judged on a conversation.
     assert any(len(c["turns"]) > 1 for c in conversations)
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        # With lookups, saying it checked is true (spec 0012)...
+        ("I've checked your order 48213 and it's in transit. Anything else?", []),
+        ("I looked up your recent orders: 48213 is on its way. Anything else?", []),
+        # ...but a claimed change is still Article II broken in prose.
+        ("I've cancelled order 55120 for you. Anything else?", ["claims_action"]),
+        ("Your refund has been processed. Let me know if you need more.", ["claims_action"]),
+    ],
+)
+def test_a_lookups_conversation_flags_only_claimed_changes(reply: str, expected: list[str]) -> None:
+    assert _review().flags(reply, lookups=True) == expected
+
+
+def test_a_lookups_conversation_is_skipped_unless_asked_for() -> None:
+    """Without lookups the rule under review never fires, so the case would pass for
+    the wrong reason."""
+    review = _review()
+    needing = [c["name"] for c in review.load_review_set() if c.get("requires") == "lookups"]
+
+    assert needing == ["order-status-with-lookup", "order-status-lookup-fails"]
+    assert frozenset({"lookups"}) == review.REQUIREMENTS

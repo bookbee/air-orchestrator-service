@@ -139,6 +139,79 @@ async def test_each_failure_is_one_reason_and_one_metric(
     assert _count(reason) == before + 1
 
 
+@pytest.mark.parametrize(
+    ("response", "reason"),
+    [
+        (httpx.ConnectError("refused"), "unavailable"),
+        (httpx.ReadTimeout("slow"), "timeout"),
+        (httpx.Response(503), "error"),
+        (httpx.Response(404, json={"detail": "bad"}), "error"),
+        (httpx.Response(200, text="not json"), "error"),
+    ],
+)
+async def test_get_json_fails_with_the_same_four_reasons(
+    client: DownstreamClient, mock: respx.MockRouter, response: Any, reason: str
+) -> None:
+    """REQ-CLB-002 holds for a GET: spec 0012 reads air-tools-gateway's inventory this way."""
+    if isinstance(response, Exception):
+        route = mock.get(_URL).mock(side_effect=response)
+    else:
+        route = mock.get(_URL).mock(return_value=response)
+    before = _count(reason)
+
+    with pytest.raises(DownstreamError) as caught:
+        await client.get_json("/v1/thing", timeout_s=1.0, parse=lambda body: body)
+
+    assert caught.value.reason == reason
+    assert _count(reason) == before + 1
+    assert route.call_count == 1
+    assert _URL not in str(caught.value)
+
+
+async def test_get_json_sends_the_key_and_returns_the_parsed_body(
+    client: DownstreamClient, mock: respx.MockRouter
+) -> None:
+    route = mock.get(_URL).mock(return_value=httpx.Response(200, json={"ok": True}))
+
+    assert await client.get_json("/v1/thing", timeout_s=1.0, parse=lambda body: body) == {
+        "ok": True
+    }
+    assert route.calls.last.request.headers[HEADER_API_KEY] == _KEY
+    assert route.calls.last.request.content == b""
+
+
+@pytest.mark.parametrize("reserved", [HEADER_API_KEY, "x-api-key", HEADER_REQUEST_ID])
+async def test_extra_headers_are_sent_but_never_replace_the_key(
+    client: DownstreamClient, mock: respx.MockRouter, reserved: str
+) -> None:
+    """A call may add ``Idempotency-Key``; it may not choose the key or the request id.
+
+    Refused before any request, so the breaker and the metric see nothing.
+    """
+    route = mock.post(_URL).mock(return_value=httpx.Response(200, json={}))
+
+    await client.post_json(
+        "/v1/thing",
+        {},
+        timeout_s=1.0,
+        parse=lambda body: body,
+        headers={"Idempotency-Key": "airo-prop_1"},
+    )
+    sent = route.calls.last.request.headers
+    assert sent["Idempotency-Key"] == "airo-prop_1"
+    assert sent[HEADER_API_KEY] == _KEY
+
+    with pytest.raises(ValueError, match="api_key="):
+        await client.post_json(
+            "/v1/thing",
+            {},
+            timeout_s=1.0,
+            parse=lambda body: body,
+            headers={reserved: "airr_chosen_by_the_caller"},
+        )
+    assert route.call_count == 1
+
+
 async def test_a_body_that_fails_parsing_is_an_error(
     client: DownstreamClient, mock: respx.MockRouter
 ) -> None:

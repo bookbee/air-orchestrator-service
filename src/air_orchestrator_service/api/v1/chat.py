@@ -70,8 +70,15 @@ async def chat(
     reject_privileged_options(body.options, principal)
 
     engine = TurnEngine(
-        state.settings, state.sessions, state.model_gateway, state.classifier, state.rag
+        state.settings,
+        state.sessions,
+        state.model_gateway,
+        state.classifier,
+        state.rag,
+        planner=state.planner,
+        tools_gateway=state.tools_gateway,
     )
+
     streaming = wants_stream(accept)
     turn = TurnRequest.from_chat(body, stream=streaming)
     # Before the response shape is chosen, so an unknown session is a 404 status

@@ -483,7 +483,8 @@ components:
           type: object
           description: |
             JSON Schema (draft 2020-12) for `arguments`. Must be `type: object` with
-            `additionalProperties: false`, and must not declare `subject` or `tenant`.
+            `additionalProperties: false`, and must not declare `subject` or `tenant` or a top-level
+            `patternProperties`. The orchestrator drops an entry that does.
         requires_subject:
           type: boolean
           description: True when the capability reads or changes one customer's records.

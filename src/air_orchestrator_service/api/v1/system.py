@@ -117,8 +117,7 @@ def _configured_downstreams(state: AppState) -> list[DependencyStatus]:
     for service in (
         DownstreamService.CLASSIFIER,
         DownstreamService.RAG,
-        DownstreamService.TOOLS,
-        DownstreamService.ACTION,
+        DownstreamService.TOOLS_GATEWAY,
         DownstreamService.RECOMMENDER,
     ):
         config = downstream.for_service(service)

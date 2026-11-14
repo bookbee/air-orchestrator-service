@@ -16,8 +16,9 @@ from pydantic import ValidationError
 from air_orchestrator_service.config import Settings
 from air_orchestrator_service.constants import CHANNEL_SCOPES, Channel
 from air_orchestrator_service.main import create_app
+from air_orchestrator_service.schemas.common import Principal
 from air_orchestrator_service.security.api_keys import ApiKeyRecord, ApiKeyStore
-from tests.conftest import CUSTOMER_KEY, TEST_SALT, auth, digest, key_records
+from tests.conftest import CUSTOMER_KEY, TEST_SALT, auth, build_app, digest, key_records
 
 
 async def test_a_header_cannot_choose_the_channel(client: httpx.AsyncClient) -> None:
@@ -65,16 +66,39 @@ def test_every_channel_has_a_declared_scope_set() -> None:
         assert scopes, f"{channel} declares no usable scopes"
 
 
-def test_anonymous_identity_cannot_propose_mutations() -> None:
-    """The development hatch grants read freely and writes never.
+async def test_anonymous_identity_cannot_propose_mutations() -> None:
+    """The development hatch grants read freely and writes never (``REQ-MUT-012``).
 
-    An unauthenticated developer should be able to exercise the read path and still
-    not be able to reach air-action.
+    Driven through a real turn rather than by reading the record's field: the field
+    existed long before anything enforced it. The turn is answered, not refused —
+    a refusal would tell a prober which keys can write.
     """
-    record = ApiKeyRecord.anonymous()
+    settings = Settings.model_validate(
+        {"app": {"env": "test"}, "security": {"allow_unauthenticated": True}}
+    )
+    transport = httpx.ASGITransport(app=build_app(settings))
 
-    assert record.allow_actions is False
-    assert record.scopes == set(CHANNEL_SCOPES[Channel.CUSTOMER])
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        response = await http.post("/v1/chat", json={"message": "please /propose a change"})
+
+    assert response.status_code == httpx.codes.OK, response.text
+    result = response.json()
+    assert result["proposal"] is None
+    assert result["routes"] == ["direct"]
+    assert ApiKeyRecord.anonymous().to_principal().allow_actions is False
+
+
+def test_a_principal_fails_closed_on_allow_actions() -> None:
+    """A principal built without the field may not write; a key record that grants it does."""
+    granted = ApiKeyRecord(
+        id="k", name="k", key_hash=digest("k"), channel=Channel.CUSTOMER, tenant="t"
+    )
+
+    assert granted.to_principal().allow_actions is True
+    assert granted.to_principal().subject is None
+    assert (
+        Principal(key_id="k", name="k", channel=Channel.CUSTOMER, tenant="t").allow_actions is False
+    )
 
 
 def test_anonymous_identity_is_unreachable_through_lookup() -> None:

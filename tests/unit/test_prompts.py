@@ -116,3 +116,18 @@ def test_customer_care_v2_grounds_and_cites() -> None:
     assert "When no sources are given" in v2
     assert "help pages" in v2
     assert "[n]" not in v1
+
+
+def test_the_lookups_message_carries_the_rules_for_using_them() -> None:
+    """Spec 0012 ``REQ-TGW-027``, ``011``: the rules for lookups are in the message that
+    carries them, since only a turn with lookups needs them. The customer prompt is v2,
+    unchanged, and still says it cannot look anything up itself."""
+    from air_orchestrator_service.engine import turn
+
+    assert "never state a detail they do not contain" in turn._LOOKUPS_HEADER
+    assert "marked partial" in turn._LOOKUPS_HEADER
+    assert "Do not mention lookups" in turn._LOOKUPS_HEADER
+    assert "could not check just now, and do not guess" in turn._LOOKUPS_FAILED
+    assert "ask to speak to a person" in turn._LOOKUPS_FAILED
+    assert "You may say you checked" in turn._LOOKUPS_HEADER
+    assert PromptRegistry(_settings()).get(CUSTOMER_CARE).ref == "customer_care:v2"

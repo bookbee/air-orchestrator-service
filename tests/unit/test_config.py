@@ -73,7 +73,7 @@ def test_disabled_cache_does_not_require_a_redis_url() -> None:
 
 
 def test_every_optional_service_defaults_to_disabled() -> None:
-    """air-rag-service, air-tools and air-action are empty repos.
+    """Not every deployment runs every optional service.
 
     Defaulting them on would make a fresh checkout report itself degraded against
     services that do not exist, which trains an operator to ignore the signal.
@@ -83,8 +83,7 @@ def test_every_optional_service_defaults_to_disabled() -> None:
     for service in (
         DownstreamService.CLASSIFIER,
         DownstreamService.RAG,
-        DownstreamService.TOOLS,
-        DownstreamService.ACTION,
+        DownstreamService.TOOLS_GATEWAY,
         DownstreamService.RECOMMENDER,
     ):
         config = downstream.for_service(service)
@@ -167,12 +166,22 @@ def test_a_settings_error_never_renders_a_secret() -> None:
 def test_enabling_a_service_adds_exactly_its_route() -> None:
     settings = _settings(
         downstream={
-            "rag": {"enabled": True, "base_url": "http://rag:8083"},
-            "action": {"enabled": True, "base_url": "http://action:8085"},
+            "rag": {"enabled": True, "base_url": "http://rag:8087"},
+            "recommender": {"enabled": True, "base_url": "http://recommender:8086"},
         }
     )
 
-    assert settings.downstream.routes() == frozenset({Route.DIRECT, Route.RAG, Route.ACTION})
+    assert settings.downstream.routes() == frozenset({Route.DIRECT, Route.RAG, Route.RECOMMEND})
+
+
+def test_the_tools_gateway_backs_both_the_tools_and_the_action_route() -> None:
+    """One service, two routes (spec 0012). Which one a caller is offered depends on
+    the gateway's live inventory for its channel; configuration admits both."""
+    settings = _settings(
+        downstream={"tools_gateway": {"enabled": True, "base_url": "http://gw:8084"}}
+    )
+
+    assert settings.downstream.routes() == frozenset({Route.DIRECT, Route.TOOLS, Route.ACTION})
 
 
 def test_a_service_enabled_without_a_url_is_not_configured() -> None:
@@ -260,3 +269,97 @@ def test_session_cost_ceiling_can_be_configured() -> None:
 def test_competitor_names_default_to_empty() -> None:
     """No fixed vertical to hardcode names for — a deployment's own config."""
     assert _settings().guardrails.competitor_names == []
+
+
+# ── air-tools-gateway (spec 0012) ─────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("section", ["tools", "action"])
+def test_a_disabled_retired_section_is_accepted_and_reported(section: str) -> None:
+    """Every ``.env`` an older ``make env`` wrote sets these with ``ENABLED=false``."""
+    settings = _settings(downstream={section: {"enabled": "false", "base_url": "x"}})
+
+    assert settings.downstream.retired_sections() == [section]
+    assert settings.downstream.tools_gateway.configured is False
+
+
+@pytest.mark.parametrize("section", ["tools", "action"])
+def test_an_enabled_retired_section_refuses_startup_naming_the_replacement(section: str) -> None:
+    with pytest.raises(ValidationError, match="DOWNSTREAM__TOOLS_GATEWAY__"):
+        _settings(downstream={section: {"enabled": "true", "base_url": "http://x:8084"}})
+
+
+def test_no_retired_section_by_default() -> None:
+    assert _settings().downstream.retired_sections() == []
+
+
+def test_tools_gateway_defaults_are_its_port_slot_and_an_empty_allow_list() -> None:
+    gateway = _settings().downstream.tools_gateway
+
+    assert gateway.base_url == "http://localhost:8084"
+    assert gateway.allow.customer == []
+    assert gateway.allow.business == []
+    assert (gateway.inventory_ttl_s, gateway.inventory_grace_s) == (60, 300)
+
+
+def test_the_inventory_grace_must_cover_the_ttl() -> None:
+    with pytest.raises(ValidationError, match="inventory_grace_s"):
+        _settings(downstream={"tools_gateway": {"inventory_ttl_s": 120, "inventory_grace_s": 60}})
+
+
+@pytest.mark.parametrize("entry", ["orders", "Orders.get", "orders.*.get", "*", "orders.", ""])
+def test_an_allow_list_entry_must_be_a_name_or_a_namespace_pattern(entry: str) -> None:
+    with pytest.raises(ValidationError, match="namespace"):
+        _settings(downstream={"tools_gateway": {"allow": {"customer": [entry]}}})
+
+
+def test_an_allow_list_pattern_admits_its_namespace_only() -> None:
+    allow = _settings(
+        downstream={"tools_gateway": {"allow": {"customer": ["orders.*", "store.hours"]}}}
+    ).downstream.tools_gateway.allow
+
+    assert allow.admits(Channel.CUSTOMER, "orders.list_recent")
+    assert allow.admits(Channel.CUSTOMER, "orders.returns.start")
+    assert allow.admits(Channel.CUSTOMER, "store.hours")
+    assert not allow.admits(Channel.CUSTOMER, "ordersx.get")
+    assert not allow.admits(Channel.CUSTOMER, "store.hours_today")
+    assert not allow.admits(Channel.BUSINESS, "orders.list_recent")
+
+
+def test_gateway_keys_are_per_tenant_with_a_single_tenant_fallback() -> None:
+    per_tenant = _settings(
+        downstream={
+            "tools_gateway": {
+                "api_key": "fallback-read",
+                "execute_key": "fallback-exec",
+                "tenant_keys": {"brightcart": {"read": "r1", "execute": "x1"}},
+            }
+        }
+    ).downstream.tools_gateway
+    single = _settings(
+        downstream={"tools_gateway": {"api_key": "r", "execute_key": "x"}}
+    ).downstream.tools_gateway
+    half = _settings(downstream={"tools_gateway": {"api_key": "r"}}).downstream.tools_gateway
+
+    pair = per_tenant.keys_for("brightcart")
+    assert pair is not None
+    assert (pair.read.get_secret_value(), pair.execute.get_secret_value()) == ("r1", "x1")
+    # A map is set, so a tenant missing from it gets nothing, not the fallback.
+    assert per_tenant.keys_for("othershop") is None
+    assert single.serves("anyone")
+    # Both halves are needed: a read key alone could never execute a confirmed change.
+    assert not half.serves("anyone")
+
+
+def test_gateway_keys_never_render() -> None:
+    gateway = _settings(
+        downstream={
+            "tools_gateway": {
+                "tenant_keys": {"brightcart": {"read": "r-secret", "execute": "x-secret"}}
+            }
+        }
+    ).downstream.tools_gateway
+
+    rendered = repr(gateway) + str(gateway.model_dump())
+    assert "r-secret" not in rendered
+    assert "x-secret" not in rendered

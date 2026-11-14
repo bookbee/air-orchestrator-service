@@ -88,7 +88,7 @@ planner (spec 0013, to follow).
 | Id | Level | Requirement |
 | --- | --- | --- |
 | `REQ-TGW-001` | MUST | The capabilities a turn may use come from the gateway's `GET /v1/capabilities`. A capability added there, inside a namespace the channel's allow-list already admits, becomes usable with no code change and no configuration change here. The gateway answers per key, so the inventory is held per tenant, and one tenant's inventory never serves another's turn. |
-| `REQ-TGW-002` | MUST | An inventory entry is dropped, logged once by name, and the rest kept, when any of these fails: the name matches `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$` and is at most 64 characters; `kind` is `read` or `write`; `input_schema` is a JSON Schema object with `additionalProperties: false` that declares no property named `subject` or `tenant` (identity travels in the envelope, `REQ-TGW-008`); the description is at most 1000 characters; a `write` entry's `risk` is `low`, `medium` or `high`. At most 64 entries are kept. |
+| `REQ-TGW-002` | MUST | An inventory entry is dropped, logged once by name, and the rest kept, when any of these fails: the name matches `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$` and is at most 64 characters; `kind` is `read` or `write`; `input_schema` is a JSON Schema object with `additionalProperties: false` that declares no property named `subject` or `tenant` and no top-level `patternProperties`, which could admit either through a pattern (identity travels in the envelope, `REQ-TGW-008`); the description is at most 1000 characters; a `write` entry's `risk` is `low`, `medium` or `high`. At most 64 entries are kept. |
 | `REQ-TGW-003` | MUST | The inventory is refetched at most once per `inventory_ttl_s` (60 s). After a failed refresh the last good inventory keeps serving for at most `inventory_grace_s` (300 s) from its fetch; past that, or with none, the turn has no gateway capabilities. A failed fetch never fails the turn. |
 | `REQ-TGW-004` | MUST NOT | A capability that the principal's channel allow-list does not admit is offered to the planner, called, or proposed. The allow-list is per channel, in settings, as capability names and `namespace.*` patterns. The default for both channels is empty. |
 | `REQ-TGW-005` | MUST | `/v1/capabilities` lists the `tools` route only while the gateway is reachable and offers the caller's channel at least one `read` capability, and the `action` route only for a `write` capability on the same terms. |
@@ -128,6 +128,7 @@ planner (spec 0013, to follow).
 | `REQ-TGW-024` | MUST | The integration double for the gateway enforces `contract.openapi.yaml`'s request shapes (no unknown fields) and key scopes (the read key is refused on execute, and the execute key everywhere else), so a request the real gateway would refuse fails the suite. |
 | `REQ-TGW-025` | MUST NOT | The `route` event lists any capability the turn's plan did not use. The inventory is reconnaissance, which `/v1/capabilities` already gates behind `admin:read`; a customer-channel event stream must not hand it to every caller. |
 | `REQ-TGW-026` | MUST NOT | A `write` capability is offered to the planner or proposed on the business channel, whatever its allow-list admits. |
+| `REQ-TGW-027` | MUST | The rules for using lookup results — state facts exactly as given and nothing they lack, say when a block is partial, never mention the mechanism, and say it could not check when a lookup failed — travel in the lookups message, which is present only on a turn whose plan had lookups. The channel prompt is not changed for them, so a turn without lookups is synthesised with the same prompt as before this spec. A rule that applies only when lookups are present then costs nothing on a turn without them, and that turn needs no new prompt review. |
 
 ## 6. Acceptance criteria
 
@@ -261,17 +262,17 @@ only by tests.
 
 | Id | Proof |
 | --- | --- |
-| `REQ-TGW-001` | DEFERRED — Phase 3 · `tests/unit/test_tools_inventory.py::test_a_new_capability_in_an_allowed_namespace_needs_no_change` |
-| `REQ-TGW-002` | DEFERRED — Phase 3 · `tests/unit/test_tools_inventory.py::test_a_malformed_entry_is_dropped_and_the_rest_kept` |
-| `REQ-TGW-003` | DEFERRED — Phase 3 · `tests/unit/test_tools_inventory.py::test_a_failed_fetch_leaves_no_capabilities_and_the_turn_answers` |
-| `REQ-TGW-004` | DEFERRED — Phase 3 · `tests/unit/test_tools_stage.py::test_a_capability_outside_the_channel_allow_list_is_never_called` |
+| `REQ-TGW-001` | `tests/unit/test_tools_inventory.py::test_a_new_capability_in_an_allowed_namespace_needs_no_change` |
+| `REQ-TGW-002` | `tests/unit/test_tools_inventory.py::test_a_malformed_entry_is_dropped_and_the_rest_kept` |
+| `REQ-TGW-003` | `tests/unit/test_tools_inventory.py::test_a_failed_fetch_leaves_no_capabilities_and_the_turn_answers` (the cache and grace) with `tests/unit/test_tools_stage.py::test_the_gateway_down_degrades_gather_and_the_turn_answers` (the turn) |
+| `REQ-TGW-004` | `tests/unit/test_tools_stage.py::test_a_capability_outside_the_channel_allow_list_is_never_called` |
 | `REQ-TGW-005` | DEFERRED — Phase 3 · `tests/unit/test_system_routes.py::test_capabilities_list_tools_and_action_only_when_the_gateway_offers_them` |
-| `REQ-TGW-006` | DEFERRED — Phase 3 · `tests/unit/test_tools_stage.py::test_an_unknown_name_or_invalid_arguments_are_never_sent` |
-| `REQ-TGW-007` | DEFERRED — Phase 3 · `tests/unit/test_tools_gateway_client.py::test_each_tenant_is_called_with_its_own_key` |
-| `REQ-TGW-008` | DEFERRED — Phase 3 · `tests/unit/test_tools_stage.py::test_the_subject_comes_only_from_the_principal` |
-| `REQ-TGW-009` | DEFERRED — Phase 3 · `tests/unit/test_tools_stage.py::test_a_result_is_screened_delimited_and_cut` |
-| `REQ-TGW-010` | DEFERRED — Phase 3 · `tests/unit/test_tools_stage.py::test_reads_run_concurrently_and_a_failure_degrades_gather` |
-| `REQ-TGW-011` | DEFERRED — Phase 3 · `tests/unit/test_tools_stage.py::test_a_failed_read_puts_a_notice_in_the_prompt` |
+| `REQ-TGW-006` | `tests/unit/test_tools_stage.py::test_an_unknown_name_or_invalid_arguments_are_never_sent` |
+| `REQ-TGW-007` | `tests/unit/test_tools_gateway_client.py::test_each_tenant_is_called_with_its_own_key` |
+| `REQ-TGW-008` | `tests/unit/test_tools_stage.py::test_the_subject_comes_only_from_the_principal` with `tests/unit/test_tools_stage.py::test_a_capability_that_needs_a_customer_is_not_offered_without_one`. The principal is injected with a subject; a verified token supplies it from spec 0014 |
+| `REQ-TGW-009` | `tests/unit/test_tools_stage.py::test_a_result_is_screened_delimited_and_cut` |
+| `REQ-TGW-010` | `tests/unit/test_tools_stage.py::test_reads_run_concurrently_and_a_failure_degrades_gather` |
+| `REQ-TGW-011` | `tests/unit/test_tools_stage.py::test_a_failed_read_puts_a_notice_in_the_prompt` |
 | `REQ-TGW-012` | DEFERRED — Phase 4 · `tests/unit/test_action_execution.py::test_a_proposing_turn_sends_no_execute_request` |
 | `REQ-TGW-013` | DEFERRED — Phase 4 · `tests/unit/test_action_execution.py::test_the_gateway_proposal_id_never_reaches_the_caller` |
 | `REQ-TGW-014` | DEFERRED — Phase 4 · `tests/unit/test_action_execution.py::test_the_proposal_takes_the_earlier_expiry_and_a_known_risk` |
@@ -282,8 +283,9 @@ only by tests.
 | `REQ-TGW-019` | DEFERRED — Phase 4 · `tests/unit/test_action_execution.py::test_a_confirmation_from_another_key_or_subject_executes_nothing` |
 | `REQ-TGW-020` | DEFERRED — Phase 4 · `tests/unit/test_action_execution.py::test_a_key_without_allow_actions_sends_no_propose_request` |
 | `REQ-TGW-021` | DEFERRED — Phase 4 · `tests/unit/test_action_execution.py::test_an_execution_writes_one_audit_line_without_arguments` |
-| `REQ-TGW-022` | DEFERRED — Phase 3 · `tests/unit/test_tools_gateway_client.py::test_every_capability_call_is_counted` |
-| `REQ-TGW-023` | DEFERRED — Phase 3 · `tests/unit/test_system_routes.py::test_the_gateway_is_labelled_air_tools_gateway` |
+| `REQ-TGW-022` | `tests/unit/test_tools_gateway_client.py::test_every_capability_call_is_counted` |
+| `REQ-TGW-023` | `tests/unit/test_system_routes.py::test_the_gateway_is_labelled_air_tools_gateway` |
 | `REQ-TGW-024` | DEFERRED — Phase 3 · `tests/integration/test_tools_gateway_contract.py::test_the_double_refuses_what_the_contract_refuses` |
-| `REQ-TGW-025` | DEFERRED — Phase 3 · `tests/unit/test_tools_stage.py::test_the_route_event_names_only_the_capabilities_used` |
+| `REQ-TGW-025` | `tests/unit/test_tools_stage.py::test_the_route_event_names_only_the_capabilities_used` |
 | `REQ-TGW-026` | DEFERRED — Phase 4 · `tests/unit/test_action_execution.py::test_the_business_channel_is_never_offered_a_write` |
+| `REQ-TGW-027` | `tests/unit/test_tools_stage.py::test_the_rules_for_lookups_travel_only_with_lookups` with `tests/unit/test_prompts.py::test_the_lookups_message_carries_the_rules_for_using_them` |

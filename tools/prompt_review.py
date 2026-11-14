@@ -8,10 +8,15 @@ flags replies that break a rule a machine *can* check:
 
 * ``claims_action``: the reply says it has done something it cannot do ("I've checked
   your order", "your refund has been processed"). That is Article II's rule, broken
-  in prose.
+  in prose. In a conversation marked ``"requires": "lookups"`` the turn really has
+  looked things up (spec 0012), so there only a claimed *change* is flagged.
 * ``offers_to_act``: the reply offers to do something it cannot ("Would you like me to
   connect you?"). A customer who answers "yes" gets nothing, because escalation fires only
   when they ask for a person themselves (``guardrails.escalation``).
+* ``promises_check``: the reply asks for a detail "so I can look into it" / "so I can
+  check". The turn cannot look anything up later; only lookups that come with a message
+  exist (spec 0012). Added while reviewing spec 0012, after the other flags passed it;
+  ``customer_care:v2`` does it too. English only: a reviewer reads the other languages.
 * ``too_long``: more than five sentences or list lines. The prompt asks for two to four.
 * ``no_next_step``: neither of the reply's last two sentences is a question or an offer.
   Two, not one: "Could you share your order number? Once I have it, I can help." ends on
@@ -24,7 +29,13 @@ and after a prompt version change can be compared.
 Not part of ``make check``: it needs a running service, a gateway and real model calls,
 which cost money. Run it with ``make prompt-review`` (``BASE_URL`` / ``KEY`` to override).
 
-Usage: ``prompt_review.py [--base-url URL] [--key KEY] [--only NAME]``
+**Conversations that need lookups.** A conversation marked ``"requires": "lookups"`` is
+meaningful only against a deployment whose turns can look things up: air-tools-gateway
+enabled, a planner that plans lookups (spec 0013) and a key whose turns carry a verified
+customer (spec 0014). Elsewhere it would review a prompt rule that never fires, so it is
+skipped and listed unless ``--lookups`` is given.
+
+Usage: ``prompt_review.py [--base-url URL] [--key KEY] [--only NAME] [--lookups]``
 """
 
 from __future__ import annotations
@@ -51,6 +62,24 @@ _CLAIMS_ACTION = re.compile(
     r"submitted|rebooked|updated)\b",
     re.IGNORECASE,
 )
+#: ``_CLAIMS_ACTION`` less the verbs a turn with lookups may truthfully use.
+_CLAIMS_CHANGE = re.compile(
+    r"\bI(?:'ve| have| just)?\s+(?:gone ahead and\s+)?"
+    r"(?:cancell?ed|refunded|processed|updated|changed|arranged|escalated|raised|submitted|"
+    r"booked|rebooked|issued|initiated|requested|logged|flagged|reported)\b"
+    r"|\b(?:has|have) been (?:cancell?ed|refunded|processed|escalated|arranged|issued|"
+    r"submitted|rebooked|updated)\b",
+    re.IGNORECASE,
+)
+_PROMISES_CHECK = re.compile(
+    r"\bso (?:that )?(?:I|we) can\s+(?:look (?:into|up|at)|check|see (?:where|what)|find out|"
+    r"pull up|track|trace|note|investigate|review)\b"
+    r"|\b(?:I(?:'ll| will)|let me)\s+(?:look (?:into|up)|check|find out|pull up|track|"
+    r"investigate)\b",
+    re.IGNORECASE,
+)
+#: What a conversation's ``requires`` may name.
+REQUIREMENTS = frozenset({"lookups"})
 _OFFERS_TO_ACT = re.compile(
     r"\b(?:would you like|do you want|want|shall|should|can|may) (?:me|I) to\s+"
     r"(?:connect|transfer|flag|escalate|pass|point|put|get|send|forward|raise|log|arrange|"
@@ -73,13 +102,16 @@ def sentences(reply: str) -> list[str]:
     return [part.strip() for part in _SEGMENTS.split(reply.strip()) if part.strip()]
 
 
-def flags(reply: str) -> list[str]:
-    """The rules this reply breaks, by name; empty when it breaks none."""
+def flags(reply: str, *, lookups: bool = False) -> list[str]:
+    """The rules this reply breaks, by name; empty when it breaks none. ``lookups``:
+    the conversation's turns can look things up, so only a claimed change counts."""
     found = []
-    if _CLAIMS_ACTION.search(reply):
+    if (_CLAIMS_CHANGE if lookups else _CLAIMS_ACTION).search(reply):
         found.append("claims_action")
     if _OFFERS_TO_ACT.search(reply):
         found.append("offers_to_act")
+    if not lookups and _PROMISES_CHECK.search(reply):
+        found.append("promises_check")
     parts = sentences(reply)
     if len(parts) > MAX_SENTENCES:
         found.append("too_long")
@@ -94,14 +126,21 @@ def load_review_set(path: pathlib.Path = REVIEW_SET) -> list[dict[str, Any]]:
     for conversation in conversations:
         if not conversation.get("name") or not conversation.get("turns"):
             raise ValueError(f"conversation without a name or turns: {conversation!r}")
+        if conversation.get("requires", "lookups") not in REQUIREMENTS:
+            raise ValueError(f"{conversation['name']}: unknown requires {conversation['requires']!r}")
     return conversations
 
 
-def run(base_url: str, key: str, only: str | None) -> int:
+def run(base_url: str, key: str, only: str | None, *, lookups: bool = False) -> int:
     flagged = 0
+    skipped: list[str] = []
     with httpx.Client(base_url=base_url, timeout=90.0) as http:
         for conversation in load_review_set():
             if only and conversation["name"] != only:
+                continue
+            needs_lookups = conversation.get("requires") == "lookups"
+            if needs_lookups and not lookups:
+                skipped.append(conversation["name"])
                 continue
             print(f"\n=== {conversation['name']}")
             print(f"    expect: {conversation.get('expect', '-')}")
@@ -117,13 +156,15 @@ def run(base_url: str, key: str, only: str | None) -> int:
                     break
                 turn = response.json()
                 session_id = turn["session_id"]
-                found = flags(turn["answer"])
+                found = flags(turn["answer"], lookups=needs_lookups)
                 flagged += bool(found)
                 marker = f"  [{', '.join(found)}]" if found else ""
                 print(f"  customer: {message}")
                 print(f"  agent ({turn['status']}){marker}:")
                 for line in turn["answer"].splitlines() or [""]:
                     print(f"    {line}")
+    if skipped:
+        print(f"\nskipped (need lookups; pass --lookups): {', '.join(skipped)}")
     print(f"\n{flagged} flagged repl{'y' if flagged == 1 else 'ies'}")
     return 1 if flagged else 0
 
@@ -133,8 +174,11 @@ def main() -> int:
     parser.add_argument("--base-url", default="http://127.0.0.1:8081")
     parser.add_argument("--key", default="airo_local_customer_key")
     parser.add_argument("--only", help="run one conversation by name")
+    parser.add_argument(
+        "--lookups", action="store_true", help="also run conversations that need lookups"
+    )
     args = parser.parse_args()
-    return run(args.base_url, args.key, args.only)
+    return run(args.base_url, args.key, args.only, lookups=args.lookups)
 
 
 if __name__ == "__main__":

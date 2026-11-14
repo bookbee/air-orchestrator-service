@@ -30,6 +30,15 @@ class Principal(BaseModel):
         )
     )
     scopes: frozenset[str] = frozenset()
+    #: Copied from the key record, so it is as unforgeable as ``channel``. ``False`` by
+    #: default because a principal built anywhere but a key record — a test, a future
+    #: caller — must fail closed: forgetting the field must not grant writes
+    #: (spec 0001, ``REQ-MUT-012``).
+    allow_actions: bool = False
+    #: The verified shopper this turn acts for, or ``None`` for an anonymous customer
+    #: and on the business channel. Never set from a request body: spec 0014 fills it
+    #: from the verified ``air-token``, and until then it is always ``None``.
+    subject: str | None = None
 
     def has_scope(self, scope: str) -> bool:
         return scope in self.scopes

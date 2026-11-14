@@ -29,6 +29,7 @@ from air_orchestrator_service.constants import (
 __all__ = [
     "CONTENT_TYPE",
     "REGISTRY",
+    "record_capability_call",
     "record_downstream_call",
     "record_escalation",
     "record_guardrail_block",
@@ -118,6 +119,15 @@ _DOWNSTREAM_CALLS = Counter(
     registry=REGISTRY,
 )
 
+#: ``capability`` is bounded: only names from a checked air-tools-gateway
+#: inventory reach it, at most 64 per tenant (spec 0012, ``REQ-TGW-002``/``022``).
+_CAPABILITY_CALLS = Counter(
+    "air_orchestrator_service_capability_calls_total",
+    "Calls to air-tools-gateway capabilities, by capability, kind and outcome.",
+    ["capability", "kind", "outcome"],
+    registry=REGISTRY,
+)
+
 _PROPOSALS = Counter(
     "air_orchestrator_service_proposals_total",
     "Mutation proposals, by what became of them.",
@@ -180,6 +190,12 @@ def record_guardrail_block(*, direction: str, rule: str, channel: Channel) -> No
 def record_downstream_call(*, service: DownstreamService, outcome: str) -> None:
     """``ok`` | ``timeout`` | ``error`` | ``breaker_open`` | ``unavailable``."""
     _DOWNSTREAM_CALLS.labels(service.value, outcome).inc()
+
+
+def record_capability_call(*, capability: str, kind: str, outcome: str) -> None:
+    """``kind`` is ``read`` | ``write``; ``outcome`` is ``ok`` or one of spec 0010's
+    four reasons."""
+    _CAPABILITY_CALLS.labels(capability, kind, outcome).inc()
 
 
 def record_proposal(*, outcome: str) -> None:

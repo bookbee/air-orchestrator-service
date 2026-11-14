@@ -167,6 +167,7 @@ class ApiKeyRecord(BaseModel):
             channel=self.channel,
             tenant=self.tenant,
             scopes=frozenset(self.scopes),
+            allow_actions=self.allow_actions,
         )
 
     @classmethod

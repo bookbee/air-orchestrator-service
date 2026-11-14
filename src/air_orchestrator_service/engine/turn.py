@@ -22,13 +22,15 @@ known once a call returns, which is too late for a cap.
 must always be able to tell a stubbed turn from a real one, and this engine must
 never be mistaken for a complete one in a demo.
 
-**Routing is a rule, not a planner.** ``GATHER`` is real for one capability:
-air-rag-service, on the customer channel, for every turn that will be synthesised (spec
-0011). Its passages reach the prompt numbered and delimited, and each one the
-answer cites by ``[n]`` becomes a ``citation``. Choosing among capabilities needs
-a planner, which arrives with air-tools. Until then the routes are fixed by
-channel and configuration, and ``/propose`` is still the literal trigger for the
-proposal path. A stand-in must not appear to understand intent it does not.
+**Routing is a rule, behind a planner seam.** ``PLAN`` asks a ``Planner``
+(``engine/plan.py``) for the routes and steps, and this module carries them out.
+The default, ``RulePlanner``, is a fixed rule: retrieve on the customer channel
+when air-rag-service serves the tenant, and treat the literal ``/propose`` as the
+trigger for the proposal path. A stand-in must not appear to understand intent it
+does not, so it plans no air-tools-gateway step; spec 0013's model planner will.
+``GATHER`` is real for air-rag-service (spec 0011): its passages reach the prompt
+numbered and delimited, and each one the answer cites by ``[n]`` becomes a
+``citation``.
 
 **Status vocabulary is load-bearing.** ``TurnStatus.DEGRADED`` covers a provider
 failure — the model gateway being slow, down, or refusing this service's
@@ -47,12 +49,15 @@ used is logged with the turn.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from typing import Any, Final
+
+import orjson
 
 from air_orchestrator_service.api.errors import SessionNotFoundError
 from air_orchestrator_service.clients.classifier import (
@@ -69,6 +74,14 @@ from air_orchestrator_service.clients.model_gateway import (
 )
 from air_orchestrator_service.clients.rag import MIN_CALL_MS as RAG_MIN_CALL_MS
 from air_orchestrator_service.clients.rag import Passage, RagClient, RagError, safe_title, safe_uri
+from air_orchestrator_service.clients.tools_gateway import (
+    Capability,
+    Inventory,
+    ToolResult,
+    ToolsGatewayClient,
+    ToolsGatewayError,
+    is_capability_name,
+)
 from air_orchestrator_service.config import Settings
 from air_orchestrator_service.constants import (
     Channel,
@@ -80,6 +93,7 @@ from air_orchestrator_service.constants import (
     StageStatus,
     TurnStatus,
 )
+from air_orchestrator_service.engine.plan import PlanContext, Planner, RulePlanner, Step
 from air_orchestrator_service.guardrails.boundary import delimit
 from air_orchestrator_service.guardrails.escalation import wants_human
 from air_orchestrator_service.guardrails.injection import screen_input
@@ -122,12 +136,6 @@ _TURN_ID_PREFIX: Final[str] = "turn_"
 _PROPOSAL_ID_PREFIX: Final[str] = "prop_"
 _ESCALATION_ID_PREFIX: Final[str] = "esc_"
 
-#: Saying this in a message asks the engine to propose a mutation, so the
-#: propose -> confirm -> execute path can be exercised end to end before
-#: air-action exists (Phase 4). See the module docstring on why routing
-#: itself stays a stand-in this pass.
-PROPOSE_TRIGGER: Final[str] = "/propose"
-
 #: Stages this engine still cannot really run. `SYNTHESISE` is not here any
 #: more — see the module docstring.
 _STUBBED: Final[dict[Stage, str]] = {
@@ -151,6 +159,33 @@ _KB_UNAVAILABLE: Final[str] = (
     "policies, terms or product details, say briefly that you could not check them just "
     "now, and do not state them."
 )
+
+#: Spec 0012, REQ-TGW-009/011: lookups reach the prompt as data, and a lookup that
+#: could not be made is named so the answer says so instead of guessing.
+#: The rules for using lookups travel with them, not in the system prompt
+#: (``REQ-TGW-027``): a turn without lookups keeps the reviewed channel prompt, which
+#: says plainly it cannot look anything up, and this message is the one exception.
+_LOOKUPS_HEADER: Final[str] = (
+    "Results of lookups made for this message in the business systems, one block per "
+    "lookup. Answer from them: state order numbers, statuses, dates and amounts exactly as "
+    "they appear, and never state a detail they do not contain or fill a gap with a typical "
+    "value. You may say you checked. If a block is marked partial, say you are showing only "
+    "some of the records. Do not mention lookups, results or blocks to the customer."
+)
+_LOOKUPS_FAILED: Final[str] = (
+    "These lookups could not be made for this message: {names}. If the answer depends on "
+    "them, say briefly that you could not check just now, and do not guess. Offer to try "
+    "again in a little while, or tell the customer they can ask to speak to a person."
+)
+#: How a failed lookup reads in `GATHER`'s detail, by spec 0010's reason word.
+_LOOKUP_FAILURE: Final[dict[str, str]] = {
+    "timeout": "timed out",
+    "unavailable": "unreachable",
+    "error": "failed",
+    "breaker_open": "circuit open",
+}
+#: The shortest bound worth a lookup; below it the turn reports the deadline instead.
+_LOOKUP_MIN_MS: Final[int] = 100
 
 _SYNTHESIS_MAX_TOKENS: Final[int] = 800
 
@@ -235,8 +270,13 @@ class TurnEngine:
         model_gateway: ModelGatewayClient,
         classifier: ClassifierClient | None = None,
         rag: RagClient | None = None,
+        planner: Planner | None = None,
+        tools_gateway: ToolsGatewayClient | None = None,
     ) -> None:
         self._settings = settings
+        #: Decides the routes and steps at ``PLAN`` (spec 0012 T5). Today's rule
+        #: unless one is given.
+        self._planner: Planner = planner or RulePlanner()
         self._sessions = sessions
         self._gateway = model_gateway
         #: ``None`` when air-classifier is not configured (spec 0005).
@@ -248,6 +288,12 @@ class TurnEngine:
         self._sources: list[Passage] = []
         self._kb_unavailable = False
         self._retrieval_cost_usd = 0.0
+        #: ``None`` when air-tools-gateway is not configured (spec 0012).
+        self._tools_gateway = tools_gateway
+        #: What `GATHER` looked up for this turn, as ``(capability, text, partial)``,
+        #: and what it could not. Per request, like `_sources`.
+        self._lookups: list[tuple[str, str, bool]] = []
+        self._lookup_notices: list[str] = []
         self._prompts = PromptRegistry(settings)
         #: Set by `_pipeline` when it degrades a turn — an async generator has
         #: no return value, so this is how `run()` learns the outcome once
@@ -478,27 +524,34 @@ class TurnEngine:
 
         async for event in self._stage(Stage.PLAN):
             yield event
-        propose = PROPOSE_TRIGGER in masked_text.lower() and confirmed is None
-        needs_model = confirmed is None and not propose
-        retrieve = (
-            needs_model
-            and self._rag is not None
-            and principal.channel is Channel.CUSTOMER
-            and self._rag.settings.serves(principal.tenant)
+        offered = await self._turn_inventory(
+            principal,
+            confirming=confirmed is not None,
+            deadline_at=turn_started + deadline_s,
+            deadline_s=deadline_s,
         )
-        if propose:
-            routes = [Route.ACTION]
-            reason = f"'{PROPOSE_TRIGGER}' present, exercising the proposal path"
-        elif retrieve:
-            routes = [Route.RAG]
-            reason = "customer message: answer from the knowledge base"
-        else:
-            routes = [Route.DIRECT]
-            reason = "direct answer"
+        plan = await self._planner.plan(
+            PlanContext(
+                text=masked_text,
+                principal=principal,
+                confirming=confirmed is not None,
+                rag_serves=self._rag is not None and self._rag.settings.serves(principal.tenant),
+                offered=offered,
+            )
+        )
+        propose = plan.stand_in_proposal
+        needs_model = confirmed is None and not propose
+        retrieve = needs_model and plan.retrieve
         yield RouteEvent(
-            routes=routes,
-            reason=reason,
-            capabilities=[DownstreamService.RAG.value] if retrieve else [],
+            routes=list(plan.routes),
+            reason=plan.reason,
+            # Only what the plan uses, and only names the inventory holds: a name
+            # the planner made up is never echoed (REQ-TGW-025).
+            capabilities=[
+                name
+                for name in plan.capabilities
+                if name == DownstreamService.RAG.value or offered.get(name) is not None
+            ],
         )
 
         async for event in self._gather(
@@ -506,6 +559,8 @@ class TurnEngine:
             principal,
             retrieve=retrieve,
             needs_model=needs_model,
+            reads=plan.reads if needs_model else (),
+            offered=offered,
             deadline_at=turn_started + deadline_s,
             deadline_s=deadline_s,
         ):
@@ -831,10 +886,55 @@ class TurnEngine:
         *,
         retrieve: bool,
         needs_model: bool,
+        reads: tuple[Step, ...],
+        offered: Inventory,
         deadline_at: float,
         deadline_s: float,
     ) -> AsyncIterator[Event]:
-        """The ``GATHER`` stage (spec 0011): one stage event, whatever happens.
+        """The ``GATHER`` stage (specs 0011, 0012): one stage event, whatever happens.
+
+        Retrieval and the plan's lookups run concurrently, each bounded by its own
+        share of the turn's deadline (``REQ-RAG-004``, ``REQ-TGW-010``), and the one
+        event reports both. With no lookups planned, the event is retrieval's alone,
+        exactly as before spec 0012. ``StageEvent.downstream`` is one field, so when
+        both fail it names air-rag first and the detail names both.
+        """
+        started = time.perf_counter()
+        retrieval, lookups = await asyncio.gather(
+            self._retrieval_part(
+                masked_text,
+                principal,
+                retrieve=retrieve,
+                needs_model=needs_model,
+                deadline_at=deadline_at,
+                deadline_s=deadline_s,
+            ),
+            self._lookup_part(
+                principal, reads, offered, deadline_at=deadline_at, deadline_s=deadline_s
+            ),
+        )
+        status, detail, downstream = _combine(retrieval, lookups)
+        latency_ms = round((time.perf_counter() - started) * 1000, 3)
+        metrics.record_stage(stage=Stage.GATHER, status=status, duration_s=latency_ms / 1000)
+        yield StageEvent(
+            stage=Stage.GATHER,
+            status=status,
+            latency_ms=latency_ms,
+            detail=detail,
+            downstream=downstream,
+        )
+
+    async def _retrieval_part(
+        self,
+        masked_text: str,
+        principal: Principal,
+        *,
+        retrieve: bool,
+        needs_model: bool,
+        deadline_at: float,
+        deadline_s: float,
+    ) -> _Part:
+        """air-rag-service's half of ``GATHER`` (spec 0011).
 
         Retrieval is for grounding an answer, so it runs only on a customer turn that
         will be synthesised. It is bounded like classification: a share of the turn's
@@ -845,7 +945,6 @@ class TurnEngine:
         (HLD §7, ``REQ-RAG-011``). That differs from ``CLASSIFY``, whose verdict
         nothing reads yet.
         """
-        started = time.perf_counter()
         status, detail, downstream = StageStatus.SKIPPED, None, None
         if self._rag is None:
             detail = "air-rag is not configured"
@@ -890,15 +989,143 @@ class TurnEngine:
                         dropped=dropped,
                         top_score=max((p.score for p in retrieval.citations), default=None),
                     )
-        latency_ms = round((time.perf_counter() - started) * 1000, 3)
-        metrics.record_stage(stage=Stage.GATHER, status=status, duration_s=latency_ms / 1000)
-        yield StageEvent(
-            stage=Stage.GATHER,
-            status=status,
-            latency_ms=latency_ms,
-            detail=detail,
-            downstream=downstream,
+        return status, detail, downstream
+
+    async def _turn_inventory(
+        self, principal: Principal, *, confirming: bool, deadline_at: float, deadline_s: float
+    ) -> Inventory:
+        """What this turn may use from air-tools-gateway, fetched at ``PLAN`` so the
+        planner chooses from it and the ``route`` event can be checked against it.
+        Empty, with no request, when there is nothing it could be used for: no
+        gateway, a confirmation turn, a tenant without keys, or a channel whose
+        allow-list is empty (``REQ-TGW-004``, ``007``). Never raises (``REQ-TGW-003``)."""
+        gateway = self._tools_gateway
+        if gateway is None or confirming or not gateway.settings.serves(principal.tenant):
+            return Inventory()
+        allow = gateway.settings.allow
+        if not (allow.customer if principal.channel is Channel.CUSTOMER else allow.business):
+            return Inventory()
+        bound_s = gateway.bound_s(_remaining(deadline_at), deadline_s=deadline_s)
+        if bound_s * 1000 < _LOOKUP_MIN_MS:
+            return Inventory(available=False)
+        inventory = await gateway.inventory(principal.tenant, timeout_s=bound_s)
+        return inventory.offered_to(principal, gateway.settings)
+
+    async def _lookup_part(
+        self,
+        principal: Principal,
+        reads: tuple[Step, ...],
+        offered: Inventory,
+        *,
+        deadline_at: float,
+        deadline_s: float,
+    ) -> _Part | None:
+        """air-tools-gateway's half of ``GATHER`` (spec 0012), or ``None`` when the
+        plan has no lookups.
+
+        Every step is checked before anything is sent: its name must be a ``read``
+        capability in the turn's inventory, already narrowed to the channel's
+        allow-list (``REQ-TGW-004``), and its arguments must validate
+        (``REQ-TGW-006``). The subject is the principal's, never an argument
+        (``REQ-TGW-008``). The surviving calls run concurrently (``REQ-TGW-010``).
+        Each result is screened, cut and later delimited (``REQ-TGW-009``). A step
+        that is dropped or fails becomes a notice in the prompt (``REQ-TGW-011``).
+        """
+        if not reads:
+            return None
+        gateway = self._tools_gateway
+        if gateway is None:
+            self._notice(step.capability for step in reads)
+            return StageStatus.SKIPPED, "air-tools-gateway is not configured", None
+        if not offered.available:
+            self._last_status = TurnStatus.DEGRADED
+            self._notice(step.capability for step in reads)
+            return (
+                StageStatus.DEGRADED,
+                "air-tools-gateway is unavailable",
+                DownstreamService.TOOLS_GATEWAY,
+            )
+
+        parts: list[str] = []
+        valid: list[tuple[Capability, Step]] = []
+        for step in reads:
+            capability = offered.get(step.capability)
+            if capability is None or capability.kind != "read":
+                parts.append(f"{_label(step.capability)} dropped: not offered")
+                self._notice([step.capability])
+            elif capability.argument_errors(step.arguments):
+                parts.append(f"{step.capability} dropped: invalid arguments")
+                self._notice([step.capability])
+            else:
+                valid.append((capability, step))
+
+        outcomes = await asyncio.gather(
+            *(
+                self._lookup(capability, step, principal, deadline_at, deadline_s)
+                for capability, step in valid
+            )
         )
+        gateway_failed = late = False
+        max_chars = gateway.settings.max_result_chars
+        for (capability, _step), outcome in zip(valid, outcomes, strict=True):
+            name = capability.name
+            if outcome is None:
+                late = True
+                parts.append(f"{name} skipped: turn deadline too close")
+                self._notice([name])
+            elif isinstance(outcome, str):
+                gateway_failed = True
+                parts.append(f"{name} {_LOOKUP_FAILURE.get(outcome, 'failed')}")
+                self._notice([name])
+            else:
+                full = orjson.dumps(outcome.data, option=orjson.OPT_SORT_KEYS).decode()
+                text = full[:max_chars]
+                if screen_input(text).blocked:
+                    parts.append(f"{name} dropped: failed the injection screen")
+                    self._notice([name])
+                    continue
+                self._lookups.append((name, text, outcome.truncated or len(full) > max_chars))
+                parts.append(f"{name} ok")
+
+        if gateway_failed or late:
+            self._last_status = TurnStatus.DEGRADED
+            return (
+                StageStatus.DEGRADED,
+                "; ".join(parts),
+                DownstreamService.TOOLS_GATEWAY if gateway_failed else None,
+            )
+        return StageStatus.OK, "; ".join(parts), None
+
+    async def _lookup(
+        self,
+        capability: Capability,
+        step: Step,
+        principal: Principal,
+        deadline_at: float,
+        deadline_s: float,
+    ) -> ToolResult | str | None:
+        """One lookup: its result, the failure's reason word, or ``None`` when the
+        turn has no time left for it."""
+        assert self._tools_gateway is not None
+        bound_s = self._tools_gateway.bound_s(_remaining(deadline_at), deadline_s=deadline_s)
+        if bound_s * 1000 < _LOOKUP_MIN_MS:
+            return None
+        try:
+            return await self._tools_gateway.run(
+                capability,
+                step.arguments,
+                tenant=principal.tenant,
+                subject=principal.subject,
+                timeout_s=bound_s,
+            )
+        except ToolsGatewayError as exc:
+            return exc.reason
+
+    def _notice(self, names: Iterable[str]) -> None:
+        for name in names:
+            label = _label(name)
+            if label not in self._lookup_notices:
+                self._lookup_notices.append(label)
 
     def _select(self, passages: list[Passage]) -> tuple[list[Passage], int]:
         """The passages the prompt may carry, and how many the injection screen
@@ -919,6 +1146,26 @@ class TurnEngine:
                 continue
             chosen.append(passage.model_copy(update={"snippet": snippet}))
         return chosen, dropped
+
+    def _lookups_message(self) -> dict[str, str] | None:
+        """The system message that carries ``GATHER``'s lookups into the prompt, or
+        ``None`` when none were planned (``REQ-TGW-009``/``011``). Each result is its
+        own delimited block, so a value inside one cannot pose as another's."""
+        if not self._lookups and not self._lookup_notices:
+            return None
+        sections: list[str] = []
+        if self._lookups:
+            blocks = "\n\n".join(
+                delimit(
+                    f"{name}{' (partial: not every record is shown)' if partial else ''}\n{text}",
+                    source="tool_result",
+                )
+                for name, text, partial in self._lookups
+            )
+            sections.append(f"{_LOOKUPS_HEADER}\n\n{blocks}")
+        if self._lookup_notices:
+            sections.append(_LOOKUPS_FAILED.format(names=", ".join(self._lookup_notices)))
+        return {"role": "system", "content": "\n\n".join(sections)}
 
     def _sources_message(self) -> dict[str, str] | None:
         """The system message that carries ``GATHER``'s result into the prompt, or
@@ -1029,6 +1276,8 @@ class TurnEngine:
         # this message only, and are never stored in the session.
         if (sources := self._sources_message()) is not None:
             messages.append(sources)
+        if (lookups := self._lookups_message()) is not None:
+            messages.append(lookups)
         for turn in session.turns:
             messages.append({"role": turn.role, "content": turn.content})
         # Only the newest turn is demarcated, not replayed history: prior
@@ -1318,6 +1567,32 @@ def _structured_messages(masked_text: str) -> list[dict[str, str]]:
         {"role": "system", "content": "Answer as JSON matching the given schema exactly."},
         {"role": "user", "content": delimit(masked_text, source="customer_message")},
     ]
+
+
+#: One half of ``GATHER``: its status, its detail, and the service to blame.
+_Part = tuple[StageStatus, str | None, DownstreamService | None]
+
+
+def _combine(retrieval: _Part, lookups: _Part | None) -> _Part:
+    """One ``GATHER`` event from its two halves. With no lookups, retrieval's own;
+    with retrieval not in play, the lookups' own; else the worse status, both
+    details, and air-rag named first."""
+    if lookups is None:
+        return retrieval
+    if retrieval[0] is StageStatus.SKIPPED:
+        return lookups
+    degraded = StageStatus.DEGRADED in (retrieval[0], lookups[0])
+    return (
+        StageStatus.DEGRADED if degraded else StageStatus.OK,
+        f"{retrieval[1]}; {lookups[1]}",
+        retrieval[2] or lookups[2],
+    )
+
+
+def _label(name: str) -> str:
+    """A planned capability name as it may appear in a prompt or a stage detail: a
+    made-up one is model output and is never echoed."""
+    return name if is_capability_name(name) else "an unrecognised lookup"
 
 
 def _remaining(deadline_at: float | None) -> float | None:

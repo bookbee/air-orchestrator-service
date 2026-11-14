@@ -14,7 +14,7 @@ they used rather than at the scopes they granted.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Annotated, Final
 
 from fastapi import Depends, Header, Request
@@ -30,8 +30,10 @@ from air_orchestrator_service.clients.classifier import ClassifierClient
 from air_orchestrator_service.clients.infra import InfraClient
 from air_orchestrator_service.clients.model_gateway import ModelGatewayClient
 from air_orchestrator_service.clients.rag import RagClient
+from air_orchestrator_service.clients.tools_gateway import ToolsGatewayClient
 from air_orchestrator_service.config import Settings
 from air_orchestrator_service.constants import Channel
+from air_orchestrator_service.engine.plan import Planner, RulePlanner
 from air_orchestrator_service.memory.session import InMemorySessionStore
 from air_orchestrator_service.observability.logging import bind_request_context, get_logger
 from air_orchestrator_service.schemas.common import Principal
@@ -72,10 +74,20 @@ class AppState:
     classifier: ClassifierClient | None = None
     #: ``None`` unless ``downstream.rag`` is configured (spec 0011).
     rag: RagClient | None = None
+    #: ``None`` unless ``downstream.tools_gateway`` is configured (spec 0012). The
+    #: read-key client only: it has no execute-shaped method.
+    tools_gateway: ToolsGatewayClient | None = None
+    #: Decides each turn's routes and steps (spec 0012 T5). One per app, so a test
+    #: swaps it with ``dataclasses.replace`` on an otherwise real app.
+    planner: Planner = field(default_factory=RulePlanner)
 
     def optional_clients(self) -> list[DownstreamClient]:
         """The optional downstreams this deployment has clients for (spec 0010)."""
-        return [client for client in (self.classifier, self.rag) if client is not None]
+        return [
+            client
+            for client in (self.classifier, self.rag, self.tools_gateway)
+            if client is not None
+        ]
 
 
 def get_app_state(request: Request) -> AppState:
