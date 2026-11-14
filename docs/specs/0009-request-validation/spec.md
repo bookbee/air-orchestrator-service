@@ -97,8 +97,19 @@ Each refusal is a problem response with its `request_id`, and the access log rec
 
 | # | Question | Blocks | Owner |
 | --- | --- | --- | --- |
-| Q1 | Should an unknown or expired `confirm.proposal_id` be visible to the caller (OR-004 part 2)? Article II says no, so that the response cannot probe proposal ids. But a proposal is scoped to the caller's own session, so the only ids it could probe are ones the caller was already shown. If yes, Article II needs an amendment first. | OR-004 part 2 | user |
-| Q2 | Add `jsonschema` as a runtime dependency for `REQ-VAL-007`? | `REQ-VAL-007` | user |
+| — | None open. Both questions below were decided on 2026-11-14. | — | — |
+
+**Decided 2026-11-14.**
+
+- **Q1: should an unknown or expired `confirm.proposal_id` be visible to the caller (OR-004 part 2)?**
+  No. Article II stands: such a confirmation answers normally and executes nothing. A proposal is
+  scoped to the caller's own session, so the probing risk is small. But the article's rule is
+  simple and already proved by tests, and the client that sent the confirm already knows which
+  proposal it named. So a client that wants to say "that approval has expired" can do so
+  without the service saying it.
+- **Q2: add `jsonschema` as a runtime dependency for `REQ-VAL-007`?** No. The structural check in
+  `REQ-VAL-004` covers the shapes SIT found, and `REQ-VAL-007` stays a declared gap rather than
+  adding a dependency.
 
 ## 10. Traceability
 
@@ -110,4 +121,4 @@ Each refusal is a problem response with its `request_id`, and the access log rec
 | `REQ-VAL-004` | `tests/unit/test_request_validation.py::test_an_invalid_output_schema_is_a_422` · `tests/unit/test_request_validation.py::test_a_valid_output_schema_is_accepted` |
 | `REQ-VAL-005` | `tests/unit/test_request_validation.py::test_an_empty_route_list_is_a_422` |
 | `REQ-VAL-006` | `tests/unit/test_request_validation.py::test_an_unauthenticated_bad_body_is_a_401` |
-| `REQ-VAL-007` | GAP — a structural check covers the shapes SIT found; the full metaschema needs the `jsonschema` dependency (Q2) |
+| `REQ-VAL-007` | GAP — a structural check covers the shapes SIT found; the full metaschema needs the `jsonschema` dependency, declined for now (§9, Q2) |

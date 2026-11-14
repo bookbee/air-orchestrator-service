@@ -99,7 +99,7 @@ the turn and session ceilings.
 
 | # | Question | Blocks | Owner |
 | --- | --- | --- | --- |
-| Q1 | Should air-model-gateway accept a per-call cost cap, so the ceiling is enforced where the price table lives? Cross-repo, tracked for HLD §9. | Retiring `REQ-COST-004` | — |
+| Q1 | Should air-model-gateway accept a per-call cost cap, so the ceiling is enforced where the price table lives? Cross-repo, tracked as [HLD §9](../../01-hld.md) item 3. Until then the configured rates stay; decided 2026-11-14. | Retiring `REQ-COST-004` | air-model-gateway |
 
 ## 10. Traceability
 

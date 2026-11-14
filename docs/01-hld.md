@@ -251,7 +251,7 @@ honest exception of the model gateway itself.
 ## 9. Gaps this design opens in air-model-gateway
 
 Tracked against air-model-gateway (they were opened against air-llm, which it replaced). They are
-needed for the diagram's full shape, and neither blocks the phases as ordered:
+needed for the diagram's full shape, and none blocks the phases as ordered:
 
 1. **Streaming — closed.** The gateway streams `/v1/generate`; this service relays it as
    `answer.delta` (§5, spec 0004).
@@ -261,3 +261,10 @@ needed for the diagram's full shape, and neither blocks the phases as ordered:
    schema-constrained JSON decomposition over the `json_schema` support the gateway already has,
    behind the same interface, so adopting native tool-calling later is an implementation swap
    rather than a contract change. *Wanted before Phase 3; not blocking.*
+3. **A per-call cost cap — open.** `/v1/generate` takes no cost limit, and the gateway publishes
+   no prices. So this service enforces the turn ceiling against its own estimate, priced from
+   configured rates (`turn.estimate.*`, spec 0008 `REQ-COST-004`). Those rates are the list
+   prices of the dearest model the `cloud` class reaches today. If the gateway's routing
+   reaches a dearer model and the rates are not raised with it, turns can overspend
+   silently. A `max_cost_usd` on `/v1/generate`, or a published price table, would move
+   enforcement to where the prices live and retire the estimate. *Not blocking.*
