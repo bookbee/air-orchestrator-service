@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from air_orchestrator_service.guardrails import pii
 from air_orchestrator_service.guardrails.pii import StreamRedactor, mask_input, scan_output
 
 # ── Input ─────────────────────────────────────────────────────────────────────
@@ -13,6 +16,53 @@ def test_an_email_is_masked() -> None:
     assert "jane.doe@example.com" not in result.masked_text
     assert "[EMAIL]" in result.masked_text
     assert "email" in result.categories
+
+
+@pytest.mark.parametrize(
+    "card",
+    [
+        "4111 1111 1111 1111",
+        "4111-1111-1111-1111",
+        "4111111111111111",
+        "5500 0000 0000 0004",
+        "3782 822463 10005",  # Amex, 4-6-5
+    ],
+)
+def test_a_card_number_is_masked_on_input(card: str) -> None:
+    """Spec 0007, ``REQ-PII-001``/``002``: the five formats SIT found (OR-001), none
+    left half-masked by the phone rule."""
+    result = mask_input(f"My card {card} was charged twice.")
+
+    assert result.masked_text == "My card [CARD] was charged twice."
+    assert result.categories == ["credit_card"]
+
+
+def test_a_non_luhn_digit_run_is_not_masked_as_a_card() -> None:
+    """``REQ-PII-003``: an order id this long is not a card, and is not a phone
+    number either."""
+    for text in ("Order 1234567812345678 is late.", "Order 1234 5678 1234 5678 is late."):
+        result = mask_input(text)
+
+        assert result.masked_text == text
+        assert result.categories == []
+
+
+def test_a_card_next_to_other_pii_masks_both() -> None:
+    result = mask_input("Card 4111 1111 1111 1111, call me on 555 123 4567.")
+
+    assert result.masked_text == "Card [CARD], call me on [PHONE]."
+    assert result.categories == ["credit_card", "phone"]
+
+
+def test_input_and_output_share_one_card_rule() -> None:
+    """``REQ-PII-005``: the two directions drifted once; one pattern means they cannot."""
+    assert pii._OUTPUT_PATTERNS["credit_card"] is pii._CARD_PATTERN
+    text = "Card 3782 822463 10005 and order 1234567812345678."
+
+    assert "[CARD]" in mask_input(text).masked_text
+    assert "10005" not in mask_input(text).masked_text
+    assert scan_output(text).categories == ["credit_card"]
+    assert "1234567812345678" in scan_output(text).safe_text
 
 
 def test_a_self_introduced_name_is_masked() -> None:

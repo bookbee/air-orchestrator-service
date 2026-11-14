@@ -381,6 +381,32 @@ async def test_pii_in_a_message_is_masked_before_it_is_stored(
     assert "[EMAIL]" in stored
 
 
+async def test_a_card_number_is_never_stored_or_forwarded(
+    app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """Spec 0007, ``REQ-PII-004``: neither the session nor the gateway sees the digits."""
+    gateway = _gateway(app)
+    sent: list[list[dict[str, str]]] = []
+    canned = gateway.generate
+
+    async def recording(*, messages: list[dict[str, str]], **kwargs: Any) -> GenerateResult:
+        sent.append(messages)
+        result: GenerateResult = await canned(messages=messages, **kwargs)
+        return result
+
+    gateway.generate = recording
+    result = await _chat(client, message="My card 4111 1111 1111 1111 was charged twice.")
+
+    view = await client.get(f"/v1/sessions/{result['session_id']}", headers=auth(CUSTOMER_KEY))
+    stored = view.json()["turns"][0]["content"]
+    forwarded = sent[0][-1]["content"]
+
+    assert "[CARD]" in stored
+    assert "[CARD]" in forwarded
+    assert "4111" not in stored
+    assert "4111" not in forwarded
+
+
 # ── The model gateway's answers and failures (spec 0003) ──────────────────────
 
 
