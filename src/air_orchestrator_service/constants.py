@@ -125,6 +125,8 @@ class DownstreamService(StrEnum):
     #: change for dashboards rather than drift (Article VI).
     MODEL_GATEWAY = "air-model-gateway"
     CLASSIFIER = "air-classifier"
+    #: The repo is now air-rag-service. This value stays: it is a wire and metric
+    #: label, and a repo rename is not a reason to break callers and dashboards.
     RAG = "air-rag"
     TOOLS = "air-tools"
     ACTION = "air-action"

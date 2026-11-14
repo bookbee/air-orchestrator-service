@@ -135,6 +135,16 @@ class ServiceSettings(BaseModel):
     base_url: str = ""
     api_key: SecretStr | None = None
     timeout_ms: int = Field(default=5000, ge=1, le=120_000)
+    #: The most of the turn's whole deadline one call may use. A downstream call is
+    #: enrichment; the answer is the product (spec 0005 ``REQ-CLS-014``, spec 0011
+    #: ``REQ-RAG-004``).
+    deadline_share: float = Field(default=0.25, gt=0, le=1)
+    #: ``GET /v1/health`` on ``/v1/capabilities`` (spec 0010, ``REQ-CLB-007``).
+    health_timeout_ms: int = Field(default=2000, ge=1, le=30_000)
+    #: Consecutive failures that open this service's breaker, and how long it stays
+    #: open before one call tests it (spec 0010, ``REQ-CLB-004``/``005``).
+    breaker_threshold: int = Field(default=5, ge=1, le=1000)
+    breaker_cooldown_s: float = Field(default=30.0, gt=0, le=3600)
 
     @property
     def configured(self) -> bool:
@@ -148,13 +158,49 @@ class ClassifierSettings(ServiceSettings):
     #: (``REQ-CLS-016``). ``None`` sends nothing, and the classifier's own default
     #: applies. ``t2_local_llm`` keeps customer text on-premises and free.
     max_tier: Literal["t0_rules", "t1_classifier", "t2_local_llm", "t3_cloud_llm"] | None = None
-    #: The most of the turn's whole deadline classification may use
-    #: (``REQ-CLS-014``). Classification is enrichment; the answer is the product.
-    deadline_share: float = Field(default=0.25, gt=0, le=1)
+
+
+class RagSettings(ServiceSettings):
+    """air-rag-service (spec 0011): how much to ask for, and how much of it to use.
+
+    air-rag-service has no minimum-score or latency option, so the filtering is done here.
+    The defaults keep the sources block in the prompt to roughly 5k characters.
+    """
+
+    deadline_share: float = Field(default=0.2, gt=0, le=1)
+    #: Passages to ask air-rag-service for. More than ``max_passages``, so the score filter
+    #: has something to choose among.
+    top_k: int = Field(default=6, ge=1, le=50)
+    #: Passages that may reach the prompt (``REQ-RAG-005``).
+    max_passages: int = Field(default=4, ge=1, le=20)
+    #: air-rag-service's score is cosine similarity, clamped to 0..1. Measured on the SIT
+    #: corpus with local-768-v1 (nomic-embed-text), relevant top hits scored 0.55 to 0.81
+    #: and off-topic queries' top hits 0.39 to 0.48, so 0.5 separates them. One corpus
+    #: and one model: re-measure when real documents or another embedding model land.
+    min_score: float = Field(default=0.5, ge=0, le=1)
+    #: Each passage's snippet is cut to this many characters.
+    snippet_chars: int = Field(default=1200, ge=100, le=8000)
+    #: This service's tenant -> the air-rag-service key for it (spec 0011, ``REQ-RAG-016``).
+    #: air-rag-service searches only the tenant on the calling key's record, so this map is
+    #: what keeps one tenant's documents out of another's turns. When it is set, a
+    #: tenant missing from it does not retrieve (``REQ-RAG-017``). When it is empty,
+    #: ``api_key`` serves every tenant: a single-tenant deployment. Set as JSON, e.g.
+    #: ``{"tenant-a": "airr_..."}``.
+    tenant_keys: dict[str, SecretStr] = Field(default_factory=dict)
+
+    def key_for(self, tenant: str) -> SecretStr | None:
+        """The air-rag-service key to call with for ``tenant``, or ``None`` when this tenant
+        has no knowledge base. ``api_key`` only when no per-tenant keys are set."""
+        if self.tenant_keys:
+            return self.tenant_keys.get(tenant)
+        return self.api_key
+
+    def serves(self, tenant: str) -> bool:
+        return not self.tenant_keys or tenant in self.tenant_keys
 
 
 class DownstreamSettings(BaseModel):
-    """Defaults are *off*: air-rag, air-tools and air-action are empty repos.
+    """Defaults are *off*: most of these services are not deployed everywhere.
 
     A default of ``enabled=true`` would make a fresh checkout report itself
     degraded against services that do not exist, which trains an operator to
@@ -164,9 +210,7 @@ class DownstreamSettings(BaseModel):
     classifier: ClassifierSettings = Field(
         default_factory=lambda: ClassifierSettings(base_url="http://localhost:8082")
     )
-    rag: ServiceSettings = Field(
-        default_factory=lambda: ServiceSettings(base_url="http://localhost:8087")
-    )
+    rag: RagSettings = Field(default_factory=lambda: RagSettings(base_url="http://localhost:8087"))
     tools: ServiceSettings = Field(
         default_factory=lambda: ServiceSettings(base_url="http://localhost:8084")
     )

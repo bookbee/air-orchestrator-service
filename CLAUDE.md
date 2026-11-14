@@ -35,13 +35,19 @@ that needs nothing from Docker.
 Repo and distribution are `air-orchestrator-service`; the Python package, env prefix and
 metric namespace all match it literally, as does the `airo_` API-key prefix.
 
-The estate is mid-migration to `<name>_service` package names: `air-classifier` already ships
-`air_classifier_service`, while `air-rag`, `air-tools`, `air-model-gateway` (`air_model_gateway`)
-and `air-infra` are still `air_<name>`. Our **package** name follows air-classifier.
+The estate is mid-migration to `<name>-service` repos and `<name>_service` packages:
+`air-classifier-service` ships `air_classifier_service`, and `air-rag-service` ships
+`air_rag_service` with `AIR_RAG_SERVICE__` / `air_rag_service_*`, spelled in full like ours.
+`air-tools`, `air-model-gateway` (`air_model_gateway`) and `air-infra` are still `air_<name>`.
 
-Where we differ from air-classifier is the env prefix and metric namespace: it keeps
+Where we differ from air-classifier-service is the env prefix and metric namespace: it keeps
 `AIR_CLASSIFIER__` / `air_classifier_*` (no `_service`), we spell the repo name in full. That
 is a deliberate choice, not drift — don't "align" it without asking.
+
+**A repo rename does not rename our wire labels.** `DownstreamService` values (`air-rag`,
+`air-classifier`) appear in API responses and as Prometheus label values, so they stay as
+they are when a sibling repo is renamed. Changing one is a breaking change made on purpose
+(as `air-llm` → `air-model-gateway` was, spec 0003), never as part of a prose rename.
 
 ## Architecture
 
@@ -93,15 +99,19 @@ downstream coping) so a refusal spike does not look like an outage.
 Real today: guardrails both ways, per-channel prompts (spec 0006), synthesis via `ModelGatewayClient.generate`
 (JSON callers) or `.stream` (SSE callers, as `answer.delta` through `pii.StreamRedactor` —
 spec 0004), `CLASSIFY` via air-classifier when configured (customer channel, fail-soft — spec
-0005), per-turn and per-session cost ceilings, and a turn deadline that bounds every downstream
-call. Stubbed: `CACHE` (Phase 5), `GATHER` (Phase 3). Routing is still the literal `/propose`
-trigger — a stand-in must not appear to understand intent it does not.
+0005), `GATHER` via air-rag-service when configured (customer channel: passages screened, numbered and
+delimited into the prompt, cited answers emitted as `citation` events — spec 0011), per-turn
+and per-session cost ceilings, and a turn deadline that bounds every downstream call. Every
+optional client builds on `clients/base.py` (one attempt, four failure reasons, a
+per-service circuit breaker — spec 0010). Stubbed: `CACHE` (Phase 5). Routing is still a rule
+(customer → `rag` when configured) plus the literal `/propose` trigger — a stand-in must not
+appear to understand intent it does not.
 
 ### Wiring (`main.py` + `api/deps.py`)
 
 Nothing is a module-level singleton. `create_app` assembles one frozen `AppState` dataclass —
 settings, `ApiKeyStore`, `InfraClient`, `ModelGatewayClient`, the session store, and a
-`ClassifierClient` that is `None` unless configured — and hangs it on
+`ClassifierClient` and a `RagClient`, each `None` unless configured — and hangs it on
 `app.state.air_state` (`deps.STATE_ATTR`). Routes reach it via `Depends(get_app_state)` and
 take settings from `get_settings_dep`, never the `get_settings()` process singleton. It is a
 dataclass rather than loose `app.state` attributes so a misspelled field fails at import
@@ -203,11 +213,12 @@ The near-term work, in order:
   Spec `0002-durable-sessions` is still **Draft**, and its `tasks.md` T0 gates all code on
   resolving open questions Q1/Q2 (which change `REQ-SESS-007`/`008`). Start there, not in
   `memory/`.
-- **Phase 3 — read path.** air-classifier's client exists (spec 0005; acting on its verdict
-  is `DEFERRED` there). Next: air-rag/air-tools/air-recommender behind a shared
-  `clients/base.py`, capability discovery, and turning `GATHER` real. The
-  resilience primitives are meant to be lifted from air-classifier's `resilience/`, not
-  rewritten.
+- **Phase 3 — read path.** air-classifier's and air-rag-service's clients exist on the shared
+  `clients/base.py` (specs 0005, 0010, 0011). Next: air-tools behind the same base, a planner
+  (schema-constrained JSON decomposition — HLD §9 item 2), inventory discovery from each
+  service's `/v1/capabilities`, and parallel fan-out in `GATHER`. air-rag-service scopes by key, so
+  `RagSettings.tenant_keys` picks the air-rag-service key by the principal's tenant (`REQ-RAG-016`).
+  Spec 0011's open gap is the grounding check (`REQ-RAG-014`).
 - **Phase 4 — write path.** `clients/action.py` behind the propose→confirm→execute gate that
   already exists and is tested.
 

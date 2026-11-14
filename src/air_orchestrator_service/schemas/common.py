@@ -44,10 +44,16 @@ class Usage(BaseModel):
     completion_tokens: int = 0
     total_tokens: int = 0
     cost_usd: float = Field(
-        default=0.0, description="Everything the turn spent, `classifier_cost_usd` included."
+        default=0.0,
+        description=(
+            "Everything the turn spent, `classifier_cost_usd` and `retrieval_cost_usd` included."
+        ),
     )
     classifier_cost_usd: float = Field(
         default=0.0, description="What air-classifier reported spending on this turn."
+    )
+    retrieval_cost_usd: float = Field(
+        default=0.0, description="What air-rag-service reported spending on this turn."
     )
     cache_hit: bool = False
 
@@ -112,7 +118,16 @@ class CapabilitiesResponse(BaseModel):
     version: str
     env: str
     channel: Channel
-    routes: list[Route] = Field(description="Routes whose backing service is configured.")
+    routes: list[Route] = Field(
+        description="Routes whose backing service is configured and, where probed, reachable."
+    )
+    downstreams: list[DependencyStatus] = Field(
+        default_factory=list,
+        description=(
+            "Live status of each configured optional service this build calls, probed "
+            "for this response. A route whose service is unreachable is not in `routes`."
+        ),
+    )
     guardrails: dict[str, bool] = Field(description="Rules active for this caller's channel.")
     streaming: dict[str, bool] = Field(
         description=(

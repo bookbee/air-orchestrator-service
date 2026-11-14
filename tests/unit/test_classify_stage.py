@@ -276,3 +276,22 @@ async def test_no_cost_left_skips_the_call_without_blaming_the_classifier(
     assert stage["status"] == "degraded"
     assert stage["detail"].startswith("cost ceiling")
     assert "air-classifier" not in body["degraded"]
+
+
+async def test_an_open_breaker_degrades_classify_without_a_call(
+    client: httpx.AsyncClient, mock: respx.MockRouter
+) -> None:
+    """REQ-CLB-004 / spec 0010 AC-1: five failed turns open the breaker, and the sixth
+    degrades ``CLASSIFY`` at once, with no request and the turn still answering."""
+    route = mock.post(_URL).mock(side_effect=httpx.ConnectError("refused"))
+
+    for _ in range(5):
+        await _chat(client)
+    body = await _chat(client)
+    stage = _classify_stage(body)
+
+    assert route.call_count == 5
+    assert stage["status"] == "degraded"
+    assert stage["detail"] == "air-classifier circuit is open"
+    assert body["answer"] == CANNED_ANSWER
+    assert body["status"] == "ok"

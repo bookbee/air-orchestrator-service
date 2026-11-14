@@ -4,7 +4,7 @@ The AIR platform's **conversational front door**. A client sends a message; this
 decides what that message needs, gathers it from the specialist services, and streams back a
 grounded answer.
 
-It orchestrates and owns no capability of its own — retrieval is `air-rag`'s, classification
+It orchestrates and owns no capability of its own — retrieval is `air-rag-service`'s, classification
 `air-classifier`'s, read-only calls `air-tools`', mutations `air-action`'s, models `air-model-gateway`'s,
 stores `air-infra`'s.
 
@@ -118,7 +118,7 @@ container stays healthy and turns start succeeding again as soon as air-model-ga
 | `air-tools` | 8084 | **Read-only** capability calls (Phase 3) |
 | `air-action` | 8085 | **Mutations**, behind idempotency keys and approval gates (Phase 4) |
 | `air-recommender` | 8086 | A read-path capability the planner may select (Phase 3) |
-| `air-rag` | 8087 | Retrieval, reranking, citations (Phase 3) |
+| `air-rag-service` | 8087 | Retrieval, reranking, citations (Phase 3) |
 
 ## The two invariants
 

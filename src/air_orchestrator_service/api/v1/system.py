@@ -19,11 +19,16 @@ stays in rotation while broken:
 
 * ``/v1/capabilities`` — what can this deployment do *for the caller in front of
   it*? Per-principal, because a customer key and a business key see different
-  routes and a different guardrail profile from the same process.
+  routes and a different guardrail profile from the same process. It is the one
+  route that probes the optional services (spec 0010, ``REQ-CLB-007``), concurrently and
+  on their health timeouts: it is admin-scoped and called by people, not by load
+  balancers, so its cost is paid rarely. A route whose service does not answer, or
+  whose breaker is open, is left out.
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -33,7 +38,7 @@ from starlette.status import HTTP_503_SERVICE_UNAVAILABLE
 from air_orchestrator_service import __version__
 from air_orchestrator_service.api.deps import AppState, get_app_state, require_principal
 from air_orchestrator_service.api.errors import InsufficientScopeError
-from air_orchestrator_service.constants import SCOPE_ADMIN_READ, DownstreamService
+from air_orchestrator_service.constants import SCOPE_ADMIN_READ, DownstreamService, Route
 from air_orchestrator_service.observability import metrics
 from air_orchestrator_service.schemas.common import (
     CapabilitiesResponse,
@@ -46,6 +51,9 @@ from air_orchestrator_service.schemas.common import (
 __all__ = ["build_metrics_router", "router"]
 
 router = APIRouter(tags=["system"])
+
+#: The service each route needs, for routes whose service this build probes.
+_ROUTE_SERVICE: dict[Route, DownstreamService] = {Route.RAG: DownstreamService.RAG}
 
 
 @router.get(
@@ -101,8 +109,8 @@ def _configured_downstreams(state: AppState) -> list[DependencyStatus]:
     Not probed here on purpose. Readiness is on the hot path for every
     orchestrator health check, and fanning out to five services on each one would
     make this endpoint the most expensive route in the service. Live reachability
-    is capability discovery's job (Phase 3); this reports intent, and
-    ``reachable=None`` says honestly that nothing was measured.
+    is ``/v1/capabilities``' job (spec 0010, ``REQ-CLB-008``); this reports intent,
+    and ``reachable=None`` says honestly that nothing was measured.
     """
     downstream = state.settings.downstream
     statuses: list[DependencyStatus] = []
@@ -148,13 +156,21 @@ async def capabilities(
 
     settings = state.settings
     profile = settings.guardrails.for_channel(principal.channel)
+    downstreams = list(
+        await asyncio.gather(*(client.probe() for client in state.optional_clients()))
+    )
+    down = {status.service for status in downstreams if not status.reachable}
+    routes = {
+        route for route in settings.downstream.routes() if _ROUTE_SERVICE.get(route) not in down
+    }
 
     return CapabilitiesResponse(
         service=settings.obs.service_name,
         version=__version__,
         env=settings.app.env,
         channel=principal.channel,
-        routes=sorted(settings.downstream.routes()),
+        routes=sorted(routes),
+        downstreams=downstreams,
         guardrails={
             "injection": profile.injection,
             "redact_pii": profile.redact_pii,

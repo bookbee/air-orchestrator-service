@@ -10,7 +10,7 @@ variable or clearing a cache. The process singleton is only the default.
 **A missing downstream is a deployment shape, not a failure.** air-orchestrator-service is
 designed to narrow its answer rather than refuse one (docs/01-hld.md §7), and that
 promise has to hold at *startup* as well as per request: a deployment with no
-air-rag, no air-tools and no air-action must boot, serve, and report itself
+air-rag-service, no air-tools and no air-action must boot, serve, and report itself
 honestly on ``/v1/ready`` and ``/v1/capabilities``. Since most of the estate is
 still unbuilt, that is the normal case rather than the degraded one.
 
@@ -43,6 +43,7 @@ from air_orchestrator_service.api.v1.system import build_metrics_router
 from air_orchestrator_service.clients.classifier import ClassifierClient
 from air_orchestrator_service.clients.infra import InfraClient
 from air_orchestrator_service.clients.model_gateway import ModelGatewayClient
+from air_orchestrator_service.clients.rag import RagClient
 from air_orchestrator_service.config import Settings, get_settings
 from air_orchestrator_service.memory.session import build_session_store
 from air_orchestrator_service.observability.logging import configure_logging, get_logger
@@ -60,7 +61,7 @@ The AIR estate's conversational front door.
 
 Send a message; the platform decides what it needs, gathers it from the specialist
 services, and streams back a grounded answer. It orchestrates and owns no
-capability of its own — retrieval is `air-rag`'s, classification
+capability of its own — retrieval is `air-rag-service`'s, classification
 `air-classifier`'s, read-only calls `air-tools`', mutations `air-action`'s, models
 `air-model-gateway`'s, and stores `air-infra`'s.
 
@@ -148,8 +149,8 @@ def _build_lifespan(state: AppState) -> Any:
             # warning on every reload and leaks sockets in tests.
             await state.infra.aclose()
             await state.model_gateway.aclose()
-            if state.classifier is not None:
-                await state.classifier.aclose()
+            for client in state.optional_clients():
+                await client.aclose()
             _log.info("shutdown.complete")
 
     return lifespan
@@ -183,6 +184,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if resolved.downstream.classifier.configured
             else None
         ),
+        rag=RagClient(resolved.downstream.rag) if resolved.downstream.rag.configured else None,
     )
 
     app = FastAPI(

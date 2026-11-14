@@ -28,11 +28,11 @@ the escalation ladder across two repos.
 | Router / Planner | air-orchestrator-service module | The core of this repo |
 | Model Gateway | **`air-model-gateway` :8083** | **Already built**; it replaced air-llm (spec 0003, constitution Article VII as amended in 1.1.0). Multi-provider routing by *model class*, fallback, cost, budgets, cache, prompt caching, structured output, streaming. This service consumes it over HTTP (`clients/model_gateway.py`); it does not rebuild it. Satisfies review item 02 |
 | Semantic Cache | air-orchestrator-service module | **New, not built** (Phase 5). Embeddings from air-model-gateway, vectors in Redis brokered by air-infra. Review item 04 |
-| Retrieval Client (RAG) | air-orchestrator-service client → **`air-rag` :8087** | Reranking, grounding and citation shape are air-rag's; air-orchestrator-service asks and cites. **air-rag calls air-model-gateway itself for embeddings** — air-orchestrator-service never embeds a query itself |
+| Retrieval Client (RAG) | air-orchestrator-service client → **`air-rag-service` :8087** | Reranking, grounding and citation shape are air-rag-service's; air-orchestrator-service asks and cites. **air-rag-service calls air-model-gateway itself for embeddings** — air-orchestrator-service never embeds a query itself |
 | Tool Executor | air-orchestrator-service client → **`air-tools` :8084** | **Read-only by construction.** Each domain agent's reason → tool-call → interpret loop (Plan's new "agent placement" decision) runs *inside* air-tools, with its own air-model-gateway client — air-orchestrator-service sends one coarse request per sub-task and never sees the intermediate reasoning |
 | Conversation Memory | Redis (turns) + Postgres (profile), brokered by air-infra | Review item 03. **In-process today** — the Redis backend is Phase 2b |
 | Response Streamer | air-orchestrator-service module | SSE, §5 |
-| External RAG / Knowledge | Behind `air-rag` | Vector DB, embedding service, ingestion — not air-orchestrator-service's concern |
+| External RAG / Knowledge | Behind `air-rag-service` | Vector DB, embedding service, ingestion — not air-orchestrator-service's concern |
 | Tools / Live Data | Behind `air-tools` | |
 | Action Services | **`air-action` :8085** | **Mutations only**, idempotency keys and approval gates. Review item 07 |
 | MCP Server (optional) | Deferred | §8 |
@@ -50,7 +50,7 @@ rather than a new architectural element. Confirm this reading.
 AgentReason / AgentInterpret / AgentGenerate / Generative / Embeddings endpoints) needs no new
 service to realise. It's air-model-gateway's routing file: each caller asks for a *model
 class* (`local` · `auto` · `cloud`), and a per-caller override decides which models serve that
-class for it. This service asks for `cloud`. air-tools' agents and air-rag's embeddings get
+class for it. This service asks for `cloud`. air-tools' agents and air-rag-service's embeddings get
 their own overrides. Each is a config edit in the gateway, not a deployment.
 
 ## 2. System context
@@ -78,10 +78,10 @@ their own overrides. Each is a config edit in the gateway, not a deployment.
                                 │
   ┌──────────────┬──────────────┴──────────────┬──────────────┬──────────────┐
   ▼              ▼              ▼              ▼              ▼              ▼
-  model-gateway  air-infra      air-classifier air-rag        air-tools      air-action
-  :8083          :8080          :8082          :8087          :8084          :8085
-  THE ONLY       stores ·       sentiment      retrieval      READ-ONLY      MUTATIONS
-  MODEL PATH     secrets        · intent       · citations    calls          · gates
+  model-gateway  air-infra      air-classifier air-rag-service air-tools      air-action
+  :8083          :8080          :8082          :8087           :8084          :8085
+  THE ONLY       stores ·       sentiment      retrieval       READ-ONLY      MUTATIONS
+  MODEL PATH     secrets        · intent       · citations     calls          · gates
   │
   ▼
   Ollama · Anthropic · OpenAI · self-hosted
@@ -128,7 +128,7 @@ POST /v1/chat  {session_id?, message, options?}
   ├─ 5. CLASSIFY ── air-classifier: sentiment, intent, urgency (customer channel; fail-soft)
   ├─ 6. ROUTER / PLANNER ── direct answer | RAG | tools | action | combination
   ├─ 7. GATHER (parallel, per-turn deadline)
-  │        ├─ air-rag      retrieval + citations
+  │        ├─ air-rag-service      retrieval + citations
   │        ├─ air-tools    read-only calls
   │        ├─ air-recommender
   │        └─ air-action   ⇒ PROPOSE ONLY, never executes in this step
@@ -224,7 +224,7 @@ makes absence tractable: a missing service removes a *route*, not the service.
 | Down | Behaviour |
 | --- | --- |
 | air-classifier | `CLASSIFY` is `degraded` naming it; no verdict for the turn. Turn status unaffected |
-| air-rag | Planner drops the RAG route; the answer says it could not consult the knowledge base rather than answering ungrounded |
+| air-rag-service | Planner drops the RAG route; the answer says it could not consult the knowledge base rather than answering ungrounded |
 | air-tools | Affected capabilities leave the tool list; the planner cannot select what is not advertised |
 | air-action | Proposals refused with a clear reason. **Never** a fallback direct write |
 | air-recommender | Recommendation capability drops out |

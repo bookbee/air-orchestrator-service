@@ -5,7 +5,7 @@
 This document is the implementation contract. Code follows it; where it turns out to be
 wrong, the document is amended rather than silently diverged from.
 
-**Shipped so far: Phases 0, 1 and 2a, and the first Phase 3 client.** The full `/v1` surface
+**Shipped so far: Phases 0, 1 and 2a, and the first Phase 3 clients.** The full `/v1` surface
 is live — `/v1/chat`, `/v1/query`, `/v1/sessions/{id}` and the SSE event contract — served by a
 real turn engine: guardrails both ways, a versioned prompt registry, synthesis through
 air-model-gateway (streamed to SSE callers as `answer.delta`), classification through
@@ -84,8 +84,9 @@ air-orchestrator-service/
     │   ├── model_gateway.py        # air-model-gateway — the only model path (Article VII)
     │   ├── infra.py                # air-infra — brokered stores and secrets
     │   ├── classifier.py           # air-classifier — the CLASSIFY stage (spec 0005)
-    │   ├── base.py               ○ # shared timeout/retry/breaker/budget     (Phase 3)
-    │   ├── rag.py tools.py action.py recommender.py  ○                 (Phases 3-4)
+    │   ├── base.py                 # shared headers/failures/metric/breaker  (spec 0010)
+    │   ├── rag.py                  # air-rag-service retrieval for GATHER           (spec 0011)
+    │   ├── tools.py action.py recommender.py  ○                       (Phases 3-4)
     │   └── discovery.py          ○ # /v1/capabilities polling → live inventory (Phase 3)
     │
     ├── prompts/
@@ -113,10 +114,11 @@ service convention is what keeps a single `air-client` target block coherent.
 The package, env prefix and metric namespace all spell the repo name in full
 (`air_orchestrator_service`, `AIR_ORCHESTRATOR_SERVICE__`, `air_orchestrator_service_*`).
 
-The estate is mid-migration on this point. `air-classifier` already ships an
+The estate is mid-migration on this point. `air-classifier-service` ships an
 `air_classifier_service` package but kept `AIR_CLASSIFIER__` and `air_classifier_*` for its
-env prefix and metrics; `air-rag`, `air-tools`, `air-model-gateway` and `air-infra` are still
-`air_<name>` throughout. This repo's package name follows air-classifier; its prefix and
+env prefix and metrics. `air-rag-service` ships `air_rag_service` and spells its prefix and
+metrics in full (`AIR_RAG_SERVICE__`, `air_rag_service_*`), as this repo does. `air-tools`,
+`air-model-gateway` and `air-infra` are still `air_<name>` throughout. This repo's package name follows air-classifier; its prefix and
 metric namespace are spelled in full. Both are deliberate, and worth revisiting only as one
 estate-wide decision rather than per repo.
 
@@ -392,18 +394,20 @@ whole period every call from this service 404'd. `/v1/capabilities`, authenticat
 service's token, answers what readiness means here: is the token accepted, and is the
 configured model class granted to this service and backed by a provider (spec 0003).
 
-`DownstreamClient` (`clients/base.py`) and the remaining capability clients are **Phase 3**;
-`clients/classifier.py` came first, with one bounded attempt and no breaker (spec 0005). The
-guard/breaker/bulkhead primitives are to be **lifted from air-classifier's
-[`resilience/`](../../air-classifier/src/air_classifier_service/resilience/)** rather than rewritten —
-fan-out here has the same failure modes its tier ladder does, and a second implementation
-would drift.
+`DownstreamClient` (`clients/base.py`, spec 0010) is what every optional client builds on:
+`clients/classifier.py` and `clients/rag.py` today. It makes one bounded attempt and has no
+retry, because a turn's downstream calls each get a share of one deadline. It reports every
+failure as `timeout`, `unavailable`, `error` or `breaker_open`, and keeps a per-service
+circuit breaker. The breaker is lifted from air-classifier's
+[`resilience/breaker.py`](../../air-classifier-service/src/air_classifier_service/resilience/breaker.py),
+without its bulkhead and its multi-probe half-open, which one attempt per turn does not need.
 
 `discovery.py` (○ Phase 3) polls each service's `/v1/capabilities` on an interval and caches
 the result. The planner binds against **this live inventory**, which is what makes "a new tool
 in air-tools needs no release here" true, and what makes a dead service a missing capability
-rather than a failed turn. Until it exists, `/v1/capabilities` reports the configuration half
-only — `DownstreamSettings.routes()`.
+rather than a failed turn. Until it exists, `/v1/capabilities` reports the configured routes
+(`DownstreamSettings.routes()`), less those whose service fails a live `/v1/health` probe or
+has an open breaker (spec 0010, `REQ-CLB-007`).
 
 Every client ships a **fixture-backed fake** used by the tests, so Phases 3-4 are buildable
 against services that are still empty repos (Plan §6).
@@ -507,23 +511,24 @@ table wins.
 | 1 — Contracts | **Shipped.** `/v1/chat` · `/v1/query` · `/v1/sessions/{id}` · the §4 event contract (`api/sse.py`) · every §5 schema · session store with tenant-namespaced keys · the propose → confirm → execute gate |
 | 2a — Turn engine | **Shipped.** `engine/turn.py`: guardrails in and out · prompt registry · real synthesis through air-model-gateway (spec 0003), streamed as `answer.delta` to SSE callers (spec 0004) · enforced turn deadline and per-turn/per-session cost ceilings, the turn ceiling checked against a pre-call estimate on both channels with air-classifier's spend counted (spec 0008) · payment cards masked on input (spec 0007) · an unknown `session_id` is a 404 and blank or malformed bodies are 422s after auth (spec 0009) · escalation on an explicit request for a human. **The event contract did not change** |
 | 2b — Durable sessions | **Not started.** Redis behind the existing `SessionStore` protocol; the key shape is already tenant-namespaced, so this is a backend swap |
-| 3 — Read path | **Started.** `clients/classifier.py` turns `CLASSIFY` real on the customer channel (spec 0005; acting on the verdict is deferred). Still to come: air-rag/air-tools/air-recommender clients, the shared `clients/base.py`, capability discovery, parallel fan-out, grounding checks, and `GATHER` |
+| 3 — Read path | **Started.** `clients/classifier.py` turns `CLASSIFY` real on the customer channel (spec 0005; acting on the verdict is deferred). The shared `clients/base.py` with a per-service breaker, and live downstream status on `/v1/capabilities` (spec 0010). `clients/rag.py` turns `GATHER` real on the customer channel: passages screened, numbered and delimited into the prompt, and cited answers as `citation` events (spec 0011; air-rag-service's key picked per tenant; the grounding check is a declared gap). Still to come: air-tools/air-recommender clients, the planner, inventory discovery from `/v1/capabilities`, parallel fan-out, and grounding checks |
 | 4 — Write path | **Not started.** `clients/action.py` behind the gate that already exists |
 | 5 — Semantic cache + business channel | **Not started.** Turns `CACHE` real; adds output-schema validation and the audit sink |
 | 6 — Evaluation, hardening & ops | **Not started.** Eval suites, OTel tracing, load test, runbook |
 
 ### Stubbed stages announce themselves
 
-`CACHE` and `GATHER` emit `stage{status=skipped}` with a reason — never `ok`. `CLASSIFY` does
-the same when air-classifier is not configured, or on the business channel.
+`CACHE` emits `stage{status=skipped}` with a reason — never `ok`. `CLASSIFY` and `GATHER` do
+the same when their service is not configured, or on the business channel.
 That is deliberate and load-bearing: a client must be able to tell a stubbed turn from a real
 one, and this service must never be mistaken for a complete one in a demo. `_STUBBED` in
 `engine/turn.py` is the single list; deleting an entry there is what "turning a stage on"
 means.
 
-Routing is likewise still a stand-in. `/propose` is a **literal trigger**, not intent
-detection: with `GATHER` stubbed there is nothing to route to besides a direct answer, and a
-stand-in must not appear to understand intent it does not.
+Routing is likewise still a rule, not a planner. A customer turn that will be synthesised
+routes to `rag` when air-rag-service is configured, and `/propose` is a **literal trigger**, not
+intent detection. Choosing among capabilities waits for the planner, which arrives with
+air-tools, and a stand-in must not appear to understand intent it does not.
 
 ### Claims proved by tests, not by assertion
 

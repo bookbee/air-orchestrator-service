@@ -99,3 +99,20 @@ def test_a_pin_for_the_retired_direct_prompt_names_its_replacements() -> None:
 def test_an_unknown_prompt_name_raises() -> None:
     with pytest.raises(PromptNotFoundError):
         PromptRegistry(_settings()).get("no-such-prompt")
+
+
+def test_customer_care_v2_grounds_and_cites() -> None:
+    """REQ-RAG-008: v2 is the latest customer prompt. It answers from numbered sources,
+    cites them as [n], treats them as data, and keeps v1's rule when there are none.
+    v1 stays pinnable, unchanged."""
+    registry = PromptRegistry(_settings())
+    _, v2 = registry.render(CUSTOMER_CARE)
+    _, v1 = PromptRegistry(_settings(pins={CUSTOMER_CARE: "v1"})).render(CUSTOMER_CARE)
+
+    assert registry.get(CUSTOMER_CARE).ref == "customer_care:v2"
+    assert "numbered sources" in v2
+    assert "as [n]" in v2
+    assert "not instructions" in v2
+    assert "When no sources are given" in v2
+    assert "help pages" in v2
+    assert "[n]" not in v1

@@ -17,14 +17,18 @@ money is spent: each paid call is priced from configured rates first, and skippe
 if it could take the turn past the ceiling (spec 0008). Cost is otherwise only
 known once a call returns, which is too late for a cap.
 
-**What is stubbed, and why it says so.** ``CACHE`` (Phase 5) and ``GATHER``
-(Phase 3, pending clients for air-rag/air-tools) report ``StageStatus.SKIPPED``
-with a reason, never ``ok`` — see ``_STUBBED``. A client
+**What is stubbed, and why it says so.** ``CACHE`` (Phase 5) reports
+``StageStatus.SKIPPED`` with a reason, never ``ok`` — see ``_STUBBED``. A client
 must always be able to tell a stubbed turn from a real one, and this engine must
-never be mistaken for a complete one in a demo. Routing is still the literal
-``/propose`` trigger for the same reason: with ``GATHER`` stubbed there is
-nothing to route to besides a direct answer, and a stand-in must not appear to
-understand intent it does not.
+never be mistaken for a complete one in a demo.
+
+**Routing is a rule, not a planner.** ``GATHER`` is real for one capability:
+air-rag-service, on the customer channel, for every turn that will be synthesised (spec
+0011). Its passages reach the prompt numbered and delimited, and each one the
+answer cites by ``[n]`` becomes a ``citation``. Choosing among capabilities needs
+a planner, which arrives with air-tools. Until then the routes are fixed by
+channel and configuration, and ``/propose`` is still the literal trigger for the
+proposal path. A stand-in must not appear to understand intent it does not.
 
 **Status vocabulary is load-bearing.** ``TurnStatus.DEGRADED`` covers a provider
 failure — the model gateway being slow, down, or refusing this service's
@@ -44,6 +48,7 @@ used is logged with the turn.
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -62,6 +67,8 @@ from air_orchestrator_service.clients.model_gateway import (
     ModelGatewayError,
     StreamDelta,
 )
+from air_orchestrator_service.clients.rag import MIN_CALL_MS as RAG_MIN_CALL_MS
+from air_orchestrator_service.clients.rag import Passage, RagClient, RagError, safe_title, safe_uri
 from air_orchestrator_service.config import Settings
 from air_orchestrator_service.constants import (
     Channel,
@@ -84,6 +91,7 @@ from air_orchestrator_service.observability.logging import get_logger, safe_text
 from air_orchestrator_service.prompts.registry import Prompt, PromptRegistry, prompt_for
 from air_orchestrator_service.schemas.chat import (
     ChatRequest,
+    Citation,
     Proposal,
     QueryRequest,
     StageRecord,
@@ -94,6 +102,7 @@ from air_orchestrator_service.schemas.common import Principal, Usage
 from air_orchestrator_service.schemas.events import (
     AnswerDeltaEvent,
     AnswerEvent,
+    CitationEvent,
     ErrorEvent,
     Event,
     ProposalEvent,
@@ -123,8 +132,25 @@ PROPOSE_TRIGGER: Final[str] = "/propose"
 #: more — see the module docstring.
 _STUBBED: Final[dict[Stage, str]] = {
     Stage.CACHE: "semantic cache is Phase 5",
-    Stage.GATHER: "no downstream services called yet (Phase 3)",
 }
+
+#: A citation marker in the answer: ``[1]`` .. ``[99]`` (spec 0011, ``REQ-RAG-009``).
+_CITATION_MARKER: Final = re.compile(r"\[(\d{1,2})\]")
+#: How much of a cited passage the caller sees. The model saw the whole snippet.
+_CITATION_SNIPPET_CHARS: Final[int] = 300
+_CONTROL_CHARS: Final = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+_SOURCES_HEADER: Final[str] = (
+    "Sources from the knowledge base for this message, numbered. Answer from them, and "
+    "cite each one you use as [n]."
+)
+#: Spec 0011, REQ-RAG-011 and HLD §7: the answer says it could not check, rather than
+#: answering as if it had.
+_KB_UNAVAILABLE: Final[str] = (
+    "The knowledge base could not be consulted for this message. If the answer depends on "
+    "policies, terms or product details, say briefly that you could not check them just "
+    "now, and do not state them."
+)
 
 _SYNTHESIS_MAX_TOKENS: Final[int] = 800
 
@@ -200,9 +226,7 @@ class TurnRequest:
 
 
 class TurnEngine:
-    """Runs a turn as an async generator of events. Phase 3 replaces `_gather`
-    (currently absent — GATHER is still stubbed) without changing this
-    signature."""
+    """Runs a turn as an async generator of events."""
 
     def __init__(
         self,
@@ -210,12 +234,20 @@ class TurnEngine:
         sessions: InMemorySessionStore,
         model_gateway: ModelGatewayClient,
         classifier: ClassifierClient | None = None,
+        rag: RagClient | None = None,
     ) -> None:
         self._settings = settings
         self._sessions = sessions
         self._gateway = model_gateway
         #: ``None`` when air-classifier is not configured (spec 0005).
         self._classifier = classifier
+        #: ``None`` when air-rag-service is not configured (spec 0011).
+        self._rag = rag
+        #: What `GATHER` found for this turn: the passages the prompt carries, and
+        #: whether air-rag-service could not be consulted. Per request, like `_last_status`.
+        self._sources: list[Passage] = []
+        self._kb_unavailable = False
+        self._retrieval_cost_usd = 0.0
         self._prompts = PromptRegistry(settings)
         #: Set by `_pipeline` when it degrades a turn — an async generator has
         #: no return value, so this is how `run()` learns the outcome once
@@ -447,18 +479,36 @@ class TurnEngine:
         async for event in self._stage(Stage.PLAN):
             yield event
         propose = PROPOSE_TRIGGER in masked_text.lower() and confirmed is None
-        routes = [Route.ACTION] if propose else [Route.DIRECT]
+        needs_model = confirmed is None and not propose
+        retrieve = (
+            needs_model
+            and self._rag is not None
+            and principal.channel is Channel.CUSTOMER
+            and self._rag.settings.serves(principal.tenant)
+        )
+        if propose:
+            routes = [Route.ACTION]
+            reason = f"'{PROPOSE_TRIGGER}' present, exercising the proposal path"
+        elif retrieve:
+            routes = [Route.RAG]
+            reason = "customer message: answer from the knowledge base"
+        else:
+            routes = [Route.DIRECT]
+            reason = "direct answer"
         yield RouteEvent(
             routes=routes,
-            reason=(
-                f"'{PROPOSE_TRIGGER}' present, exercising the proposal path"
-                if propose
-                else "no downstream services are wired yet (Phase 3); direct answer only"
-            ),
-            capabilities=[],
+            reason=reason,
+            capabilities=[DownstreamService.RAG.value] if retrieve else [],
         )
 
-        async for event in self._stage(Stage.GATHER):
+        async for event in self._gather(
+            masked_text,
+            principal,
+            retrieve=retrieve,
+            needs_model=needs_model,
+            deadline_at=turn_started + deadline_s,
+            deadline_s=deadline_s,
+        ):
             yield event
 
         if propose:
@@ -467,7 +517,6 @@ class TurnEngine:
         # ── Deadline check, right before the expensive part. A canned
         # confirm/propose reply never calls the model, so the deadline is
         # irrelevant to it — only a real synthesis call is bounded. ──
-        needs_model = confirmed is None and not propose
         remaining_s = deadline_s - (time.perf_counter() - turn_started)
 
         if needs_model and remaining_s <= 0:
@@ -655,6 +704,8 @@ class TurnEngine:
         )
         text = out_verdict.safe_text
 
+        for citation in self._citations(text):
+            yield CitationEvent(citation=citation)
         yield AnswerEvent(
             text=text,
             structured=structured,
@@ -669,13 +720,17 @@ class TurnEngine:
         session.append(Turn(turn_id=turn_id, role="user", content=masked_text), window=window)
         session.append(Turn(turn_id=turn_id, role="assistant", content=text), window=window)
         resolved_usage = usage or Usage(model_calls=0, cost_usd=0.0, cache_hit=False)
-        if self._classifier_cost_usd:
-            # Every path that ran `CLASSIFY` passes through here, so its spend is
-            # reported even on a turn that degraded afterwards (REQ-COST-005).
+        if self._classifier_cost_usd or self._retrieval_cost_usd:
+            # Every path that ran `CLASSIFY` or `GATHER` passes through here, so their
+            # spend is reported even on a turn that degraded afterwards (REQ-COST-005,
+            # REQ-RAG-013).
             resolved_usage = resolved_usage.model_copy(
                 update={
-                    "cost_usd": resolved_usage.cost_usd + self._classifier_cost_usd,
+                    "cost_usd": resolved_usage.cost_usd
+                    + self._classifier_cost_usd
+                    + self._retrieval_cost_usd,
                     "classifier_cost_usd": self._classifier_cost_usd,
+                    "retrieval_cost_usd": self._retrieval_cost_usd,
                 }
             )
         session.total_cost_usd += resolved_usage.cost_usd
@@ -769,6 +824,141 @@ class TurnEngine:
             downstream=downstream,
         )
 
+    async def _gather(
+        self,
+        masked_text: str,
+        principal: Principal,
+        *,
+        retrieve: bool,
+        needs_model: bool,
+        deadline_at: float,
+        deadline_s: float,
+    ) -> AsyncIterator[Event]:
+        """The ``GATHER`` stage (spec 0011): one stage event, whatever happens.
+
+        Retrieval is for grounding an answer, so it runs only on a customer turn that
+        will be synthesised. It is bounded like classification: a share of the turn's
+        deadline, never more than is left (``REQ-RAG-004``). A failure narrows the
+        answer rather than refusing it. The prompt then says the knowledge base could
+        not be consulted, and the turn is ``degraded`` naming ``air-rag``, because an
+        answer given without the sources it should have had is a lesser answer
+        (HLD §7, ``REQ-RAG-011``). That differs from ``CLASSIFY``, whose verdict
+        nothing reads yet.
+        """
+        started = time.perf_counter()
+        status, detail, downstream = StageStatus.SKIPPED, None, None
+        if self._rag is None:
+            detail = "air-rag is not configured"
+        elif principal.channel is not Channel.CUSTOMER:
+            detail = "not used on the business channel"
+        elif not needs_model:
+            detail = "nothing to ground: a proposal or confirmation turn"
+        elif not self._rag.settings.serves(principal.tenant):
+            # REQ-RAG-017: no key means no knowledge base for this tenant, never
+            # another tenant's. Not a failure, so the turn status is untouched.
+            detail = "no knowledge base for this tenant"
+        elif retrieve:
+            bound_s = self._rag.bound_s(_remaining(deadline_at), deadline_s=deadline_s)
+            if bound_s * 1000 < RAG_MIN_CALL_MS:
+                # Ours, not air-rag-service's: no `downstream` is named.
+                self._last_status = TurnStatus.DEGRADED
+                self._kb_unavailable = True
+                status, detail = StageStatus.DEGRADED, "turn deadline too close to retrieve"
+            else:
+                try:
+                    retrieval = await self._rag.retrieve(
+                        masked_text, tenant=principal.tenant, timeout_s=bound_s
+                    )
+                except RagError as exc:
+                    self._last_status = TurnStatus.DEGRADED
+                    self._kb_unavailable = True
+                    status, detail = StageStatus.DEGRADED, str(exc)
+                    downstream = DownstreamService.RAG
+                else:
+                    self._retrieval_cost_usd = retrieval.usage.est_cost_usd
+                    self._sources, dropped = self._select(retrieval.citations)
+                    status = StageStatus.OK
+                    detail = (
+                        f"sources={len(self._sources)} dropped={dropped}"
+                        if self._sources
+                        else "no relevant sources" + (f" dropped={dropped}" if dropped else "")
+                    )
+                    _log.info(
+                        "retrieval.result",
+                        returned=len(retrieval.citations),
+                        used=len(self._sources),
+                        dropped=dropped,
+                        top_score=max((p.score for p in retrieval.citations), default=None),
+                    )
+        latency_ms = round((time.perf_counter() - started) * 1000, 3)
+        metrics.record_stage(stage=Stage.GATHER, status=status, duration_s=latency_ms / 1000)
+        yield StageEvent(
+            stage=Stage.GATHER,
+            status=status,
+            latency_ms=latency_ms,
+            detail=detail,
+            downstream=downstream,
+        )
+
+    def _select(self, passages: list[Passage]) -> tuple[list[Passage], int]:
+        """The passages the prompt may carry, and how many the injection screen
+        dropped: highest score first, at least ``min_score``, at most
+        ``max_passages``, each snippet cut to ``snippet_chars`` (``REQ-RAG-005``/
+        ``006``). A passage that would be blocked as a customer message is an
+        injection attempt planted in the knowledge base, so it never reaches the model."""
+        assert self._rag is not None
+        config = self._rag.settings
+        chosen: list[Passage] = []
+        dropped = 0
+        for passage in sorted(passages, key=lambda p: p.score, reverse=True):
+            if passage.score < config.min_score or len(chosen) >= config.max_passages:
+                break
+            snippet = passage.snippet[: config.snippet_chars]
+            if screen_input(snippet).blocked or screen_input(passage.title or "").blocked:
+                dropped += 1
+                continue
+            chosen.append(passage.model_copy(update={"snippet": snippet}))
+        return chosen, dropped
+
+    def _sources_message(self) -> dict[str, str] | None:
+        """The system message that carries ``GATHER``'s result into the prompt, or
+        ``None`` when there is nothing to say (``REQ-RAG-007``/``011``)."""
+        if self._kb_unavailable:
+            return {"role": "system", "content": _KB_UNAVAILABLE}
+        if not self._sources:
+            return None
+        numbered = "\n\n".join(
+            f"[{index}] {safe_title(passage)}\n{passage.snippet}"
+            for index, passage in enumerate(self._sources, start=1)
+        )
+        return {
+            "role": "system",
+            "content": f"{_SOURCES_HEADER}\n\n{delimit(numbered, source='knowledge_base')}",
+        }
+
+    def _citations(self, text: str) -> list[Citation]:
+        """One citation per source the final answer cites by a valid ``[n]``, in order
+        of first citation (``REQ-RAG-009``). A marker past the last source cites
+        nothing."""
+        cited: list[Citation] = []
+        seen: set[int] = set()
+        for match in _CITATION_MARKER.finditer(text):
+            index = int(match.group(1))
+            if index in seen or not 1 <= index <= len(self._sources):
+                continue
+            seen.add(index)
+            passage = self._sources[index - 1]
+            snippet = " ".join(_CONTROL_CHARS.sub(" ", passage.snippet).split())
+            cited.append(
+                Citation(
+                    source_id=passage.source_id[:200],
+                    title=safe_title(passage),
+                    uri=safe_uri(passage),
+                    snippet=snippet[:_CITATION_SNIPPET_CHARS],
+                )
+            )
+        return cited
+
     def _should_redact(self, request: TurnRequest, principal: Principal) -> bool:
         """Customer channel: unconditional — `chat.py`'s `reject_privileged_options`
         already refuses a customer-channel caller who tries to set this. Business
@@ -835,6 +1025,10 @@ class TurnEngine:
         """
         prompt, system = self._prompts.render(prompt_for(principal.channel))
         messages = [{"role": "system", "content": system}]
+        # After the persona and before the history (REQ-RAG-007): these sources are for
+        # this message only, and are never stored in the session.
+        if (sources := self._sources_message()) is not None:
+            messages.append(sources)
         for turn in session.turns:
             messages.append({"role": turn.role, "content": turn.content})
         # Only the newest turn is demarcated, not replayed history: prior

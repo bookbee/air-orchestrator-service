@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import httpx
 import pytest
+import respx
 from fastapi import FastAPI
 
-from tests.conftest import BUSINESS_KEY, CUSTOMER_KEY, NO_SCOPE_KEY, auth
+from air_orchestrator_service.config import Settings
+from tests.conftest import (
+    BUSINESS_KEY,
+    CLASSIFIER_BASE_URL,
+    CUSTOMER_KEY,
+    NO_SCOPE_KEY,
+    auth,
+    build_app,
+)
 
 
 async def test_health_needs_no_auth_and_no_dependencies(client: httpx.AsyncClient) -> None:
@@ -83,7 +92,7 @@ async def test_ready_is_503_even_when_infra_alone_is_reachable(client: httpx.Asy
 async def test_ready_ignores_optional_downstreams(client: httpx.AsyncClient) -> None:
     """Every optional service is disabled in the test settings, and readiness holds.
 
-    This is docs/01-hld.md §7 as an executable claim: air-rag, air-tools and
+    This is docs/01-hld.md §7 as an executable claim: air-rag-service, air-tools and
     air-action being absent narrows what a turn can answer, and must not gate
     readiness — otherwise the service would never be ready in its own repo's
     default configuration.
@@ -222,3 +231,82 @@ async def test_metrics_is_outside_the_version_prefix(client: httpx.AsyncClient) 
 async def test_metrics_is_absent_from_the_openapi_document(app: FastAPI) -> None:
     """Excluded from the schema so a generated client does not offer it as an operation."""
     assert "/metrics" not in app.openapi()["paths"]
+
+
+@pytest.mark.usefixtures("reachable_model_gateway", "reachable_infra")
+async def test_capabilities_report_live_downstream_status(settings: Settings) -> None:
+    """REQ-CLB-007 / spec 0010 AC-2: air-rag-service configured but down drops the `rag` route;
+    air-classifier up is reported reachable."""
+    downstream = settings.downstream.model_copy(
+        update={
+            "rag": settings.downstream.rag.model_copy(
+                update={"enabled": True, "base_url": "http://air-rag-service.invalid:8087"}
+            ),
+            "classifier": settings.downstream.classifier.model_copy(
+                update={"enabled": True, "base_url": CLASSIFIER_BASE_URL}
+            ),
+        }
+    )
+    app = build_app(settings.model_copy(update={"downstream": downstream}))
+    transport = httpx.ASGITransport(app=app)
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get("http://air-rag-service.invalid:8087/v1/health").mock(
+            side_effect=httpx.ConnectError("refused")
+        )
+        mock.get(f"{CLASSIFIER_BASE_URL}/v1/health").mock(return_value=httpx.Response(200))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/v1/capabilities", headers=auth(CUSTOMER_KEY))
+
+    body = response.json()
+    reported = {d["service"]: d for d in body["downstreams"]}
+    assert reported["air-rag"]["reachable"] is False
+    assert reported["air-rag"]["detail"] == "connection failed (ConnectError)"
+    assert reported["air-classifier"]["reachable"] is True
+    assert body["routes"] == ["direct"]
+
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get("http://air-rag-service.invalid:8087/v1/health").mock(
+            return_value=httpx.Response(200)
+        )
+        mock.get(f"{CLASSIFIER_BASE_URL}/v1/health").mock(return_value=httpx.Response(200))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/v1/capabilities", headers=auth(CUSTOMER_KEY))
+    assert response.json()["routes"] == ["direct", "rag"]
+
+
+async def test_ready_does_not_probe_optional_downstreams(settings: Settings) -> None:
+    """REQ-CLB-008: configured optional services are reported, never called."""
+    from air_orchestrator_service.api.deps import STATE_ATTR
+    from air_orchestrator_service.constants import DownstreamService
+    from air_orchestrator_service.schemas.common import DependencyStatus
+
+    downstream = settings.downstream.model_copy(
+        update={
+            "rag": settings.downstream.rag.model_copy(
+                update={"enabled": True, "base_url": "http://air-rag-service.invalid:8087"}
+            )
+        }
+    )
+    app = build_app(settings.model_copy(update={"downstream": downstream}))
+    state = getattr(app.state, STATE_ATTR)
+    for client_, service in (
+        (state.model_gateway, DownstreamService.MODEL_GATEWAY),
+        (state.infra, DownstreamService.INFRA),
+    ):
+
+        async def healthy(service: DownstreamService = service) -> DependencyStatus:
+            return DependencyStatus(service=service, configured=True, reachable=True)
+
+        client_.probe = healthy
+    transport = httpx.ASGITransport(app=app)
+    with respx.mock(assert_all_called=False) as mock:
+        health = mock.get("http://air-rag-service.invalid:8087/v1/health").mock(
+            return_value=httpx.Response(200)
+        )
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/v1/ready")
+
+    assert health.call_count == 0
+    rag = next(d for d in response.json()["dependencies"] if d["service"] == "air-rag")
+    assert rag["configured"] is True
+    assert rag["reachable"] is None
