@@ -1,24 +1,24 @@
-"""air-rag client — retrieval for the ``GATHER`` stage, spec 0011.
+"""air-rag-service client — retrieval for the ``GATHER`` stage, spec 0011.
 
-The contract is air-rag's ``POST /v1/retrieve``: ``{"query", "top_k"}`` in, and
+The contract is air-rag-service's ``POST /v1/retrieve``: ``{"query", "top_k"}`` in, and
 ``{"citations": [{"source_id", "snippet", "score", "metadata"}]}`` out. The request is
 ``extra="forbid"`` there, so this client sends exactly those two fields.
 
-**Why the key is chosen per call.** air-rag has no tenant field. Each of its keys
+**Why the key is chosen per call.** air-rag-service has no tenant field. Each of its keys
 belongs to one tenant, and a search covers only that tenant's documents. So the
 tenant is chosen by choosing the key: ``RagSettings.tenant_keys`` maps this service's
-tenants to air-rag keys, and every call uses the principal's (spec 0011,
+tenants to air-rag-service keys, and every call uses the principal's (spec 0011,
 ``REQ-RAG-016``). One unmapped ``api_key`` serves every tenant, which is right only for
 a single-tenant deployment.
 
 **Why the response model is loose.** :class:`Passage` reads the four fields the engine
-uses and ignores the rest. ``metadata`` is air-rag's free-form dict: ``title`` and
+uses and ignores the rest. ``metadata`` is air-rag-service's free-form dict: ``title`` and
 ``uri`` are read from it when present, as strings, and never trusted. A passage is a
 downstream's text, and so are its title and URL. The engine screens and delimits the
 snippet before a model sees it, and :func:`safe_title` / :func:`safe_uri` clean the
 two fields before an end user sees them (``REQ-RAG-010``).
 
-**Why no score filter is sent.** air-rag has no minimum-score option, so the engine
+**Why no score filter is sent.** air-rag-service has no minimum-score option, so the engine
 filters (``RagSettings.min_score``). It asks for ``top_k`` a little above
 ``max_passages`` so the filter has something to choose among.
 
@@ -48,7 +48,7 @@ __all__ = [
 ]
 
 _RETRIEVE_PATH: Final[str] = "/v1/retrieve"
-#: The shortest bound worth a call. Below it, air-rag's embedding call alone does not fit.
+#: The shortest bound worth a call. Below it, air-rag-service's embedding call alone does not fit.
 MIN_CALL_MS: Final[int] = 150
 _TITLE_CHARS: Final[int] = 200
 _URI_CHARS: Final[int] = 2048
@@ -56,11 +56,11 @@ _CONTROL: Final = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 class RagError(DownstreamError):
-    """air-rag produced no usable result. ``reason`` is one of spec 0010's four words."""
+    """air-rag-service produced no usable result. ``reason`` is one of spec 0010's four words."""
 
 
 class Passage(BaseModel):
-    """One of air-rag's ``citations``: a chunk, its score, and its metadata."""
+    """One of air-rag-service's ``citations``: a chunk, its score, and its metadata."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -81,8 +81,8 @@ class Passage(BaseModel):
 
 
 class RetrievalUsage(BaseModel):
-    """What air-rag says the call cost, in air-classifier's shape. air-rag sends none
-    today, and its local embeddings are free, so this is 0 until it does
+    """What air-rag-service says the call cost, in air-classifier's shape. It sends
+    none today, and its local embeddings are free, so this is 0 until it does
     (``REQ-RAG-013``)."""
 
     model_config = ConfigDict(extra="ignore")
@@ -91,7 +91,7 @@ class RetrievalUsage(BaseModel):
 
 
 class Retrieval(BaseModel):
-    """The slice of air-rag's ``RetrievalResponse`` this service reads."""
+    """The slice of air-rag-service's ``RetrievalResponse`` this service reads."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -122,7 +122,7 @@ def safe_uri(passage: Passage) -> str | None:
 
 
 class RagClient(DownstreamClient):
-    """Thin async client for air-rag. See the module docstring."""
+    """Thin async client for air-rag-service. See the module docstring."""
 
     def __init__(self, config: RagSettings) -> None:
         super().__init__(DownstreamService.RAG, config)
@@ -133,7 +133,7 @@ class RagClient(DownstreamClient):
         knowledge base, or raise :class:`RagError`. The caller checks
         :meth:`RagSettings.serves` first; a tenant with no key is a caller bug here."""
         if not self.settings.serves(tenant):
-            raise ValueError("this tenant has no air-rag key")
+            raise ValueError("this tenant has no air-rag-service key")
         body: dict[str, Any] = {"query": query[:4000], "top_k": self.settings.top_k}
         return await self.post_json(
             _RETRIEVE_PATH,

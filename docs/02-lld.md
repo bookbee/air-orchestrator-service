@@ -85,7 +85,7 @@ air-orchestrator-service/
     │   ├── infra.py                # air-infra — brokered stores and secrets
     │   ├── classifier.py           # air-classifier — the CLASSIFY stage (spec 0005)
     │   ├── base.py                 # shared headers/failures/metric/breaker  (spec 0010)
-    │   ├── rag.py                  # air-rag retrieval for GATHER           (spec 0011)
+    │   ├── rag.py                  # air-rag-service retrieval for GATHER           (spec 0011)
     │   ├── tools.py action.py recommender.py  ○                       (Phases 3-4)
     │   └── discovery.py          ○ # /v1/capabilities polling → live inventory (Phase 3)
     │
@@ -114,10 +114,11 @@ service convention is what keeps a single `air-client` target block coherent.
 The package, env prefix and metric namespace all spell the repo name in full
 (`air_orchestrator_service`, `AIR_ORCHESTRATOR_SERVICE__`, `air_orchestrator_service_*`).
 
-The estate is mid-migration on this point. `air-classifier` already ships an
+The estate is mid-migration on this point. `air-classifier-service` ships an
 `air_classifier_service` package but kept `AIR_CLASSIFIER__` and `air_classifier_*` for its
-env prefix and metrics; `air-rag`, `air-tools`, `air-model-gateway` and `air-infra` are still
-`air_<name>` throughout. This repo's package name follows air-classifier; its prefix and
+env prefix and metrics. `air-rag-service` ships `air_rag_service` and spells its prefix and
+metrics in full (`AIR_RAG_SERVICE__`, `air_rag_service_*`), as this repo does. `air-tools`,
+`air-model-gateway` and `air-infra` are still `air_<name>` throughout. This repo's package name follows air-classifier; its prefix and
 metric namespace are spelled in full. Both are deliberate, and worth revisiting only as one
 estate-wide decision rather than per repo.
 
@@ -510,7 +511,7 @@ table wins.
 | 1 — Contracts | **Shipped.** `/v1/chat` · `/v1/query` · `/v1/sessions/{id}` · the §4 event contract (`api/sse.py`) · every §5 schema · session store with tenant-namespaced keys · the propose → confirm → execute gate |
 | 2a — Turn engine | **Shipped.** `engine/turn.py`: guardrails in and out · prompt registry · real synthesis through air-model-gateway (spec 0003), streamed as `answer.delta` to SSE callers (spec 0004) · enforced turn deadline and per-turn/per-session cost ceilings, the turn ceiling checked against a pre-call estimate on both channels with air-classifier's spend counted (spec 0008) · payment cards masked on input (spec 0007) · an unknown `session_id` is a 404 and blank or malformed bodies are 422s after auth (spec 0009) · escalation on an explicit request for a human. **The event contract did not change** |
 | 2b — Durable sessions | **Not started.** Redis behind the existing `SessionStore` protocol; the key shape is already tenant-namespaced, so this is a backend swap |
-| 3 — Read path | **Started.** `clients/classifier.py` turns `CLASSIFY` real on the customer channel (spec 0005; acting on the verdict is deferred). The shared `clients/base.py` with a per-service breaker, and live downstream status on `/v1/capabilities` (spec 0010). `clients/rag.py` turns `GATHER` real on the customer channel: passages screened, numbered and delimited into the prompt, and cited answers as `citation` events (spec 0011; air-rag's key picked per tenant; the grounding check is a declared gap). Still to come: air-tools/air-recommender clients, the planner, inventory discovery from `/v1/capabilities`, parallel fan-out, and grounding checks |
+| 3 — Read path | **Started.** `clients/classifier.py` turns `CLASSIFY` real on the customer channel (spec 0005; acting on the verdict is deferred). The shared `clients/base.py` with a per-service breaker, and live downstream status on `/v1/capabilities` (spec 0010). `clients/rag.py` turns `GATHER` real on the customer channel: passages screened, numbered and delimited into the prompt, and cited answers as `citation` events (spec 0011; air-rag-service's key picked per tenant; the grounding check is a declared gap). Still to come: air-tools/air-recommender clients, the planner, inventory discovery from `/v1/capabilities`, parallel fan-out, and grounding checks |
 | 4 — Write path | **Not started.** `clients/action.py` behind the gate that already exists |
 | 5 — Semantic cache + business channel | **Not started.** Turns `CACHE` real; adds output-schema validation and the audit sink |
 | 6 — Evaluation, hardening & ops | **Not started.** Eval suites, OTel tracing, load test, runbook |
@@ -525,7 +526,7 @@ one, and this service must never be mistaken for a complete one in a demo. `_STU
 means.
 
 Routing is likewise still a rule, not a planner. A customer turn that will be synthesised
-routes to `rag` when air-rag is configured, and `/propose` is a **literal trigger**, not
+routes to `rag` when air-rag-service is configured, and `/propose` is a **literal trigger**, not
 intent detection. Choosing among capabilities waits for the planner, which arrives with
 air-tools, and a stand-in must not appear to understand intent it does not.
 

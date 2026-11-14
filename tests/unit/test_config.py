@@ -73,7 +73,7 @@ def test_disabled_cache_does_not_require_a_redis_url() -> None:
 
 
 def test_every_optional_service_defaults_to_disabled() -> None:
-    """air-rag, air-tools and air-action are empty repos.
+    """air-rag-service, air-tools and air-action are empty repos.
 
     Defaulting them on would make a fresh checkout report itself degraded against
     services that do not exist, which trains an operator to ignore the signal.
@@ -109,7 +109,8 @@ def test_direct_is_always_available() -> None:
 
 
 def test_air_rag_defaults_to_its_port_map_slot() -> None:
-    """8083 belongs to air-model-gateway; air-rag was bumped to 8087 (air-infra/README.md)."""
+    """8083 belongs to air-model-gateway; air-rag-service was bumped to 8087
+    (air-infra/README.md)."""
     assert _settings().downstream.rag.base_url == "http://localhost:8087"
 
 

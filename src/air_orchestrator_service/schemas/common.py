@@ -53,7 +53,7 @@ class Usage(BaseModel):
         default=0.0, description="What air-classifier reported spending on this turn."
     )
     retrieval_cost_usd: float = Field(
-        default=0.0, description="What air-rag reported spending on this turn."
+        default=0.0, description="What air-rag-service reported spending on this turn."
     )
     cache_hit: bool = False
 

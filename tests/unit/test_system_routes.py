@@ -92,7 +92,7 @@ async def test_ready_is_503_even_when_infra_alone_is_reachable(client: httpx.Asy
 async def test_ready_ignores_optional_downstreams(client: httpx.AsyncClient) -> None:
     """Every optional service is disabled in the test settings, and readiness holds.
 
-    This is docs/01-hld.md §7 as an executable claim: air-rag, air-tools and
+    This is docs/01-hld.md §7 as an executable claim: air-rag-service, air-tools and
     air-action being absent narrows what a turn can answer, and must not gate
     readiness — otherwise the service would never be ready in its own repo's
     default configuration.
@@ -235,12 +235,12 @@ async def test_metrics_is_absent_from_the_openapi_document(app: FastAPI) -> None
 
 @pytest.mark.usefixtures("reachable_model_gateway", "reachable_infra")
 async def test_capabilities_report_live_downstream_status(settings: Settings) -> None:
-    """REQ-CLB-007 / spec 0010 AC-2: air-rag configured but down drops the `rag` route;
+    """REQ-CLB-007 / spec 0010 AC-2: air-rag-service configured but down drops the `rag` route;
     air-classifier up is reported reachable."""
     downstream = settings.downstream.model_copy(
         update={
             "rag": settings.downstream.rag.model_copy(
-                update={"enabled": True, "base_url": "http://air-rag.invalid:8087"}
+                update={"enabled": True, "base_url": "http://air-rag-service.invalid:8087"}
             ),
             "classifier": settings.downstream.classifier.model_copy(
                 update={"enabled": True, "base_url": CLASSIFIER_BASE_URL}
@@ -250,7 +250,7 @@ async def test_capabilities_report_live_downstream_status(settings: Settings) ->
     app = build_app(settings.model_copy(update={"downstream": downstream}))
     transport = httpx.ASGITransport(app=app)
     with respx.mock(assert_all_called=False) as mock:
-        mock.get("http://air-rag.invalid:8087/v1/health").mock(
+        mock.get("http://air-rag-service.invalid:8087/v1/health").mock(
             side_effect=httpx.ConnectError("refused")
         )
         mock.get(f"{CLASSIFIER_BASE_URL}/v1/health").mock(return_value=httpx.Response(200))
@@ -265,7 +265,9 @@ async def test_capabilities_report_live_downstream_status(settings: Settings) ->
     assert body["routes"] == ["direct"]
 
     with respx.mock(assert_all_called=False) as mock:
-        mock.get("http://air-rag.invalid:8087/v1/health").mock(return_value=httpx.Response(200))
+        mock.get("http://air-rag-service.invalid:8087/v1/health").mock(
+            return_value=httpx.Response(200)
+        )
         mock.get(f"{CLASSIFIER_BASE_URL}/v1/health").mock(return_value=httpx.Response(200))
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get("/v1/capabilities", headers=auth(CUSTOMER_KEY))
@@ -281,7 +283,7 @@ async def test_ready_does_not_probe_optional_downstreams(settings: Settings) -> 
     downstream = settings.downstream.model_copy(
         update={
             "rag": settings.downstream.rag.model_copy(
-                update={"enabled": True, "base_url": "http://air-rag.invalid:8087"}
+                update={"enabled": True, "base_url": "http://air-rag-service.invalid:8087"}
             )
         }
     )
@@ -298,7 +300,7 @@ async def test_ready_does_not_probe_optional_downstreams(settings: Settings) -> 
         client_.probe = healthy
     transport = httpx.ASGITransport(app=app)
     with respx.mock(assert_all_called=False) as mock:
-        health = mock.get("http://air-rag.invalid:8087/v1/health").mock(
+        health = mock.get("http://air-rag-service.invalid:8087/v1/health").mock(
             return_value=httpx.Response(200)
         )
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

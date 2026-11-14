@@ -23,7 +23,7 @@ must always be able to tell a stubbed turn from a real one, and this engine must
 never be mistaken for a complete one in a demo.
 
 **Routing is a rule, not a planner.** ``GATHER`` is real for one capability:
-air-rag, on the customer channel, for every turn that will be synthesised (spec
+air-rag-service, on the customer channel, for every turn that will be synthesised (spec
 0011). Its passages reach the prompt numbered and delimited, and each one the
 answer cites by ``[n]`` becomes a ``citation``. Choosing among capabilities needs
 a planner, which arrives with air-tools. Until then the routes are fixed by
@@ -241,10 +241,10 @@ class TurnEngine:
         self._gateway = model_gateway
         #: ``None`` when air-classifier is not configured (spec 0005).
         self._classifier = classifier
-        #: ``None`` when air-rag is not configured (spec 0011).
+        #: ``None`` when air-rag-service is not configured (spec 0011).
         self._rag = rag
         #: What `GATHER` found for this turn: the passages the prompt carries, and
-        #: whether air-rag could not be consulted. Per request, like `_last_status`.
+        #: whether air-rag-service could not be consulted. Per request, like `_last_status`.
         self._sources: list[Passage] = []
         self._kb_unavailable = False
         self._retrieval_cost_usd = 0.0
@@ -840,7 +840,7 @@ class TurnEngine:
         will be synthesised. It is bounded like classification: a share of the turn's
         deadline, never more than is left (``REQ-RAG-004``). A failure narrows the
         answer rather than refusing it. The prompt then says the knowledge base could
-        not be consulted, and the turn is ``degraded`` naming air-rag, because an
+        not be consulted, and the turn is ``degraded`` naming ``air-rag``, because an
         answer given without the sources it should have had is a lesser answer
         (HLD §7, ``REQ-RAG-011``). That differs from ``CLASSIFY``, whose verdict
         nothing reads yet.
@@ -860,7 +860,7 @@ class TurnEngine:
         elif retrieve:
             bound_s = self._rag.bound_s(_remaining(deadline_at), deadline_s=deadline_s)
             if bound_s * 1000 < RAG_MIN_CALL_MS:
-                # Ours, not air-rag's: no `downstream` is named.
+                # Ours, not air-rag-service's: no `downstream` is named.
                 self._last_status = TurnStatus.DEGRADED
                 self._kb_unavailable = True
                 status, detail = StageStatus.DEGRADED, "turn deadline too close to retrieve"

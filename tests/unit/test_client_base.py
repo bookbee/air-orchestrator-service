@@ -30,7 +30,7 @@ from air_orchestrator_service.observability.logging import (
     clear_request_context,
 )
 
-_BASE = "http://air-rag.invalid:8087"
+_BASE = "http://air-rag-service.invalid:8087"
 _URL = f"{_BASE}/v1/thing"
 _KEY = "airr_secret_value_never_rendered"
 

@@ -10,7 +10,7 @@
 air-classifier is the only optional downstream with a client today, and that client carries
 its own copy of everything a downstream call needs: the key header, the request id, the
 failure taxonomy, the metric, and the rule that no URL or body reaches an error message.
-air-rag is next and air-tools after it. A third copy of that code is how one of them ends up
+air-rag-service is next and air-tools after it. A third copy of that code is how one of them ends up
 rendering a URL into a stage detail. Nothing stops a failing downstream from being called on
 every turn, either. A dead air-classifier costs each customer turn its full timeout share
 until someone notices. `/v1/capabilities` lists a route as available whenever its service is
@@ -29,7 +29,7 @@ service answers and its breaker is closed. `/v1/ready` keeps its current behavio
 
 **In scope**
 
-- The shared calling behaviour for optional downstreams (air-classifier now, air-rag in spec
+- The shared calling behaviour for optional downstreams (air-classifier now, air-rag-service in spec
   0011, air-tools later).
 - A per-service circuit breaker.
 - Live status of optional downstreams on `/v1/capabilities`.
@@ -78,9 +78,9 @@ service answers and its breaker is closed. `/v1/ready` keeps its current behavio
   with `breaker_open` and makes no request
 
 **AC-2 — Capabilities tell the truth** (`REQ-CLB-007`)
-- **Given** air-rag configured but down
+- **Given** air-rag-service configured but down
 - **When** an admin key calls `/v1/capabilities`
-- **Then** `downstreams` shows air-rag `reachable: false`, and `routes` does not contain `rag`
+- **Then** `downstreams` shows `air-rag` `reachable: false`, and `routes` does not contain `rag`
 
 ## 7. Failure and degradation
 

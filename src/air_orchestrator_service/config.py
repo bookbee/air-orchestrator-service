@@ -161,27 +161,27 @@ class ClassifierSettings(ServiceSettings):
 
 
 class RagSettings(ServiceSettings):
-    """air-rag (spec 0011): how much to ask for, and how much of it to use.
+    """air-rag-service (spec 0011): how much to ask for, and how much of it to use.
 
-    air-rag has no minimum-score or latency option, so the filtering is done here.
+    air-rag-service has no minimum-score or latency option, so the filtering is done here.
     The defaults keep the sources block in the prompt to roughly 5k characters.
     """
 
     deadline_share: float = Field(default=0.2, gt=0, le=1)
-    #: Passages to ask air-rag for. More than ``max_passages``, so the score filter
+    #: Passages to ask air-rag-service for. More than ``max_passages``, so the score filter
     #: has something to choose among.
     top_k: int = Field(default=6, ge=1, le=50)
     #: Passages that may reach the prompt (``REQ-RAG-005``).
     max_passages: int = Field(default=4, ge=1, le=20)
-    #: air-rag's score is cosine similarity, clamped to 0..1. Measured on the SIT
+    #: air-rag-service's score is cosine similarity, clamped to 0..1. Measured on the SIT
     #: corpus with local-768-v1 (nomic-embed-text), relevant top hits scored 0.55 to 0.81
     #: and off-topic queries' top hits 0.39 to 0.48, so 0.5 separates them. One corpus
     #: and one model: re-measure when real documents or another embedding model land.
     min_score: float = Field(default=0.5, ge=0, le=1)
     #: Each passage's snippet is cut to this many characters.
     snippet_chars: int = Field(default=1200, ge=100, le=8000)
-    #: This service's tenant -> the air-rag key for it (spec 0011, ``REQ-RAG-016``).
-    #: air-rag searches only the tenant on the calling key's record, so this map is
+    #: This service's tenant -> the air-rag-service key for it (spec 0011, ``REQ-RAG-016``).
+    #: air-rag-service searches only the tenant on the calling key's record, so this map is
     #: what keeps one tenant's documents out of another's turns. When it is set, a
     #: tenant missing from it does not retrieve (``REQ-RAG-017``). When it is empty,
     #: ``api_key`` serves every tenant: a single-tenant deployment. Set as JSON, e.g.
@@ -189,7 +189,7 @@ class RagSettings(ServiceSettings):
     tenant_keys: dict[str, SecretStr] = Field(default_factory=dict)
 
     def key_for(self, tenant: str) -> SecretStr | None:
-        """The air-rag key to call with for ``tenant``, or ``None`` when this tenant
+        """The air-rag-service key to call with for ``tenant``, or ``None`` when this tenant
         has no knowledge base. ``api_key`` only when no per-tenant keys are set."""
         if self.tenant_keys:
             return self.tenant_keys.get(tenant)

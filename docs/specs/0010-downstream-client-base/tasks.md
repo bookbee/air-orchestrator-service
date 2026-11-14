@@ -27,7 +27,7 @@ T1 → T2 → T3.
 - **Advances:** `REQ-CLB-007`, `008`
 - **Touches:** `api/v1/system.py`, `schemas/common.py`, `api/deps.py`, `main.py`
 - **Adds test:** `tests/unit/test_system_routes.py`
-- **Done when:** air-rag down drops the `rag` route, and `/v1/ready` sends no probe
+- **Done when:** air-rag-service down drops the `rag` route, and `/v1/ready` sends no probe
 
 ## Definition of done
 

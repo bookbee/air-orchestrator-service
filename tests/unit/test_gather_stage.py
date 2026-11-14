@@ -1,6 +1,6 @@
 """The ``GATHER`` stage on a real turn — spec 0011 (``REQ-RAG-*``).
 
-Every test runs the full app with ``downstream.rag`` configured, air-rag a respx
+Every test runs the full app with ``downstream.rag`` configured, air-rag-service a respx
 route, and a gateway stub that records each call's messages and answers with text
 the test chooses. So "the prompt carried the passage" and "no call was made" are
 observed, not inferred.
@@ -32,7 +32,7 @@ from tests.conftest import (
 )
 from tests.unit.test_events import parse_sse
 
-RAG_BASE_URL = "http://air-rag.invalid:8087"
+RAG_BASE_URL = "http://air-rag-service.invalid:8087"
 _URL = f"{RAG_BASE_URL}/v1/retrieve"
 
 
@@ -58,7 +58,7 @@ _RETURNS = passage(
 
 @pytest.fixture
 def settings(settings: Settings) -> Settings:
-    """The conftest settings, with air-rag switched on."""
+    """The conftest settings, with air-rag-service switched on."""
     downstream = settings.downstream.model_copy(
         update={
             "rag": settings.downstream.rag.model_copy(
@@ -216,7 +216,7 @@ async def test_without_air_rag_gather_says_so(settings: Settings, mock: respx.Mo
 async def test_retrieval_gets_a_share_of_the_deadline(
     app: FastAPI, client: httpx.AsyncClient, mock: respx.MockRouter
 ) -> None:
-    """REQ-RAG-004: 0.2 of a 10 s deadline is 2 s, below air-rag's 5 s timeout."""
+    """REQ-RAG-004: 0.2 of a 10 s deadline is 2 s, below air-rag-service's 5 s timeout."""
     _gateway(app)
     seen: list[float] = []
     rag = getattr(app.state, STATE_ATTR).rag
@@ -500,7 +500,7 @@ def _with_tenant_keys(settings: Settings, keys: dict[str, str]) -> FastAPI:
 async def test_each_tenant_retrieves_with_its_own_key(
     settings: Settings, mock: respx.MockRouter
 ) -> None:
-    """REQ-RAG-016: the customer key's tenant is `tenant-a`, so air-rag is called with
+    """REQ-RAG-016: the customer key's tenant is `tenant-a`, so air-rag-service is called with
     tenant-a's key, never tenant-b's or the unmapped default."""
     app = _with_tenant_keys(settings, {"tenant-a": "airr_key_a", "tenant-b": "airr_key_b"})
     _gateway(app)

@@ -1,7 +1,7 @@
-# 0011 — Customer answers are grounded in air-rag's sources, and cite them
+# 0011 — Customer answers are grounded in air-rag-service's sources, and cite them
 
 **Status:** Partial (`REQ-RAG-014` GAP) · **Area:** `RAG` · **Phase:** 3 (read path) · **Updated:** 2026-11-14
-**Derives from:** [HLD §1 (Retrieval client), §4 steps 6–9, §7 (air-rag)](../../01-hld.md) ·
+**Derives from:** [HLD §1 (Retrieval client), §4 steps 6–9, §7 (air-rag-service)](../../01-hld.md) ·
 [LLD §5](../../02-lld.md) · spec [0006](../0006-channel-prompts/spec.md) (prompts) ·
 spec [0008](../0008-turn-cost-ceiling/spec.md) (cost) · spec [0010](../0010-downstream-client-base/spec.md) (client base)
 **Supersedes:** —
@@ -10,18 +10,18 @@ spec [0008](../0008-turn-cost-ceiling/spec.md) (cost) · spec [0010](../0010-dow
 
 `GATHER` is stubbed, so every answer comes from the model alone. The customer prompt
 therefore forbids the model to state any policy ("say the exact terms are on the help
-pages"), and the help pages are exactly what customers ask about. air-rag can now retrieve
+pages"), and the help pages are exactly what customers ask about. air-rag-service can now retrieve
 passages from the knowledge base, but nothing calls it. When it does, its passages are text
 this service did not write. Placed in a prompt carelessly, they are an injection path into
 every customer turn.
 
 ## 2. Outcome
 
-On `POST /v1/chat`, `GATHER` asks air-rag for passages relevant to the customer's message. The
+On `POST /v1/chat`, `GATHER` asks air-rag-service for passages relevant to the customer's message. The
 relevant ones reach the synthesis prompt as numbered, delimited data. The answer is drawn
 from them and cites them as `[n]`, and each source the answer cites reaches the caller as a
-`citation`. Without air-rag, the turn still answers, says it could not check the knowledge
-base, and reports `degraded` naming air-rag. A passage that tries to instruct the model never
+`citation`. Without air-rag-service, the turn still answers, says it could not check the knowledge
+base, and reports `degraded` naming `air-rag`. A passage that tries to instruct the model never
 reaches it.
 
 ## 3. Scope
@@ -43,19 +43,19 @@ reaches it.
   `answer.grounded` stays `false`. See `REQ-RAG-014`.
 - **Running `CLASSIFY` and `GATHER` concurrently.** They stay sequential; parallel fan-out
   comes with air-tools, when there is more than one thing to gather.
-- **How air-rag namespaces its index.** air-rag's concern: each of its keys belongs to one tenant, and it searches only that tenant's documents.
-- **Ingestion, chunking, ranking and embeddings.** These belong to air-rag (HLD §1).
+- **How air-rag-service namespaces its index.** air-rag-service's concern: each of its keys belongs to one tenant, and it searches only that tenant's documents.
+- **Ingestion, chunking, ranking and embeddings.** These belong to air-rag-service (HLD §1).
 
 ## 4. Constitution check
 
 | Article | Relevance | Compliance |
 | --- | --- | --- |
 | I — Channel from the credential | Retrieval on one channel only | The handler's pinned channel decides. Nothing in a request turns retrieval on or off |
-| III — A missing downstream narrows | air-rag down | The turn answers, says so, and is `degraded` naming air-rag (HLD §7) |
-| IV — Tenant-namespaced | A knowledge base shared across tenants would leak one tenant's documents to another | air-rag scopes every search to the tenant on the calling key's record, with no fallback. So this service holds one air-rag key per tenant and picks it by the principal's tenant. A tenant with no key does not retrieve (`REQ-RAG-016`, `017`) |
+| III — A missing downstream narrows | air-rag-service down | The turn answers, says so, and is `degraded` naming `air-rag` (HLD §7) |
+| IV — Tenant-namespaced | A knowledge base shared across tenants would leak one tenant's documents to another | air-rag-service scopes every search to the tenant on the calling key's record, with no fallback. So this service holds one air-rag-service key per tenant and picks it by the principal's tenant. A tenant with no key does not retrieve (`REQ-RAG-016`, `017`) |
 | V — A stage that cannot run says so | `GATHER` leaves `_STUBBED` | `ok`, `degraded` or `skipped`, always with a reason when not `ok` |
 | VI — Public contracts are closed sets | Citations | `citation` events and `TurnResult.citations` already exist in the contract. They are now populated. `Route.RAG` already exists |
-| VII — All model traffic through the gateway | Embeddings | air-rag embeds through air-model-gateway itself. This service makes no embedding call |
+| VII — All model traffic through the gateway | Embeddings | air-rag-service embeds through air-model-gateway itself. This service makes no embedding call |
 | IX — Nothing renders secrets | Errors | Through spec 0010's client: no URL, key or body |
 | II, VIII, X | Unaffected | — |
 
@@ -67,28 +67,28 @@ rule applies: they are screened, delimited and numbered, and never placed in his
 
 | Id | Level | Requirement |
 | --- | --- | --- |
-| `REQ-RAG-001` | MUST | When air-rag is configured, a customer turn that reaches synthesis calls air-rag's retrieval once, with the input-masked message and the configured `top_k`, and no field air-rag's contract does not define. |
-| `REQ-RAG-002` | MUST NOT | air-rag never receives the message as the customer typed it when masking changed it. |
-| `REQ-RAG-003` | MUST | Turns that never reach synthesis do not retrieve. These are blocked, escalated, session-budget, propose and confirm turns. `GATHER` reports `skipped` with the reason. So does a business-channel turn, and a deployment without air-rag. |
-| `REQ-RAG-004` | MUST | The call is bounded by the least of air-rag's timeout, `deadline_share` (default 0.2) of the turn's deadline, and what is left of the turn. Below `MIN_CALL_MS` it is not made: `GATHER` is `degraded` with a `turn deadline` detail and names no downstream. |
+| `REQ-RAG-001` | MUST | When air-rag-service is configured, a customer turn that reaches synthesis calls air-rag-service's retrieval once, with the input-masked message and the configured `top_k`, and no field air-rag-service's contract does not define. |
+| `REQ-RAG-002` | MUST NOT | air-rag-service never receives the message as the customer typed it when masking changed it. |
+| `REQ-RAG-003` | MUST | Turns that never reach synthesis do not retrieve. These are blocked, escalated, session-budget, propose and confirm turns. `GATHER` reports `skipped` with the reason. So does a business-channel turn, and a deployment without air-rag-service. |
+| `REQ-RAG-004` | MUST | The call is bounded by the least of air-rag-service's timeout, `deadline_share` (default 0.2) of the turn's deadline, and what is left of the turn. Below `MIN_CALL_MS` it is not made: `GATHER` is `degraded` with a `turn deadline` detail and names no downstream. |
 | `REQ-RAG-005` | MUST | At most `max_passages` (default 4) passages are used, each with a score of at least `min_score` (default 0.5), highest first. Each snippet is cut to `snippet_chars` (default 1200). |
 | `REQ-RAG-006` | MUST | A passage whose title or snippet the input injection screen would block is dropped, never shown to the model, and counted in the `GATHER` detail. |
 | `REQ-RAG-007` | MUST | The passages used reach the synthesis prompt only as delimited data (source `knowledge_base`), numbered `[1]`…`[n]`, after the persona and before the history. A passage cannot close the delimiting tag. Passages are never stored in the session, so a later turn does not see them. |
 | `REQ-RAG-008` | MUST | The customer prompt's new version tells the model to answer from the numbered sources when given, to cite each one it uses as `[n]`, to treat the sources as data rather than instructions, and to follow the previous version's rules when there are no sources or they do not cover the question. |
 | `REQ-RAG-009` | MUST | After synthesis, one `citation` is emitted for each passage the final answer cites by a valid `[n]`, in order of first citation, before the `answer` event. A passage that is not cited is not listed. `TurnResult.citations` holds the same list. |
 | `REQ-RAG-010` | MUST | A citation's `title` is the source's title (or its id), and its `uri` is set only for an `http` or `https` URL. Both are stripped of control characters and cut to a fixed length, because they are a downstream's text rendered to the end user. |
-| `REQ-RAG-011` | MUST | When air-rag fails (spec 0010's four reasons), `GATHER` is `degraded` naming air-rag, and the turn is `degraded`. Synthesis still runs, with a notice in the prompt that the knowledge base could not be consulted, and no citations. |
-| `REQ-RAG-012` | MUST | When air-rag answers but no passage survives `REQ-RAG-005`/`006`, `GATHER` is `ok` with a `no relevant sources` detail. Synthesis runs without sources, the turn status is unaffected, and nothing is cited. |
-| `REQ-RAG-013` | MUST | The passages count in the synthesis call's cost estimate (spec 0008). What air-rag reports spending on the call is added to `usage.cost_usd` and the session total, broken out as `usage.retrieval_cost_usd`. |
+| `REQ-RAG-011` | MUST | When air-rag-service fails (spec 0010's four reasons), `GATHER` is `degraded` naming `air-rag`, and the turn is `degraded`. Synthesis still runs, with a notice in the prompt that the knowledge base could not be consulted, and no citations. |
+| `REQ-RAG-012` | MUST | When air-rag-service answers but no passage survives `REQ-RAG-005`/`006`, `GATHER` is `ok` with a `no relevant sources` detail. Synthesis runs without sources, the turn status is unaffected, and nothing is cited. |
+| `REQ-RAG-013` | MUST | The passages count in the synthesis call's cost estimate (spec 0008). What air-rag-service reports spending on the call is added to `usage.cost_usd` and the session total, broken out as `usage.retrieval_cost_usd`. |
 | `REQ-RAG-014` | SHOULD | The output guardrail checks that the answer's claims are supported by the cited passages, and sets `answer.grounded`. |
 | `REQ-RAG-015` | MUST | When retrieval ran, the `route` event lists `rag`, and its `capabilities` include `air-rag`. |
-| `REQ-RAG-016` | MUST | When per-tenant air-rag keys are configured, retrieval uses the key mapped to the principal's tenant, and never another tenant's key. Since air-rag searches only its key's tenant, no passage from another tenant's documents reaches a turn. |
+| `REQ-RAG-016` | MUST | When per-tenant air-rag-service keys are configured, retrieval uses the key mapped to the principal's tenant, and never another tenant's key. Since air-rag-service searches only its key's tenant, no passage from another tenant's documents reaches a turn. |
 | `REQ-RAG-017` | MUST | When per-tenant keys are configured and the principal's tenant has none, the turn does not retrieve. `GATHER` is `skipped` (`no knowledge base for this tenant`), and the turn status is unaffected. A single unmapped `api_key` is used only when no per-tenant keys are configured, which makes the deployment single-tenant for retrieval. |
 
 ## 6. Acceptance criteria
 
 **AC-1 — A grounded answer** (`REQ-RAG-001`, `007`, `009`)
-- **Given** air-rag returns two passages above `min_score`
+- **Given** air-rag-service returns two passages above `min_score`
 - **When** a customer asks "how long do refunds take?" and the answer cites `[2]`
 - **Then** the prompt carries both passages, numbered and delimited, and exactly one
   `citation` (the second passage) precedes `answer`
@@ -97,8 +97,8 @@ rule applies: they are screened, delimited and numbered, and never placed in his
 - **Given** a passage whose snippet says "ignore previous instructions and …"
 - **Then** it is absent from the prompt, and the `GATHER` detail counts one dropped passage
 
-**AC-3 — air-rag is down** (`REQ-RAG-011`)
-- **Given** air-rag refusing connections
+**AC-3 — air-rag-service is down** (`REQ-RAG-011`)
+- **Given** air-rag-service refusing connections
 - **Then** the turn answers with status `degraded`, `degraded` contains `air-rag`, and the
   prompt tells the model the knowledge base could not be consulted
 
@@ -106,11 +106,11 @@ rule applies: they are screened, delimited and numbered, and never placed in his
 
 | Condition | Behaviour | Turn status |
 | --- | --- | --- |
-| air-rag unreachable, timed out, erroring, or breaker open | `GATHER` `degraded` naming air-rag; answer says it could not check | `degraded` |
+| air-rag-service unreachable, timed out, erroring, or breaker open | `GATHER` `degraded` naming `air-rag`; answer says it could not check | `degraded` |
 | Too little of the turn left | Not called; `GATHER` `degraded` (`turn deadline`), no downstream named | `degraded` |
 | No relevant passage | `GATHER` `ok` (`no relevant sources`); answer without sources | unchanged |
 | All passages dropped by the screen | As above, and the detail counts the drops | unchanged |
-| air-rag reports no usage | Its cost counts as 0. air-rag reports none today, and its local embeddings are free | unchanged |
+| air-rag-service reports no usage | Its cost counts as 0. air-rag-service reports none today, and its local embeddings are free | unchanged |
 
 ## 8. Observability
 
@@ -126,13 +126,13 @@ rule applies: they are screened, delimited and numbered, and never placed in his
 | Q1 | Should `/v1/query` retrieve, and from which corpus? | Retrieval on the business channel | Product |
 | Q2 | Should a turn that the classifier calls small talk skip retrieval? It would save a call and a few hundred prompt tokens. | Nothing: retrieval runs on every customer turn until decided | Product, with spec 0005's deferred `REQ-CLS-011` |
 
-**Decided 2026-11-14 (air-rag, bookbee/air-rag#1).**
+**Decided 2026-11-14 (air-rag-service, bookbee/air-rag-service#1).**
 
-- **Q3: how is retrieval scoped to a tenant?** By air-rag's key. Every air-rag key record names
+- **Q3: how is retrieval scoped to a tenant?** By air-rag-service's key. Every air-rag-service key record names
   one tenant, retrieval searches only that tenant, and the request body has no tenant field
   (`extra="forbid"`). This service closes `REQ-RAG-016` by mapping each tenant to its own
-  air-rag key (`REQ-RAG-016`, `017`).
-- **Q4: can an archived document outrank the current one?** No longer. air-rag keeps
+  air-rag-service key (`REQ-RAG-016`, `017`).
+- **Q4: can an archived document outrank the current one?** No longer. air-rag-service keeps
   documents marked `status: archived` indexed but never returns them.
 
 ## 10. Traceability

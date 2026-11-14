@@ -13,7 +13,7 @@ items 01–08. The HLD reconciles that diagram against the AIR repositories.
 air-orchestrator-service decides what that message needs, gathers it from the specialist services, and
 streams back a grounded reply.
 
-Everything expensive or specialised already lives somewhere else — retrieval in `air-rag`,
+Everything expensive or specialised already lives somewhere else — retrieval in `air-rag-service`,
 classification in `air-classifier`, recommendations in `air-recommender`, reads in
 `air-tools`, writes in `air-action`, models behind `air-model-gateway`, stores behind `air-infra`. What does *not*
 exist is the thing that turns "where is my order and can you cancel it" into a sequence of
@@ -66,7 +66,7 @@ selecting the profile — see [HLD §3](01-hld.md).
   and `air-action`. A tool added there must not require a code change here.
 - **No mutating capability of its own.** air-orchestrator-service never writes to a business system
   directly, not even "just this once" for a simple case.
-- **No retrieval or indexing.** Vector stores, chunking and embeddings are `air-rag`'s.
+- **No retrieval or indexing.** Vector stores, chunking and embeddings are `air-rag-service`'s.
 - **No model hosting or provider SDKs.** `air-model-gateway` is the only model path.
 - **No model gateway of its own.** The diagram's *Model Gateway* box is `air-model-gateway`
   :8083 (which replaced air-llm), and it already does multi-provider routing by model class,
@@ -151,14 +151,14 @@ running code, not an aspiration.
 6. **`air-recommender`'s place — resolved.** Not on the diagram. A fourth read-path capability,
    same shape as air-tools, not architecturally distinct ([HLD §1](01-hld.md)).
 
-### New decision: agent placement inside air-tools/air-rag
+### New decision: agent placement inside air-tools/air-rag-service
 
 `shopassist-service`'s five agents (`OrderTrackingAgent` et al.) each run **reason → tool call
 → interpret** — two LLM calls plus a data call, per agent, per sub-task. Externalising RAG and
-tools into their own repos (`air-rag`, `air-tools`) forced a decision this section's original
+tools into their own repos (`air-rag-service`, `air-tools`) forced a decision this section's original
 scope didn't cover: where does that reasoning loop live once it's not all one process?
 
-**Decided: inside air-tools and air-rag, not air-orchestrator-service.** Each hosts its own air-model-gateway client
+**Decided: inside air-tools and air-rag-service, not air-orchestrator-service.** Each hosts its own air-model-gateway client
 and does its own reason/interpret calls; air-orchestrator-service sends **one coarse request per sub-task**
 (`POST /v1/agents/{name}` on air-tools) and folds the structured result into synthesis. This
 keeps the non-goal already on record — "a tool added there must not require a code change
@@ -208,7 +208,7 @@ in place, so this is a backend swap.
 
 ### Phase 3 — Read path · *not started*
 
-Typed clients for `air-rag`, `air-tools`, `air-classifier`, `air-recommender`; capability
+Typed clients for `air-rag-service`, `air-tools`, `air-classifier`, `air-recommender`; capability
 discovery; parallel fan-out with per-call budgets and fail-soft degradation; grounding and
 citation checks in the output guardrail.
 *Exit:* Answers grounded in retrieval and read-only tools; each service can be killed
@@ -241,7 +241,7 @@ load test, runbook, image published.
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
 | **Prompt injection reaches a mutation.** Retrieved content or user text talks the model into proposing a destructive action | Unauthorised writes to a business system | The split itself is the primary control: air-orchestrator-service can only ever *propose*. Beyond that — confirmation is a separate turn against a stored proposal, never inferable from the same message; air-action re-validates independently and is the last word; retrieved content is delimited and never treated as instruction |
-| **Most of the platform does not exist yet.** air-tools, air-action, air-rag are empty repos | Phases 3–4 have nothing to integrate against | Contract-first: define each client against the service's published contract, ship a fixture-backed fake, and make absence a capability downgrade (G5). Phase 2 is deliberately shaped to be useful with zero downstreams |
+| **Most of the platform does not exist yet.** air-tools, air-action, air-rag-service are empty repos | Phases 3–4 have nothing to integrate against | Contract-first: define each client against the service's published contract, ship a fixture-backed fake, and make absence a capability downgrade (G5). Phase 2 is deliberately shaped to be useful with zero downstreams |
 | **Fan-out latency compounds.** Three services plus a model, serially, blows the turn budget | Unusable P95 | Parallel fan-out with a per-turn deadline; partial results synthesise into an answer that says what is missing. Stage events mean the user sees progress even at the slow end |
 | Cost blowout on a single turn | Unbounded spend from a runaway loop | Hard per-turn ceiling on model calls and tokens, enforced in the orchestrator and cross-checked against the gateway's own cost accounting; a turn that hits it answers with what it has |
 | Session state grows unbounded | Redis memory exhaustion, and long histories inflate every prompt | TTL on every session key; a bounded turn window in the prompt with older context summarised |
@@ -292,5 +292,5 @@ Status against each, as of this review round:
 - [x] The six items in §4 are resolved (item 4, transcript retention, deferred rather than
       decided) — **Q1 (routing mechanism) is resolved as LLM-based decomposition**, reversing
       the earlier tool-calling recommendation, since the gateway still has no `tools` field
-- [x] **New:** agent placement — reason/tool/interpret loops live inside air-tools/air-rag,
+- [x] **New:** agent placement — reason/tool/interpret loops live inside air-tools/air-rag-service,
       each with its own air-model-gateway client; air-orchestrator-service sends one coarse request per sub-task

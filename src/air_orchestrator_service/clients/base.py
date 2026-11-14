@@ -1,6 +1,6 @@
 """What every optional downstream call has in common — spec 0010.
 
-air-classifier, air-rag, and air-tools after them, are each reached the same way: one POST
+air-classifier, air-rag-service, and air-tools after them, are each reached the same way: one POST
 of JSON, the key in ``X-API-Key``, the turn's request id in ``X-Request-ID``, and a bound
 taken from the turn's deadline. What can go wrong is also the same: no connection, no
 answer in time, a status that is not 2xx, a body that does not parse. This module is the
@@ -243,7 +243,7 @@ class DownstreamClient:
         :class:`DownstreamError`. ``parse`` runs inside the breaker's verdict: a body
         that does not validate is a failure like a 500 (``REQ-CLB-002``). ``api_key``
         replaces the configured key for this call only: a service that scopes by key
-        (air-rag) is called with the caller's tenant's key."""
+        (air-rag-service) is called with the caller's tenant's key."""
         if not self.breaker.admit():
             raise self._failed("breaker_open", f"{self._service.value} circuit is open")
         headers = {}
