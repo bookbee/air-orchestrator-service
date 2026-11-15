@@ -18,7 +18,7 @@ import pytest
 import respx
 from fastapi import FastAPI
 
-from air_orchestrator_service.api.deps import require_principal
+from air_orchestrator_service.api.deps import STATE_ATTR, require_principal
 from air_orchestrator_service.config import Settings
 from air_orchestrator_service.constants import Channel, Route, Stage
 from air_orchestrator_service.engine.plan import Plan, Step
@@ -129,11 +129,15 @@ async def _chat(
     planner: FixedPlanner,
     message: str = "Where is my order?",
     key: str = CUSTOMER_KEY,
+    options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     use_planner(app, planner)
+    payload: dict[str, Any] = {"message": message}
+    if options is not None:
+        payload["options"] = options
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-        response = await http.post("/v1/chat", headers=auth(key), json={"message": message})
+        response = await http.post("/v1/chat", headers=auth(key), json=payload)
     assert response.status_code == httpx.codes.OK, response.text
     body: dict[str, Any] = response.json()
     return body
@@ -397,5 +401,123 @@ async def test_the_rules_for_lookups_travel_only_with_lookups(
 
     with_lookups, without = calls[0]["messages"], calls[1]["messages"]
     assert "You may say you checked" in _system_text(calls[0])
-    assert not any("lookup" in m["content"].lower() for m in without if m["role"] == "system")
+    # No lookups message on a turn without lookups. (The channel prompt itself may name
+    # lookups in general since customer_care:v3, REQ-PRM-002; the rules stay out of it.)
+    assert not any("lookup" in m["content"].lower() for m in without[1:] if m["role"] == "system")
+    assert (
+        "Results of lookups made for this message in the business systems"
+        not in without[0]["content"]
+    )
     assert with_lookups[0] == without[0]  # the channel prompt itself is the same
+
+
+def _problem(code: str, status: int) -> httpx.Response:
+    return httpx.Response(
+        status,
+        json={
+            "type": f"https://air.local/problems/{code}",
+            "title": "No",
+            "status": status,
+            "code": code,
+        },
+        headers={"Content-Type": "application/problem+json"},
+    )
+
+
+async def test_a_refused_read_is_an_answer_and_keeps_the_breaker_closed(
+    app: FastAPI, settings: Settings, mock: respx.MockRouter
+) -> None:
+    """``REQ-TGW-029``, OR-007. A ``not_found`` read is the gateway answering: the turn
+    is ``ok``, the prompt says nothing was found on this customer's account (not that
+    the lookup failed), and as many of them as the breaker's threshold leave it closed,
+    so the next customer's lookup is still sent."""
+    calls = _gateway(app)
+    _inventory(mock)
+    threshold = settings.downstream.tools_gateway.breaker_threshold
+    route = _tool(
+        mock,
+        "orders.get",
+        *[_problem("not_found", 404)] * threshold,
+        _problem("not_permitted", 403),
+        _ok("orders.get"),
+    )
+    plan = _plan(Step("orders.get", {"order_id": "99999"}))
+
+    bodies = [await _chat(app, plan) for _ in range(threshold + 1)]
+
+    for body in bodies:
+        assert body["status"] == "ok" and body["degraded"] == []
+        gather = _gather(body)
+        assert (gather["status"], gather["detail"]) == ("ok", "orders.get found nothing")
+    prompt = _system_text(calls[0])
+    assert "found nothing on this customer's account for this message: orders.get" in prompt
+    assert "could not be made" not in prompt
+    breaker = getattr(app.state, STATE_ATTR).tools_gateway.breaker
+    assert not breaker.is_open
+    last = await _chat(app, plan)
+    assert route.call_count == threshold + 2
+    assert _gather(last)["detail"] == "orders.get ok"
+
+
+async def test_allow_routes_narrows_what_the_turn_may_use(
+    app: FastAPI, mock: respx.MockRouter
+) -> None:
+    """``REQ-TGW-030``, OR-008. ``["rag"]``: the planner is offered no capability and a
+    planned read is never sent. ``["tools"]``: reads only, and a planned change is not
+    proposed. ``["action"]``: writes only. It never widens: omitted, everything live."""
+    _gateway(app)
+    _inventory(mock)
+    get = _tool(mock, "orders.get", _ok("orders.get"))
+    propose = mock.post(url__startswith=f"{TOOLS_GATEWAY_BASE_URL}/v1/actions/")
+    read = Step("orders.get", {"order_id": "48213"})
+    cancel = Step("orders.cancel", {"order_id": "48213"})
+    planner = FixedPlanner(
+        Plan(routes=(Route.TOOLS, Route.ACTION), reason="injected", reads=(read,))
+    )
+    writer = FixedPlanner(Plan(routes=(Route.ACTION,), reason="injected", write=cancel))
+
+    def offered(p: FixedPlanner) -> tuple[set[str], bool]:
+        ctx = p.seen[-1]
+        return {c.name for c in ctx.offered.capabilities}, ctx.rag_serves
+
+    rag_only = await _chat(app, planner, options={"allow_routes": ["rag"]})
+    assert offered(planner)[0] == set()
+    assert get.call_count == 0
+    assert "tools" not in rag_only["routes"]
+
+    await _chat(app, planner, options={"allow_routes": ["tools"]})
+    assert offered(planner) == ({"orders.list_recent", "orders.get"}, False)
+    assert get.call_count == 1
+
+    tools_only = await _chat(app, writer, options={"allow_routes": ["tools"]})
+    assert propose.call_count == 0
+    assert tools_only["proposal"] is None and "action" not in tools_only["routes"]
+
+    await _chat(app, planner, options={"allow_routes": ["action"]})
+    assert offered(planner)[0] == {"orders.cancel"}
+    assert get.call_count == 1
+
+    await _chat(app, planner)
+    assert offered(planner)[0] == {"orders.list_recent", "orders.get", "orders.cancel"}
+
+
+async def test_an_unavailable_gateway_degrades_every_turn(
+    app: FastAPI, mock: respx.MockRouter
+) -> None:
+    """``REQ-TGW-031``. The inventory cannot be fetched and nothing is planned (as with
+    the planner, which is offered nothing): ``GATHER`` is still ``degraded`` naming
+    air-tools-gateway and the prompt says lookups could not be made. A turn narrowed
+    away from tools and actions is not degraded by it."""
+    calls = _gateway(app)
+    mock.get(INVENTORY_URL).mock(return_value=httpx.Response(503))
+    direct = FixedPlanner(Plan(routes=(Route.DIRECT,), reason="injected"))
+
+    body = await _chat(app, direct, message="Thanks!")
+
+    gather = _gather(body)
+    assert (gather["status"], gather["detail"]) == ("degraded", "air-tools-gateway is unavailable")
+    assert body["status"] == "degraded" and body["degraded"] == ["air-tools-gateway"]
+    assert "could not be made for this message: order and account lookups" in _system_text(calls[0])
+
+    narrowed = await _chat(app, direct, message="Thanks!", options={"allow_routes": ["rag"]})
+    assert narrowed["status"] == "ok" and narrowed["degraded"] == []

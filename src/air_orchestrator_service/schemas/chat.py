@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictBool
 
 from air_orchestrator_service.constants import Route, Stage, StageStatus, TurnStatus
 from air_orchestrator_service.schemas.common import Usage
@@ -111,7 +111,8 @@ class Confirmation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     proposal_id: str = Field(min_length=1, max_length=128)
-    approve: bool
+    #: Strict: a string or number is refused, never read as consent (REQ-MUT-015).
+    approve: StrictBool
 
 
 class ChatRequest(BaseModel):

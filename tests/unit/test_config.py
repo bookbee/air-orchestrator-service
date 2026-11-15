@@ -413,7 +413,7 @@ def test_planner_settings_are_off_by_default_and_bounded() -> None:
     """Spec 0013 plan §4 (``REQ-PLN-014``): off, ``cloud``, and each knob bounded."""
     planner = Settings().planner
     assert (planner.enabled, planner.model_class) == (False, ModelClass.CLOUD)
-    assert (planner.deadline_share, planner.max_tokens, planner.max_reads) == (0.15, 400, 3)
+    assert (planner.deadline_share, planner.max_tokens, planner.max_reads) == (0.3, 400, 3)
     assert planner.history_turns == 6
     for field, value in [
         ("deadline_share", 0),

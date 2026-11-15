@@ -10,6 +10,13 @@ With no write on offer (the business channel, a key without ``allow_actions``),
 ``propose`` can only be ``null``. The model's choices are constrained before
 validation, not only after (plan §5).
 
+**Why each capability is its own branch.** A step is ``anyOf`` one branch per offered
+capability, each pairing its name with that capability's own ``input_schema`` as the
+shape of ``arguments``. With ``arguments`` left as a bare ``{"type": "object"}``, a
+provider that constrains decoding to the schema has no property it may write, and
+Gemini answered ``"arguments": {}`` for every step (SIT 2026-11-15), so no lookup could
+name an order. The input schema has already passed spec 0012's entry checks.
+
 **Why the output is still checked afterwards.** air-model-gateway forwards a schema
 and does not enforce it, so a provider that ignores it can return anything.
 :func:`parse_plan` and :func:`parse_follow_up` check the shape (``REQ-PLN-003``): an
@@ -26,11 +33,19 @@ field out of its schema puts "no further reads" in the grammar itself
 from __future__ import annotations
 
 import json
-from typing import Any, Final
+from typing import Annotated, Any, Final
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, ValidationError
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictStr,
+    ValidationError,
+)
 
-from air_orchestrator_service.clients.tools_gateway import Inventory
+from air_orchestrator_service.clients.tools_gateway import Capability, Inventory
 
 __all__ = [
     "REASON_MAX_CHARS",
@@ -41,10 +56,21 @@ __all__ = [
     "parse_follow_up",
     "parse_plan",
     "plan_schema",
+    "step_names",
 ]
 
 REASON_MAX_CHARS: Final[int] = 200
 _NAME_MAX_CHARS: Final[int] = 128
+
+
+def _cut(reason: str) -> str:
+    """The model's reason, cut rather than refused: it is only ever logged, and a
+    provider that ignores ``maxLength`` must not cost a correct plan (``REQ-PLN-003``)."""
+    return reason[:REASON_MAX_CHARS]
+
+
+#: A string, at most ``REASON_MAX_CHARS`` once cut.
+Reason = Annotated[StrictStr, AfterValidator(_cut)]
 
 
 class StepOutput(BaseModel):
@@ -65,7 +91,7 @@ class PlanOutput(BaseModel):
     reads: list[StepOutput]
     propose: StepOutput | None
     needs_results: StrictBool
-    reason: StrictStr = Field(max_length=REASON_MAX_CHARS)
+    reason: Reason
 
 
 class FollowUpOutput(BaseModel):
@@ -74,30 +100,51 @@ class FollowUpOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     propose: StepOutput | None
-    reason: StrictStr = Field(max_length=REASON_MAX_CHARS)
+    reason: Reason
 
 
 def _names(offered: Inventory, kind: str) -> list[str]:
     return sorted(c.name for c in offered.capabilities if c.kind == kind)
 
 
-def _step_schema(names: list[str]) -> dict[str, Any]:
+def _branch(capability: Capability) -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
         "required": ["capability", "arguments"],
         "properties": {
-            "capability": {"type": "string", "enum": names},
-            "arguments": {"type": "object"},
+            "capability": {"type": "string", "enum": [capability.name]},
+            "arguments": dict(capability.input_schema),
         },
     }
 
 
+def _step_schema(offered: Inventory, kind: str) -> dict[str, Any]:
+    """A step naming one offered capability of ``kind``, with its arguments' shape."""
+    branches = [
+        _branch(c) for c in sorted(offered.capabilities, key=lambda c: c.name) if c.kind == kind
+    ]
+    if not branches:  # an empty list's items: never written, but must be a schema
+        return {"type": "object", "additionalProperties": False}
+    return branches[0] if len(branches) == 1 else {"anyOf": branches}
+
+
+def step_names(schema: dict[str, Any]) -> list[str]:
+    """The capability names a step schema admits, in order: for tests and logs."""
+    branches = schema.get("anyOf", [schema])
+    return [
+        name
+        for branch in branches
+        if branch.get("type") == "object"
+        for name in branch.get("properties", {}).get("capability", {}).get("enum", [])
+    ]
+
+
 def _propose_schema(offered: Inventory) -> dict[str, Any]:
-    writes = _names(offered, "write")
-    if not writes:
+    if not _names(offered, "write"):
         return {"type": "null"}
-    return {"anyOf": [_step_schema(writes), {"type": "null"}]}
+    step = _step_schema(offered, "write")
+    return {"anyOf": [*step.get("anyOf", [step]), {"type": "null"}]}
 
 
 _REASON: Final[dict[str, Any]] = {"type": "string", "maxLength": REASON_MAX_CHARS}
@@ -115,7 +162,7 @@ def plan_schema(offered: Inventory, *, max_reads: int) -> dict[str, Any]:
             "reads": {
                 "type": "array",
                 "maxItems": max_reads if reads else 0,
-                "items": _step_schema(reads),
+                "items": _step_schema(offered, "read"),
             },
             "propose": _propose_schema(offered),
             "needs_results": {"type": "boolean"},

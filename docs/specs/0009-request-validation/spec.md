@@ -65,6 +65,7 @@ whatever its body.
 | `REQ-VAL-005` | MUST | `options.allow_routes`, when present, has at least one route; `[]` is refused with 422. |
 | `REQ-VAL-006` | MUST | A request to a route that requires a key, without a valid key, is refused with 401, whatever its body, malformed JSON included. Body validation errors are reported only to authenticated callers. |
 | `REQ-VAL-007` | SHOULD | `output_schema` is checked against the full JSON Schema metaschema. |
+| `REQ-VAL-008` | MUST | A body that is not valid JSON is refused, after authentication (`REQ-VAL-006`), with 400 `malformed-request`, not a 422 naming a byte offset as a field. |
 
 ## 6. Acceptance criteria
 
@@ -122,3 +123,4 @@ Each refusal is a problem response with its `request_id`, and the access log rec
 | `REQ-VAL-005` | `tests/unit/test_request_validation.py::test_an_empty_route_list_is_a_422` |
 | `REQ-VAL-006` | `tests/unit/test_request_validation.py::test_an_unauthenticated_bad_body_is_a_401` |
 | `REQ-VAL-007` | GAP — a structural check covers the shapes SIT found; the full metaschema needs the `jsonschema` dependency, declined for now (§9, Q2) |
+| `REQ-VAL-008` | `tests/unit/test_request_validation.py::test_a_body_that_is_not_json_is_a_malformed_request` |

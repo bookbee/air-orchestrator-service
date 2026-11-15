@@ -101,6 +101,11 @@ _PLAN_MIN_MS: Final[int] = 100
 
 _DISABLED: Final[str] = "planner disabled"
 _NOTHING_OFFERED: Final[str] = "no capabilities offered"
+#: The gateway could not be asked (OR-011): an outage, not a tenant with nothing on
+#: offer, so ``PLAN`` names it rather than reading as a quiet turn.
+_INVENTORY_UNAVAILABLE: Final[str] = (
+    "no capabilities offered: air-tools-gateway inventory unavailable"
+)
 _CONFIRMING: Final[str] = "nothing to plan: a confirmation turn"
 
 
@@ -345,6 +350,13 @@ class ModelPlanner:
             return PlanOutcome(fallback, StageStatus.SKIPPED, _CONFIRMING)
         menu = _menu(ctx)
         if not menu.capabilities:
+            if not ctx.offered.available:
+                return PlanOutcome(
+                    fallback,
+                    StageStatus.SKIPPED,
+                    _INVENTORY_UNAVAILABLE,
+                    downstream=DownstreamService.TOOLS_GATEWAY,
+                )
             return PlanOutcome(fallback, StageStatus.SKIPPED, _NOTHING_OFFERED)
 
         prompt, system = self._prompts.render(PLANNER)
@@ -379,15 +391,17 @@ class ModelPlanner:
 
         reads = tuple(_step(read) for read in parsed.reads)
         write = _step(parsed.propose) if parsed.propose is not None else None
-        routes = [Route.RAG] if fallback.retrieve else []
+        # REQ-PLN-015: a turn the lookups answer does not also search the knowledge base.
+        retrieve = fallback.retrieve and not reads and write is None
+        routes = [Route.RAG] if retrieve else []
         routes += [Route.TOOLS] if reads else []
         routes += [Route.ACTION] if write is not None else []
         plan = Plan(
             routes=tuple(routes) or (Route.DIRECT,),
             # Fixed text: the model's `reason` never reaches the client (REQ-PLN-013).
             reason="planned: "
-            + (", ".join(_describe(reads, write, fallback.retrieve)) or "a direct answer"),
-            retrieve=fallback.retrieve,
+            + (", ".join(_describe(reads, write, retrieve)) or "a direct answer"),
+            retrieve=retrieve,
             reads=reads,
             write=write,
             needs_results=parsed.needs_results,

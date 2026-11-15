@@ -71,6 +71,57 @@
         "Where is my order 48213?"
       ],
       "expect": "Run with the gateway stopped, so GATHER is degraded and the prompt carries the 'could not be made' notice. Says briefly it could not check just now; states no status, date or amount; does not claim to have checked; offers to try again in a little while or to ask to speak to a person."
+    },
+    {
+      "name": "order-not-found",
+      "requires": "lookups",
+      "turns": [
+        "Where is order 99999?"
+      ],
+      "expect": "The lookup found nothing on this customer's account. Says plainly it could not find that order on their account and asks them to check the number. Does not say it cannot look up orders, does not ask for an order number already given, and does not say whether the order exists for anyone else."
+    },
+    {
+      "name": "cancel-then-check",
+      "requires": "actions",
+      "turns": [
+        "Please cancel my last order",
+        {
+          "confirm": "last"
+        },
+        "Thanks! Is it cancelled now?"
+      ],
+      "expect": "Turn 1 is the fixed proposal; turn 2 the fixed 'Done'. Turn 3 confirms the order is cancelled, from the lookup or the conversation; never says the earlier 'Done' was wrong, that it cannot make changes, or that the customer should ask a person to cancel it. States no cancellation date the data does not give."
+    },
+    {
+      "name": "replayed-confirm",
+      "requires": "actions",
+      "turns": [
+        "Please cancel my last order",
+        {
+          "confirm": "last"
+        },
+        {
+          "confirm": "last"
+        }
+      ],
+      "expect": "Turn 3 replays the same confirmation: nothing executes again. The reply must not deny or retract the change made in turn 2; it says the change was already made (or answers the 'yes' sensibly) and ends with a next step."
+    },
+    {
+      "name": "planner-timeout",
+      "requires": "lookups",
+      "expect": "Run with PLANNER__DEADLINE_SHARE=0.01, so planning times out and the prompt carries the 'could not be made' and 'could not be prepared' notices (REQ-PLN-017, OR-015). Never asks the customer to confirm a cancellation, never says anything is being checked or changed, states no status or policy figure; says it could not check or prepare that just now, that nothing has changed, and to try again in a little while.",
+      "turns": [
+        "Cancel order 55120. Also, where is my other order 48213 right now?",
+        "Cancel order 55120, and how long does a refund take to reach my card?"
+      ]
+    },
+    {
+      "name": "refund-time-no-source",
+      "expect": "Run with air-rag-service off or unseeded, so no source is given (OR-016a). States no number of days, amount or window (a states_figure flag here is a failure); says the exact terms are in the order confirmation or on the help pages and that a person can confirm them; ends on a next step.",
+      "turns": [
+        "How long does a refund take to reach my card?",
+        "Roughly, though? Just give me a ballpark."
+      ]
     }
   ]
 }

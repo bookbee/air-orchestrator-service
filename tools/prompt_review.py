@@ -17,6 +17,10 @@ flags replies that break a rule a machine *can* check:
   check". The turn cannot look anything up later; only lookups that come with a message
   exist (spec 0012). Added while reviewing spec 0012, after the other flags passed it;
   ``customer_care:v2`` does it too. English only: a reviewer reads the other languages.
+* ``states_figure``: the reply gives a figure with a time unit ("5 to 10 working days").
+  Not wrong in itself: a cited source, a lookup or a proposal may have given it. The
+  runner sees replies, not what the turn was given, so a reviewer checks each one.
+  Added after OR-016a, where Gemini gave an unsourced refund time.
 * ``too_long``: more than five sentences or list lines. The prompt asks for two to four.
 * ``no_next_step``: neither of the reply's last two sentences is a question or an offer.
   Two, not one: "Could you share your order number? Once I have it, I can help." ends on
@@ -35,13 +39,25 @@ enabled, a planner that plans lookups (spec 0013) and a key whose turns carry a 
 customer (spec 0014). Elsewhere it would review a prompt rule that never fires, so it is
 skipped and listed unless ``--lookups`` is given.
 
-Usage: ``prompt_review.py [--base-url URL] [--key KEY] [--only NAME] [--lookups]``
+**Conversations that change something.** ``"requires": "actions"`` also needs a key with
+``allow_actions``. A turn may be ``{"confirm": "last"}``: it confirms the last proposal
+with the structured ``confirm`` field (spec 0001), sending the same id again when a
+change has already been confirmed, which is how a replayed confirmation is reviewed. A
+reply that is fixed text (a proposal, an execution outcome) calls no model and is not
+flagged. Once the conversation shows a change was done, saying so is true, so
+``claims_action`` is no longer flagged in it. Both kinds run only with ``--lookups``.
+
+**Who the customer is.** Lookups need a verified customer (spec 0014): pass
+``--air-token`` (or ``AIR_TOKEN``) with a token for the key's tenant.
+
+Usage: ``prompt_review.py [--base-url URL] [--key KEY] [--air-token T] [--only NAME] [--lookups]``
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import sys
@@ -79,10 +95,12 @@ _PROMISES_CHECK = re.compile(
     re.IGNORECASE,
 )
 #: What a conversation's ``requires`` may name.
-REQUIREMENTS = frozenset({"lookups"})
+REQUIREMENTS = frozenset({"lookups", "actions"})
+#: What a ``confirm`` turn sends as its message; the structured field is what counts.
+_CONFIRM_TEXT = "Yes, please go ahead."
 _OFFERS_TO_ACT = re.compile(
     r"\b(?:would you like|do you want|want|shall|should|can|may) (?:me|I) to\s+"
-    r"(?:connect|transfer|flag|escalate|pass|point|put|get|send|forward|raise|log|arrange|"
+    r"(?:try (?:to |and )?)?(?:connect|transfer|flag|escalate|pass|point|put|get|send|forward|raise|log|arrange|"
     r"check|look|cancel|refund|process|book|open)\b"
     r"|\bI(?:'ll| will| can)\s+(?:connect|transfer|flag|escalate|pass|forward|raise|log|"
     r"arrange|make sure)\b",
@@ -94,6 +112,12 @@ _OFFER = re.compile(
     r"ask to speak to a person",
     re.IGNORECASE,
 )
+#: A number, or a range, with a time unit: "3 business days", "5 to 10 working days".
+_FIGURE = re.compile(
+    r"\b\d+(?:\s*(?:to|-|–|or)\s*\d+)?\s*(?:working |business |calendar )?"
+    r"(?:days?|weeks?|hours?|months?)\b",
+    re.IGNORECASE,
+)
 _SEGMENTS = re.compile(r"(?<=[.!?])\s+|\n+")
 
 
@@ -102,16 +126,19 @@ def sentences(reply: str) -> list[str]:
     return [part.strip() for part in _SEGMENTS.split(reply.strip()) if part.strip()]
 
 
-def flags(reply: str, *, lookups: bool = False) -> list[str]:
+def flags(reply: str, *, lookups: bool = False, changed: bool = False) -> list[str]:
     """The rules this reply breaks, by name; empty when it breaks none. ``lookups``:
-    the conversation's turns can look things up, so only a claimed change counts."""
+    the conversation's turns can look things up, so only a claimed change counts.
+    ``changed``: the conversation shows a change was done, so saying so is true."""
     found = []
-    if (_CLAIMS_CHANGE if lookups else _CLAIMS_ACTION).search(reply):
+    if not changed and (_CLAIMS_CHANGE if lookups else _CLAIMS_ACTION).search(reply):
         found.append("claims_action")
     if _OFFERS_TO_ACT.search(reply):
         found.append("offers_to_act")
     if not lookups and _PROMISES_CHECK.search(reply):
         found.append("promises_check")
+    if _FIGURE.search(reply):
+        found.append("states_figure")
     parts = sentences(reply)
     if len(parts) > MAX_SENTENCES:
         found.append("too_long")
@@ -126,45 +153,81 @@ def load_review_set(path: pathlib.Path = REVIEW_SET) -> list[dict[str, Any]]:
     for conversation in conversations:
         if not conversation.get("name") or not conversation.get("turns"):
             raise ValueError(f"conversation without a name or turns: {conversation!r}")
+        for turn in conversation["turns"]:
+            if not isinstance(turn, str) and turn != {"confirm": "last"}:
+                raise ValueError(f"{conversation['name']}: a turn is text or {{'confirm': 'last'}}")
         if conversation.get("requires", "lookups") not in REQUIREMENTS:
-            raise ValueError(f"{conversation['name']}: unknown requires {conversation['requires']!r}")
+            raise ValueError(
+                f"{conversation['name']}: unknown requires {conversation['requires']!r}"
+            )
     return conversations
 
 
-def run(base_url: str, key: str, only: str | None, *, lookups: bool = False) -> int:
+def _executed(turn: dict[str, Any]) -> bool:
+    """The turn executed a confirmed change: its answer is the fixed outcome text."""
+    return any(
+        s.get("stage") == "gather" and (s.get("detail") or "").endswith(" done")
+        for s in turn.get("trace", [])
+    )
+
+
+def run(
+    base_url: str,
+    key: str,
+    only: str | None,
+    *,
+    lookups: bool = False,
+    air_token: str | None = None,
+) -> int:
+    headers = {"X-API-Key": key, **({"air-token": air_token} if air_token else {})}
     flagged = 0
     skipped: list[str] = []
     with httpx.Client(base_url=base_url, timeout=90.0) as http:
         for conversation in load_review_set():
             if only and conversation["name"] != only:
                 continue
-            needs_lookups = conversation.get("requires") == "lookups"
+            needs_lookups = conversation.get("requires") in REQUIREMENTS
             if needs_lookups and not lookups:
                 skipped.append(conversation["name"])
                 continue
             print(f"\n=== {conversation['name']}")
             print(f"    expect: {conversation.get('expect', '-')}")
             session_id: str | None = None
-            for message in conversation["turns"]:
+            proposal_id: str | None = None
+            changed = False
+            for step in conversation["turns"]:
+                message = step if isinstance(step, str) else _CONFIRM_TEXT
                 body: dict[str, Any] = {"message": message}
                 if session_id:
                     body["session_id"] = session_id
-                response = http.post("/v1/chat", headers={"X-API-Key": key}, json=body)
+                if not isinstance(step, str):
+                    if proposal_id is None:
+                        print(f"  customer: {message}\n  !! no proposal to confirm")
+                        flagged += 1
+                        break
+                    body["confirm"] = {"proposal_id": proposal_id, "approve": True}
+                response = http.post("/v1/chat", headers=headers, json=body)
                 if response.status_code != httpx.codes.OK:
                     print(f"  customer: {message}\n  !! HTTP {response.status_code}")
                     flagged += 1
                     break
                 turn = response.json()
                 session_id = turn["session_id"]
-                found = flags(turn["answer"], lookups=needs_lookups)
+                if turn.get("proposal"):
+                    proposal_id = turn["proposal"]["proposal_id"]
+                fixed = bool(turn.get("proposal")) or _executed(turn)
+                changed = changed or _executed(turn)
+                found = (
+                    [] if fixed else flags(turn["answer"], lookups=needs_lookups, changed=changed)
+                )
                 flagged += bool(found)
                 marker = f"  [{', '.join(found)}]" if found else ""
                 print(f"  customer: {message}")
-                print(f"  agent ({turn['status']}){marker}:")
+                print(f"  agent ({turn['status']}{', fixed text' if fixed else ''}){marker}:")
                 for line in turn["answer"].splitlines() or [""]:
                     print(f"    {line}")
     if skipped:
-        print(f"\nskipped (need lookups; pass --lookups): {', '.join(skipped)}")
+        print(f"\nskipped (need lookups or actions; pass --lookups): {', '.join(skipped)}")
     print(f"\n{flagged} flagged repl{'y' if flagged == 1 else 'ies'}")
     return 1 if flagged else 0
 
@@ -175,10 +238,15 @@ def main() -> int:
     parser.add_argument("--key", default="airo_local_customer_key")
     parser.add_argument("--only", help="run one conversation by name")
     parser.add_argument(
+        "--air-token",
+        default=os.environ.get("AIR_TOKEN"),
+        help="customer token (spec 0014) sent as air-token; default $AIR_TOKEN",
+    )
+    parser.add_argument(
         "--lookups", action="store_true", help="also run conversations that need lookups"
     )
     args = parser.parse_args()
-    return run(args.base_url, args.key, args.only, lookups=args.lookups)
+    return run(args.base_url, args.key, args.only, lookups=args.lookups, air_token=args.air_token)
 
 
 if __name__ == "__main__":

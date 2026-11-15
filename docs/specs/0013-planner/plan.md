@@ -133,7 +133,7 @@ stage details, `proposal`, `answer`. `PlanOutput.reason` goes to the log only
 | --- | --- | --- |
 | `ENABLED` | `false` | A fresh checkout makes no planning calls; SIT turns it on |
 | `MODEL_CLASS` | `cloud` | §9 Q1: lowered when `make planner-eval` shows a cheaper class plans as well |
-| `DEADLINE_SHARE` | `0.15` | Planning precedes everything slow; it must leave room for lookups and synthesis |
+| `DEADLINE_SHARE` | `0.3` | Planning precedes everything slow; it must leave room for lookups and synthesis. Raised from 0.15: an uncached `cloud` planning call measured 2.28 s, over 0.15 × 15 s (spec amended 2026-11-15) |
 | `MAX_TOKENS` | `400` | A plan is short; a cap keeps a confused model cheap |
 | `MAX_READS` | `3` | §9 Q4; schema-enforced |
 | `HISTORY_TURNS` | `6` | Enough to resolve "the first one" without paying for the whole conversation |

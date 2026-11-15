@@ -629,3 +629,100 @@ async def test_an_execution_writes_one_audit_line_without_arguments(
         assert field in line, line
     assert "55120" not in line and "arguments" not in line
     assert _GATEWAY_ID not in caplog.text
+
+
+async def test_a_change_not_proposed_still_answers_the_rest(
+    app: FastAPI, mock: respx.MockRouter
+) -> None:
+    """``REQ-TGW-033``, OR-016b. "Cancel 55120, and what are my recent orders?" with
+    the cancel refused: the lookup is sent, the model answers the rest told what the
+    customer was shown, and the answer is the refusal's text then the model's, as the
+    first delta when streamed. A failed synthesis leaves the refusal's text alone."""
+    from air_orchestrator_service.clients.model_gateway import ModelGatewayError
+    from air_orchestrator_service.engine import turn
+
+    _gateway(app)
+    mock.post(_PROPOSE).mock(return_value=_problem("invalid_state"))
+    lookup = mock.post(f"{TOOLS_GATEWAY_BASE_URL}/v1/tools/orders.list_recent").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "capability": "orders.list_recent",
+                "data": {"orders": [{"order_id": "48213", "status": "in_transit"}]},
+                "truncated": False,
+                "as_of": "2026-11-15T10:02:11Z",
+            },
+        )
+    )
+    both = FixedPlanner(
+        Plan(
+            routes=(Route.TOOLS, Route.ACTION),
+            reason="injected",
+            reads=(Step("orders.list_recent"),),
+            write=_CANCEL,
+        )
+    )
+    state = getattr(app.state, STATE_ATTR)
+    canned = state.model_gateway.generate
+    prompts: list[str] = []
+    replies: list[str] = []
+
+    async def generate(**kwargs: Any) -> Any:
+        prompts.append("\n".join(m["content"] for m in kwargs["messages"]))
+        result = await canned(**kwargs)
+        replies.append(result.content)
+        return result
+
+    state.model_gateway.generate = generate
+    refusal = turn._PROPOSE_REFUSED["invalid_state"]
+
+    body = (await _turn(app, both)).json()
+
+    assert body["status"] == "ok" and body["proposal"] is None
+    assert lookup.call_count == 1
+    assert body["answer"] == f"{refusal}\n\n{replies[0]}" and replies[0]
+    assert "for example once it has shipped" not in refusal
+    [prompt] = prompts
+    assert turn._CHANGE_ALREADY_ANSWERED in prompt and refusal not in prompt
+    assert "48213" in prompt
+    assert "rest of your message once" not in body["answer"]  # nothing awaits a confirm
+
+    events = parse_sse((await _turn(app, both, stream=True)).text)
+    deltas = [data["text"] for name, data in events if name == "answer.delta"]
+    [answer] = [data for name, data in events if name == "answer"]
+    assert deltas[0] == f"{refusal}\n\n" and "".join(deltas) == answer["text"]
+
+    async def broken(**kwargs: Any) -> Any:
+        raise ModelGatewayError("gateway returned 503", retryable=True)
+
+    state.model_gateway.generate = broken
+    failed = (await _turn(app, both)).json()
+    assert failed["answer"] == refusal and failed["status"] == "degraded"
+
+
+async def test_a_proposing_turn_says_the_rest_will_be_answered(
+    app: FastAPI, mock: respx.MockRouter
+) -> None:
+    """``REQ-TGW-032``, OR-010. "Cancel 55120, and where is 48213?": the proposal
+    takes the turn, the lookup is not sent, and the answer says the rest will be
+    answered after the change is confirmed or declined. Without reads, nothing more."""
+    _gateway(app)
+    mock.post(_PROPOSE).mock(return_value=httpx.Response(200, json=_proposal()))
+    lookup = mock.post(url__startswith=f"{TOOLS_GATEWAY_BASE_URL}/v1/tools/")
+    both = FixedPlanner(
+        Plan(
+            routes=(Route.TOOLS, Route.ACTION),
+            reason="injected",
+            reads=(Step("orders.get", {"order_id": "48213"}),),
+            write=_CANCEL,
+        )
+    )
+
+    mixed = (await _turn(app, both)).json()
+    alone = (await _turn(app)).json()
+
+    assert mixed["proposal"] is not None and lookup.call_count == 0
+    assert mixed["answer"].endswith(
+        "I'll answer the rest of your message once you've confirmed or declined this change."
+    )
+    assert alone["proposal"] is not None and "rest of your message" not in alone["answer"]

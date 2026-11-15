@@ -82,6 +82,7 @@ from air_orchestrator_service.schemas.common import Principal
 __all__ = [
     "EXECUTE_NOT_DONE_CODES",
     "MAX_CAPABILITIES",
+    "READ_REFUSAL_CODES",
     "REFUSAL_CODES",
     "ActionExecutor",
     "Capability",
@@ -110,6 +111,10 @@ _RISKS: Final[frozenset[str]] = frozenset({"low", "medium", "high"})
 REFUSAL_CODES: Final[frozenset[str]] = frozenset(
     {"not_found", "invalid_state", "not_permitted", "limit_exceeded"}
 )
+#: Problem codes with which the gateway answers a read that found nothing this customer
+#: may see (``REQ-TGW-029``): an answer, not a failure, so a customer's wrong order
+#: numbers do not open the breaker that every other customer's lookups share.
+READ_REFUSAL_CODES: Final[frozenset[str]] = frozenset({"not_found", "not_permitted"})
 #: Problem codes with which the gateway answers an execute that acted on nothing: the
 #: proposal is unknown to it, or expired (``REQ-TGW-017``). ``already_executed`` is
 #: deliberately absent: the change may have been made, so it stays *unknown*.
@@ -366,7 +371,9 @@ class ToolsGatewayClient(DownstreamClient):
         timeout_s: float,
     ) -> ToolResult:
         """Run a ``read`` capability, or raise :class:`ToolsGatewayError`. The caller
-        has already validated ``arguments`` (``REQ-TGW-006``)."""
+        has already validated ``arguments`` (``REQ-TGW-006``). A ``not_found`` or
+        ``not_permitted`` raises with ``reason="refused"`` and its ``code``: the gateway
+        answering, which the breaker counts as a success (``REQ-TGW-029``)."""
         if capability.kind != "read":
             raise ValueError(f"{capability.name} is not a read capability")
         return await self._call(
@@ -377,6 +384,7 @@ class ToolsGatewayClient(DownstreamClient):
             subject=subject,
             timeout_s=timeout_s,
             parse=lambda body: _for(capability, ToolResult.model_validate(body)),
+            refusal_codes=READ_REFUSAL_CODES,
         )
 
     async def propose(

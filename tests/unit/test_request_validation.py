@@ -137,10 +137,43 @@ async def test_an_unauthenticated_bad_body_is_a_401(
 
 
 async def test_an_authenticated_bad_body_is_still_a_422(client: httpx.AsyncClient) -> None:
+    """A key-holder sees the field errors. (A body that is not JSON at all is a 400,
+    ``REQ-VAL-008``.)"""
     response = await client.post(
         "/v1/chat",
         headers={"Content-Type": "application/json", **auth(CUSTOMER_KEY)},
-        content=b"{bad",
+        content=b'{"unexpected": 1}',
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.usefixtures("no_model")
+@pytest.mark.parametrize("approve", ["yes", "true", "on", 1, "1"])
+async def test_approve_must_be_a_json_boolean(client: httpx.AsyncClient, approve: Any) -> None:
+    """REQ-MUT-015 (OR-013a): consent is a JSON boolean, never coerced from text."""
+    response = await client.post(
+        "/v1/chat",
+        headers=auth(CUSTOMER_KEY),
+        json={
+            "message": "yes",
+            "confirm": {"proposal_id": "prop_000000000000", "approve": approve},
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["errors"][0]["field"] == "confirm.approve"
+
+
+@pytest.mark.usefixtures("no_model")
+async def test_a_body_that_is_not_json_is_a_malformed_request(client: httpx.AsyncClient) -> None:
+    """REQ-VAL-008 (OR-013b): 400 malformed-request, not a 422 naming a byte offset."""
+    response = await client.post(
+        "/v1/chat",
+        headers={"Content-Type": "application/json", **auth(CUSTOMER_KEY)},
+        content=b'{"message": "hi",',
+    )
+
+    assert response.status_code == 400
+    assert response.json()["type"].endswith("/malformed-request")
+    assert response.json()["errors"] == []

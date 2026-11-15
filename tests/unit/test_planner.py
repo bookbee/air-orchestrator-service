@@ -37,6 +37,7 @@ from air_orchestrator_service.engine.planner_schema import (
     parse_follow_up,
     parse_plan,
     plan_schema,
+    step_names,
 )
 from air_orchestrator_service.observability import metrics
 from air_orchestrator_service.prompts.registry import PromptRegistry
@@ -477,7 +478,6 @@ _BAD_PLANS = {
     "arguments a list": _plan_json({"capability": "orders.get", "arguments": []}),
     "capability a number": _plan_json({"capability": 7, "arguments": {}}),
     "propose a string": json.dumps({**json.loads(_NOTHING), "propose": "orders.cancel"}),
-    "a long reason": _plan_json(reason="x" * 201),
     "a missing field": json.dumps({"reads": [], "propose": None, "reason": "r"}),
     "an array": "[]",
     "prose": "sure! here's a plan:",
@@ -494,18 +494,26 @@ def test_the_plan_is_validated_against_its_schema(case: str) -> None:
         _plan_json(_step("orders.get", order_id="1234"), needs_results=True), max_reads=3
     )
     assert good is not None and good.needs_results and good.reads[0].capability == "orders.get"
+    # A long reason is cut, not a lost plan: it is only logged (Gemini wrote 216).
+    long = parse_plan(
+        _plan_json(_step("orders.get", order_id="1234"), reason="x" * 216), max_reads=3
+    )
+    assert long is not None and len(long.reason) == 200
 
     menu = _menu(read_entry("orders.list_recent"), _get_entry(), write_entry("orders.cancel"))
     schema = plan_schema(menu, max_reads=3)
     reads = schema["properties"]["reads"]
     assert reads["maxItems"] == 3
-    assert reads["items"]["properties"]["capability"]["enum"] == [
-        "orders.get",
-        "orders.list_recent",
+    assert step_names(reads["items"]) == ["orders.get", "orders.list_recent"]
+    assert step_names(schema["properties"]["propose"]) == ["orders.cancel"]
+    # Each name carries its own arguments' shape, so a constraining provider can fill it.
+    [get] = [
+        b
+        for b in reads["items"]["anyOf"]
+        if b["properties"]["capability"]["enum"] == ["orders.get"]
     ]
-    assert schema["properties"]["propose"]["anyOf"][0]["properties"]["capability"]["enum"] == [
-        "orders.cancel"
-    ]
+    assert get["properties"]["arguments"]["required"] == ["order_id"]
+    assert "order_id" in get["properties"]["arguments"]["properties"]
     reads_only = plan_schema(_menu(_get_entry()), max_reads=3)
     assert reads_only["properties"]["propose"] == {"type": "null"}
     second = follow_up_schema(menu)
@@ -549,6 +557,33 @@ async def test_an_invalid_plan_falls_back_and_the_turn_answers(
     assert len(model.planning) == 1
 
 
+async def test_a_failed_plan_tells_the_answer_nothing_was_looked_up_or_prepared(
+    app: FastAPI, mock: respx.MockRouter
+) -> None:
+    """``REQ-PLN-017`` (OR-015). A planner timeout on "Cancel order 55120" leaves the
+    answer prompt saying no lookup was made and no change prepared, so it cannot ask
+    for a confirmation that leads nowhere. A turn that planned fine carries neither."""
+    from air_orchestrator_service.engine import turn
+
+    model = _model(app, _hang)
+    body = await _turn(app, "Cancel order 55120. Also, where is 48213?")
+
+    assert _all_posts(mock) == []
+    assert _stage(body, Stage.PLAN)["status"] == "degraded"
+    assert body["answer"] == _ANSWER and body["proposal"] is None
+    [synthesis] = [call for call in model.calls if call not in model.planning]
+    prompt = "\n".join(m["content"] for m in synthesis["messages"] if m["role"] == "system")
+    assert turn._LOOKUPS_FAILED.format(names=turn._ACCOUNT_LOOKUPS) in prompt
+    assert turn._CHANGE_NOT_PREPARED in prompt
+
+    model = _model(app, _plan_json())
+    await _turn(app, "hi")
+    [synthesis] = [call for call in model.calls if call not in model.planning]
+    prompt = "\n".join(m["content"] for m in synthesis["messages"] if m["role"] == "system")
+    assert turn._CHANGE_NOT_PREPARED not in prompt
+    assert turn._ACCOUNT_LOOKUPS not in prompt
+
+
 # ── REQ-PLN-005 ──────────────────────────────────────────────────────────────
 
 
@@ -563,7 +598,7 @@ async def test_planning_is_bounded_and_counted_against_the_ceiling(
     model = _model(app, _plan_json(_step("orders.list_recent", limit=1)))
     body = await _turn(app)
     [planning] = model.planning
-    assert 0 < planning["timeout"] <= 0.15 * 2.0
+    assert 0 < planning["timeout"] <= 0.3 * 2.0
     assert body["usage"]["planning_cost_usd"] == pytest.approx(0.002)
     assert body["usage"]["cost_usd"] == pytest.approx(0.003)
     assert body["usage"]["model_calls"] == 2
@@ -571,7 +606,7 @@ async def test_planning_is_bounded_and_counted_against_the_ceiling(
     model = _model(app, _hang)
     body = await _turn(app)
     plan = _stage(body, Stage.PLAN)
-    assert (plan["status"], plan["detail"]) == ("degraded", "planner call timed out after 0.30s")
+    assert (plan["status"], plan["detail"]) == ("degraded", "planner call timed out after 0.60s")
     assert body["answer"] == _ANSWER and body["degraded"] == ["air-model-gateway"]
 
     tight = build_app(
@@ -606,9 +641,9 @@ async def test_the_planner_cannot_widen_the_offered_capabilities(
 
     body = await _turn(app)
 
-    assert model.planning[0]["json_schema"]["properties"]["reads"]["items"]["properties"][
-        "capability"
-    ]["enum"] == ["orders.get"]
+    assert step_names(model.planning[0]["json_schema"]["properties"]["reads"]["items"]) == [
+        "orders.get"
+    ]
     assert _all_posts(mock) == []
     detail = _stage(body, Stage.GATHER)["detail"]
     assert "orders.list_recent dropped: not offered" in detail
@@ -746,6 +781,62 @@ async def test_the_plan_stage_reports_what_ran(
     prompt = json.dumps(answer_call["messages"])
     assert "55120" in prompt and "could not prepare it" in prompt
     assert body["answer"] == _ANSWER
+
+
+async def test_an_unavailable_inventory_is_named_in_the_plan_stage(
+    app: FastAPI, mock: respx.MockRouter
+) -> None:
+    """``REQ-PLN-011``, OR-011. With the gateway down nothing is offered, so nothing is
+    planned; ``PLAN`` says the inventory was unavailable and names air-tools-gateway,
+    rather than reading like a tenant with nothing on offer. No planning call is made."""
+    mock.get(INVENTORY_URL).mock(return_value=httpx.Response(503))
+    model = _model(app)
+
+    detail = "no capabilities offered: air-tools-gateway inventory unavailable"
+    body = await _turn(app, "Where is my order 48213?")
+    response = await _chat(app, "Where is my order 48213?", stream=True)
+
+    plan = _stage(body, Stage.PLAN)
+    assert (plan["status"], plan["detail"]) == ("skipped", detail)
+    [event] = [
+        data
+        for name, data in parse_sse(response.text)
+        if name == "stage" and data["stage"] == Stage.PLAN
+    ]
+    assert (event["detail"], event["downstream"]) == (detail, "air-tools-gateway")
+    assert model.planning == []
+    assert body["answer"] == _ANSWER
+
+
+async def test_a_plan_with_lookups_does_not_retrieve(
+    settings: Settings, mock: respx.MockRouter
+) -> None:
+    """``REQ-PLN-015``. With air-rag-service on, a model plan with a read answers from
+    the lookup alone: no retrieval, no ``rag`` route. A plan with no capability step
+    still retrieves, as spec 0011 decides."""
+    from tests.unit.test_gather_stage import RAG_BASE_URL
+
+    rag = settings.downstream.rag.model_copy(update={"enabled": True, "base_url": RAG_BASE_URL})
+    app = build_app(
+        settings.model_copy(
+            update={"downstream": settings.downstream.model_copy(update={"rag": rag})}
+        )
+    )
+    _as(app)
+    retrieve = mock.post(f"{RAG_BASE_URL}/v1/retrieve").mock(
+        return_value=httpx.Response(200, json={"query": "q", "citations": []})
+    )
+    _lookup(mock, "orders.get", {"order_id": "48213", "status": "in_transit"})
+    _model(app, _plan_json(_step("orders.get", order_id="48213")), _plan_json())
+
+    looked_up = await _turn(app, "Where is order 48213?")
+    assert retrieve.call_count == 0
+    assert looked_up["routes"] == ["tools"]
+    assert _stage(looked_up, Stage.GATHER)["detail"] == "orders.get ok"
+
+    policy = await _turn(app, "How long do refunds take?")
+    assert retrieve.call_count == 1
+    assert "rag" in policy["routes"]
 
 
 def _planner_count(round_no: int, outcome: str) -> float:

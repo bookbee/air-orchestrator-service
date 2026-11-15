@@ -39,6 +39,11 @@ def _review() -> ModuleType:
         ("Would you like me to connect you with someone?", ["offers_to_act"]),
         ("Want me to flag that for you now?", ["offers_to_act"]),
         ("I'll make sure it's handled. Anything else?", ["offers_to_act"]),
+        # OR-015: an offer to retry a change it cannot make later.
+        ("Would you like me to try to cancel it again later?", ["offers_to_act"]),
+        # OR-016a: a figure with a time unit, for a reviewer to check against the sources.
+        ("A refund usually takes 5 to 10 working days. Anything else?", ["states_figure"]),
+        ("It should reach your card within 3 business days. Anything else?", ["states_figure"]),
         # Promises a check it cannot make (found reviewing spec 0012; v2 does it too).
         ("Can you share your order number so I can look into what's going on?", ["promises_check"]),
         ("What's the order number, so we can see where things stand?", ["promises_check"]),
@@ -85,5 +90,28 @@ def test_a_lookups_conversation_is_skipped_unless_asked_for() -> None:
     review = _review()
     needing = [c["name"] for c in review.load_review_set() if c.get("requires") == "lookups"]
 
-    assert needing == ["order-status-with-lookup", "order-status-lookup-fails"]
-    assert frozenset({"lookups"}) == review.REQUIREMENTS
+    assert needing == [
+        "order-status-with-lookup",
+        "order-status-lookup-fails",
+        "order-not-found",
+        "planner-timeout",
+    ]
+    assert frozenset({"lookups", "actions"}) == review.REQUIREMENTS
+
+
+def test_once_a_change_is_done_saying_so_is_not_flagged() -> None:
+    """OR-009: after a confirmed change executes, "it has been cancelled" is true."""
+    review = _review()
+    reply = "Yes, order 55120 has been cancelled. Anything else I can help with?"
+
+    assert review.flags(reply, lookups=True) == ["claims_action"]
+    assert review.flags(reply, lookups=True, changed=True) == []
+    executed = {"trace": [{"stage": "gather", "detail": "orders.cancel done"}]}
+    assert review._executed(executed) and not review._executed({"trace": []})
+
+
+def test_a_confirm_turn_must_be_the_structured_form() -> None:
+    review = _review()
+    acting = [c for c in review.load_review_set() if c.get("requires") == "actions"]
+
+    assert {"confirm": "last"} in acting[0]["turns"]

@@ -190,7 +190,14 @@ _LOOKUPS_HEADER: Final[str] = (
     "Results of lookups made for this message in the business systems, one block per "
     "lookup. Answer from them: state order numbers, statuses, dates and amounts exactly as "
     "they appear, and never state a detail they do not contain or fill a gap with a typical "
-    "value. You may say you checked. If a block is marked partial, say you are showing only "
+    "value. Use each date only for what its field names: an order's placed date is not "
+    "when it was cancelled, delivered or updated. A status has no date of its own: say an "
+    "order is cancelled without saying when, and if asked when, say you don't have that "
+    "date. Never ask the customer for a detail the "
+    "results already show: if they did not say which order they mean and the results hold "
+    "more than one, name those orders briefly and ask which one. You may say you checked. "
+    "If a block is "
+    "marked partial, say you are showing only "
     "some of the records. Do not mention lookups, results or blocks to the customer."
 )
 _LOOKUPS_FAILED: Final[str] = (
@@ -198,6 +205,17 @@ _LOOKUPS_FAILED: Final[str] = (
     "them, say briefly that you could not check just now, and do not guess. Offer to try "
     "again in a little while, or tell the customer they can ask to speak to a person."
 )
+#: ``REQ-TGW-029``: a read the gateway answered with nothing this customer may see. It
+#: neither says the lookup failed nor whether the record exists for someone else.
+_LOOKUPS_FOUND_NOTHING: Final[str] = (
+    "These lookups found nothing on this customer's account for this message: {names}. "
+    "If the answer depends on them, say plainly that you could not find it on their "
+    "account and ask them to check the details, such as the order number. Do not say "
+    "the lookup failed, and do not say whether it exists for anyone else."
+)
+#: ``REQ-TGW-031``: what the could-not-look-up notice names when the gateway was down
+#: before anything could be planned, so no capability name is known.
+_ACCOUNT_LOOKUPS: Final[str] = "order and account lookups"
 #: Spec 0013 §7: round 2 of planning failed, so a change the customer asked for was
 #: not prepared. The answer says so rather than implying it was.
 _CHANGE_NOT_PREPARED: Final[str] = (
@@ -218,6 +236,10 @@ _LOOKUP_FAILURE: Final[dict[str, str]] = {
 _PROPOSAL_READY: Final[str] = (
     "{summary}\n\nNothing has been changed yet. If you would like to go ahead, please confirm."
 )
+#: ``REQ-TGW-032``: the proposal took the turn, and the plan had lookups it left unsent.
+_REST_DEFERRED: Final[str] = (
+    "I'll answer the rest of your message once you've confirmed or declined this change."
+)
 _PROPOSE_FAILED: Final[str] = (
     "I couldn't prepare that change just now. Please try again in a little while, or ask "
     "to speak to a person."
@@ -229,8 +251,8 @@ _PROPOSE_REFUSED: Final[dict[str, str]] = {
         "check the order number?"
     ),
     "invalid_state": (
-        "That change isn't possible in the order's current state, for example once it has "
-        "shipped. If you need more help, you can ask to speak to a person."
+        "That change isn't possible in the order's current state. If you need more help, "
+        "you can ask to speak to a person."
     ),
     "not_permitted": (
         "That change can't be made here. If you need it, you can ask to speak to a person."
@@ -240,6 +262,15 @@ _PROPOSE_REFUSED: Final[dict[str, str]] = {
         "to speak to a person for help."
     ),
 }
+#: ``REQ-TGW-033``: the change was not proposed, the customer is shown its fixed text
+#: ahead of the reply, and the model answers only the rest. The text itself is not
+#: quoted: Gemini, shown it, repeated it word for word.
+_CHANGE_ALREADY_ANSWERED: Final[str] = (
+    "The customer asked for a change that could not be prepared, and the system has "
+    "already told them so, just before your reply. Do not mention that change at all: "
+    "do not say whether it can be made, and do not ask them to confirm anything. Answer "
+    "only the rest of their message. If there is no rest, give one short next step."
+)
 #: Spec 0012 ``REQ-TGW-017``: what a confirmed turn says, by the execute outcome. Only
 #: ``done``'s text says the change was made. None names the change, so none can say
 #: "cancelled" when it was not.
@@ -396,10 +427,16 @@ class TurnEngine:
         #: and what it could not. Per request, like `_sources`.
         self._lookups: list[tuple[str, str, bool]] = []
         self._lookup_notices: list[str] = []
+        self._lookups_found_nothing: list[str] = []
         #: What `GATHER`'s propose call produced, and the fixed answer for the
         #: turn when it planned a change (spec 0012). Per request.
         self._gateway_proposal: tuple[Capability, Step, GatewayProposal] | None = None
         self._proposal_answer: str | None = None
+        #: The plan had reads that a proposing turn does not send (REQ-TGW-032).
+        self._reads_deferred = False
+        #: REQ-TGW-033: the fixed text for a planned change that was not proposed, shown
+        #: ahead of the synthesised answer to the rest of the message. Per request.
+        self._change_answer: str | None = None
         #: The execute-key client, reached only from a confirmation turn (spec 0012
         #: plan §2), and the fixed answer its outcome chose. Per request.
         self._executor = action_executor
@@ -647,11 +684,15 @@ class TurnEngine:
             deadline_at=turn_started + deadline_s,
             deadline_s=deadline_s,
         )
+        allowed = _allowed_routes(request)
+        offered = _narrowed(offered, allowed)
         plan_ctx = PlanContext(
             text=masked_text,
             principal=principal,
             confirming=confirmed is not None,
-            rag_serves=self._rag is not None and self._rag.settings.serves(principal.tenant),
+            rag_serves=Route.RAG in allowed
+            and self._rag is not None
+            and self._rag.settings.serves(principal.tenant),
             offered=offered,
             history=tuple((turn.role, turn.content) for turn in session.turns),
             intent=self._intent,
@@ -664,6 +705,12 @@ class TurnEngine:
         self._add_planning(planned.usage)
         if planned.status is StageStatus.DEGRADED:
             self._last_status = TurnStatus.DEGRADED
+            if offered.capabilities:
+                # REQ-PLN-017 (OR-015): the turn may have needed a lookup or a change
+                # that never ran. Say so, or the answer reads as if one were under way.
+                if _ACCOUNT_LOOKUPS not in self._lookup_notices:
+                    self._lookup_notices.append(_ACCOUNT_LOOKUPS)
+                self._change_not_prepared = True
         plan_ms = round((time.perf_counter() - plan_started) * 1000, 3)
         metrics.record_stage(stage=Stage.PLAN, status=planned.status, duration_s=plan_ms / 1000)
         yield StageEvent(
@@ -677,6 +724,9 @@ class TurnEngine:
         if planned.prompt_ref is not None:
             # REQ-PLN-009: the planner prompt's version, with every planned turn.
             _log.info("turn.planned", planner_prompt=planned.prompt_ref, status=planned.status)
+        # REQ-TGW-030: whatever the planner returned, nothing outside the caller's
+        # allow_routes runs, and the route event does not claim it.
+        plan = _within(plan, allowed)
         if plan.write is not None and (
             not principal.allow_actions or principal.channel is Channel.BUSINESS
         ):
@@ -684,6 +734,7 @@ class TurnEngine:
             # reads as one that never planned a change (REQ-MUT-012, spec 0001 Q1).
             plan = _without_write(plan)
         write = plan.write if confirmed is None else None
+        self._reads_deferred = write is not None and bool(plan.reads)
         propose = plan.stand_in_proposal
         # A proposing turn's answer is fixed text, so it needs no model, no
         # retrieval and no lookups.
@@ -706,7 +757,9 @@ class TurnEngine:
             principal,
             retrieve=retrieve,
             needs_model=needs_model,
-            reads=plan.reads if needs_model else (),
+            # A planned change's reads go too: sent only if no proposal is made
+            # (REQ-TGW-032, 033).
+            reads=plan.reads if needs_model or write is not None else (),
             follow_up=(plan_ctx, plan) if needs_model and plan.needs_results else None,
             write=write,
             offered=offered,
@@ -720,6 +773,11 @@ class TurnEngine:
             yield ProposalEvent(proposal=await self._propose(session, principal))
         elif self._gateway_proposal is not None:
             yield ProposalEvent(proposal=await self._propose_gateway(session, principal))
+        elif confirmed is None and self._proposal_answer is not None:
+            # REQ-TGW-033: the change was not proposed, so nothing waits for a
+            # confirmation and the rest of the message is answered after its text.
+            self._change_answer, self._proposal_answer = self._proposal_answer, None
+            needs_model = True
 
         # ── Deadline check, right before the expensive part. A canned
         # confirm/propose reply never calls the model, so the deadline is
@@ -735,7 +793,11 @@ class TurnEngine:
                 detail="turn deadline exceeded before the model call",
             )
             async for event in self._finish_with_answer(
-                turn_id, masked_text, principal, session, text=_DEGRADED_ANSWER
+                turn_id,
+                masked_text,
+                principal,
+                session,
+                text=self._or_change_answer(_DEGRADED_ANSWER),
             ):
                 yield event
             return
@@ -765,7 +827,11 @@ class TurnEngine:
                 detail="turn deadline reached while the answer was streaming",
             )
             async for event in self._finish_with_answer(
-                turn_id, masked_text, principal, session, text=_DEGRADED_ANSWER
+                turn_id,
+                masked_text,
+                principal,
+                session,
+                text=self._or_change_answer(_DEGRADED_ANSWER),
             ):
                 yield event
             return
@@ -780,7 +846,11 @@ class TurnEngine:
                 detail=str(exc),
             )
             async for event in self._finish_with_answer(
-                turn_id, masked_text, principal, session, text=_COST_CEILING_ANSWER
+                turn_id,
+                masked_text,
+                principal,
+                session,
+                text=self._or_change_answer(_COST_CEILING_ANSWER),
             ):
                 yield event
             return
@@ -796,7 +866,11 @@ class TurnEngine:
                     detail="turn deadline reached during the model call",
                 )
                 async for event in self._finish_with_answer(
-                    turn_id, masked_text, principal, session, text=_DEGRADED_ANSWER
+                    turn_id,
+                    masked_text,
+                    principal,
+                    session,
+                    text=self._or_change_answer(_DEGRADED_ANSWER),
                 ):
                     yield event
                 return
@@ -810,7 +884,11 @@ class TurnEngine:
                 downstream=DownstreamService.MODEL_GATEWAY,
             )
             async for event in self._finish_with_answer(
-                turn_id, masked_text, principal, session, text=_DEGRADED_ANSWER
+                turn_id,
+                masked_text,
+                principal,
+                session,
+                text=self._or_change_answer(_DEGRADED_ANSWER),
             ):
                 yield event
             return
@@ -1123,7 +1201,21 @@ class TurnEngine:
         deadline_s: float,
     ) -> tuple[_Part | None, _Part | None, _Part | None]:
         """Lookups, then round 2 when the plan asked for it, then the proposal: the
-        parts of ``GATHER`` that run one after another."""
+        parts of ``GATHER`` that run one after another. A round-1 change goes first,
+        and its plan's reads are sent only when it is not proposed: a proposal's turn
+        is answered by fixed text alone (``REQ-TGW-032``, ``033``)."""
+        if write is not None:
+            proposal = await self._proposal_part(
+                principal, write, offered, deadline_at=deadline_at, deadline_s=deadline_s
+            )
+            lookups = await self._lookup_part(
+                principal,
+                () if self._gateway_proposal is not None else reads,
+                offered,
+                deadline_at=deadline_at,
+                deadline_s=deadline_s,
+            )
+            return lookups, None, proposal
         lookups = await self._lookup_part(
             principal, reads, offered, deadline_at=deadline_at, deadline_s=deadline_s
         )
@@ -1288,7 +1380,18 @@ class TurnEngine:
         that is dropped or fails becomes a notice in the prompt (``REQ-TGW-011``).
         """
         if not reads:
-            return None
+            if offered.available:
+                return None
+            # REQ-TGW-031: the outage is reported on every turn it would have served.
+            # The planner was offered nothing, so the plan cannot have "needed" a read.
+            self._last_status = TurnStatus.DEGRADED
+            if _ACCOUNT_LOOKUPS not in self._lookup_notices:
+                self._lookup_notices.append(_ACCOUNT_LOOKUPS)
+            return (
+                StageStatus.DEGRADED,
+                "air-tools-gateway is unavailable",
+                DownstreamService.TOOLS_GATEWAY,
+            )
         gateway = self._tools_gateway
         if gateway is None:
             self._notice(step.capability for step in reads)
@@ -1329,6 +1432,11 @@ class TurnEngine:
                 late = True
                 parts.append(f"{name} skipped: turn deadline too close")
                 self._notice([name])
+            elif outcome == "refused":
+                # REQ-TGW-029: the gateway answering, not failing.
+                parts.append(f"{name} found nothing")
+                if (label := _label(name)) not in self._lookups_found_nothing:
+                    self._lookups_found_nothing.append(label)
             elif isinstance(outcome, str):
                 gateway_failed = True
                 parts.append(f"{name} {_LOOKUP_FAILURE.get(outcome, 'failed')}")
@@ -1368,7 +1476,9 @@ class TurnEngine:
         The step is checked like a lookup, against ``write`` entries of the turn's
         inventory, which already holds none on the business channel
         (``REQ-TGW-026``). A refusal is an answer (``REQ-TGW-028``); any failure is
-        ``degraded`` naming the gateway. Either way the turn's answer is fixed text.
+        ``degraded`` naming the gateway. Either way no proposal waits, so the turn's
+        answer is this fixed text followed by an answer to the rest of the message
+        (``REQ-TGW-033``); only a proposal is answered by fixed text alone.
         """
         if write is None:
             return None
@@ -1413,6 +1523,8 @@ class TurnEngine:
             )
         self._gateway_proposal = (capability, write, proposal)
         self._proposal_answer = _PROPOSAL_READY.format(summary=_clean(proposal.summary))
+        if self._reads_deferred:
+            self._proposal_answer += f"\n\n{_REST_DEFERRED}"
         return StageStatus.OK, f"{name} proposed", None
 
     async def _execution_part(
@@ -1554,15 +1666,32 @@ class TurnEngine:
             chosen.append(passage.model_copy(update={"snippet": snippet}))
         return chosen, dropped
 
+    def _or_change_answer(self, fallback: str) -> str:
+        """``REQ-TGW-033``: when synthesis of the rest fails, the change's fixed text
+        alone is the answer, as it was before the rest was answered."""
+        return self._change_answer if self._change_answer is not None else fallback
+
     def _lookups_message(self) -> dict[str, str] | None:
         """The system message that carries ``GATHER``'s lookups into the prompt, or
         ``None`` when none were planned (``REQ-TGW-009``/``011``). Each result is its
         own delimited block, so a value inside one cannot pose as another's."""
-        if not self._lookups and not self._lookup_notices and not self._change_not_prepared:
+        if not (
+            self._lookups
+            or self._lookup_notices
+            or self._lookups_found_nothing
+            or self._change_not_prepared
+            or self._change_answer
+        ):
             return None
         sections: list[str] = []
+        if self._change_answer:
+            sections.append(_CHANGE_ALREADY_ANSWERED)
         if self._lookups:
             sections.append(f"{_LOOKUPS_HEADER}\n\n{self._lookup_blocks()}")
+        if self._lookups_found_nothing:
+            sections.append(
+                _LOOKUPS_FOUND_NOTHING.format(names=", ".join(self._lookups_found_nothing))
+            )
         if self._lookup_notices:
             sections.append(_LOOKUPS_FAILED.format(names=", ".join(self._lookup_notices)))
         if self._change_not_prepared:
@@ -1811,7 +1940,9 @@ class TurnEngine:
 
         Confirmation and proposal replies are fixed text, never synthesised: the
         execute outcome or the gateway's summary decides them (spec 0012 plan §1),
-        so the deadline and the prompt registry are irrelevant to those branches.
+        so the deadline and the prompt registry are irrelevant to those branches. A
+        change that was not proposed leads the synthesised answer with its fixed text
+        instead (``REQ-TGW-033``), so the model never words a refusal.
 
         Raises `ModelGatewayError` on a real synthesis failure, and `TimeoutError`
         when the turn's deadline passes mid-stream — the caller decides the degraded
@@ -1850,6 +1981,9 @@ class TurnEngine:
         if request.stream:
             outcome.streamed = True
             result: GenerateResult | None = None
+            if self._change_answer is not None:
+                # REQ-TGW-033: the fixed text leads, as the first delta.
+                yield AnswerDeltaEvent(text=f"{self._change_answer}\n\n")
             async for event in self._stream_prose(messages, deadline_at, outcome):
                 if isinstance(event, AnswerDeltaEvent):
                     yield event
@@ -1872,10 +2006,12 @@ class TurnEngine:
             # and already-streamed on a streamed one) does not. No structured
             # follow-up: a second call on a refused question would spend money to be
             # refused again.
-            outcome.text = _PROVIDER_REFUSAL
+            outcome.text = self._or_change_answer(_PROVIDER_REFUSAL)
             outcome.refused = True
             return
         text = result.content or "I don't have an answer for that."
+        if self._change_answer is not None:
+            text = f"{self._change_answer}\n\n{text}"
         outcome.text = text
 
         if principal.channel is not Channel.BUSINESS:
@@ -2049,6 +2185,45 @@ def _combine(retrieval: _Part, *others: _Part | None) -> _Part:
         status,
         "; ".join(part[1] for part in parts if part[1]),
         next((part[2] for part in parts if part[2] is not None), None),
+    )
+
+
+def _allowed_routes(request: TurnRequest) -> frozenset[Route]:
+    """The routes this turn may use: every route, narrowed by the caller's own
+    ``options.allow_routes`` (``REQ-TGW-030``). It cannot add one: a route that is not
+    live stays unused whatever the list says."""
+    requested = request.options.allow_routes
+    return frozenset(Route) if requested is None else frozenset(requested)
+
+
+def _narrowed(offered: Inventory, allowed: frozenset[Route]) -> Inventory:
+    """The inventory less what ``allowed`` excludes: reads without ``tools``, writes
+    without ``action`` (``REQ-TGW-030``). The planner is never offered them, so a
+    model plan cannot name them, and ``GATHER``'s checks drop any fixed plan that does."""
+    kinds = {
+        kind for route, kind in ((Route.TOOLS, "read"), (Route.ACTION, "write")) if route in allowed
+    }
+    if not kinds:
+        # Nothing from the gateway was wanted, so its outage is not this turn's (REQ-TGW-031).
+        return Inventory()
+    return Inventory(
+        available=offered.available,
+        capabilities=tuple(c for c in offered.capabilities if c.kind in kinds),
+    )
+
+
+def _within(plan: Plan, allowed: frozenset[Route]) -> Plan:
+    """``plan`` less whatever ``allowed`` excludes (``REQ-TGW-030``), so an excluded
+    step is not run, not reported as a failed lookup, and not named in ``routes``."""
+    if Route.ACTION not in allowed:
+        plan = replace(_without_write(plan), stand_in_proposal=False)
+    routes = tuple(r for r in plan.routes if r in allowed) or (Route.DIRECT,)
+    return replace(
+        plan,
+        routes=routes,
+        reads=plan.reads if Route.TOOLS in allowed else (),
+        retrieve=plan.retrieve and Route.RAG in allowed,
+        needs_results=plan.needs_results and Route.TOOLS in allowed,
     )
 
 

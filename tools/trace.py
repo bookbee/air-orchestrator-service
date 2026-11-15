@@ -190,9 +190,7 @@ def main() -> int:
         return 1
 
     known_tests = index_tests(TESTS_DIR)
-    spec_paths = sorted(
-        p for p in SPECS_DIR.glob("*/spec.md") if p.parent.name[0].isdigit()
-    )
+    spec_paths = sorted(p for p in SPECS_DIR.glob("*/spec.md") if p.parent.name[0].isdigit())
     if not spec_paths:
         print(f"{YELLOW}no specs yet{RESET} — copy docs/specs/templates/spec.md to start")
         return 0
@@ -221,11 +219,15 @@ def main() -> int:
         f"{total_errors} error(s) across {len(reports)} spec(s)"
     )
     if total_errors:
-        print(f"\n{RED}traceability is broken{RESET} — a requirement points at a test "
-              f"that does not exist, or is untraced.")
+        print(
+            f"\n{RED}traceability is broken{RESET} — a requirement points at a test "
+            f"that does not exist, or is untraced."
+        )
         return 1
     if total_gaps:
-        print(f"\n{GREEN}links intact{RESET}; {total_gaps} declared gap(s) remain — tracked, not hidden.")
+        print(
+            f"\n{GREEN}links intact{RESET}; {total_gaps} declared gap(s) remain — tracked, not hidden."
+        )
     else:
         print(f"\n{GREEN}links intact{RESET}; every requirement is proved.")
     return 0

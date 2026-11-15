@@ -79,6 +79,7 @@ executes nothing — so the response is never an oracle for which proposal ids e
 | `REQ-MUT-012` | MUST NOT | A principal whose key record sets `allow_actions: false` obtains a proposal at all. |
 | `REQ-MUT-013` | MUST | Every proposal outcome — created, confirmed, rejected, expired — is recorded as a metric, so refusals are measurable rather than anecdotal. |
 | `REQ-MUT-014` | MUST | The pending proposal is held server-side on the session, never solely in the client's hands, so that confirming requires something the server is already holding and a proposal can expire. |
+| `REQ-MUT-015` | MUST | `confirm.approve` is a JSON boolean. A string or a number (`"yes"`, `"true"`, `"on"`, `1`) is refused with 422 naming `confirm.approve`, so consent is never coerced from text. |
 
 ## 6. Acceptance criteria
 
@@ -158,6 +159,7 @@ be indistinguishable from each other to the caller, so every row answers normall
 | `REQ-MUT-012` | `tests/unit/test_channels.py::test_anonymous_identity_cannot_propose_mutations` (drives a `/propose` turn as the anonymous identity) with `tests/unit/test_channels.py::test_a_principal_fails_closed_on_allow_actions` |
 | `REQ-MUT-013` | GAP — `metrics.record_proposal` is called on all four paths, but no test asserts it. |
 | `REQ-MUT-014` | `tests/unit/test_turns.py::test_a_structured_confirmation_executes` (proving the server holds it) with `tests/unit/test_turns.py::test_an_unrelated_turn_cancels_a_pending_proposal` (proving the client's copy is insufficient) |
+| `REQ-MUT-015` | `tests/unit/test_request_validation.py::test_approve_must_be_a_json_boolean` |
 
 ### What this table found
 

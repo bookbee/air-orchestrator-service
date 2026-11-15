@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uvicorn
 
-from air_orchestrator_service.config import get_settings
+from air_orchestrator_service.config import effective_workers, get_settings
 
 
 def main() -> None:
@@ -20,8 +20,9 @@ def main() -> None:
         host=settings.app.host,
         port=settings.app.port,
         # `workers` only takes effect for a string app target, which is why the app
-        # is named rather than imported here.
-        workers=settings.app.workers,
+        # is named rather than imported here. One while sessions are in-process
+        # (spec 0015).
+        workers=effective_workers(settings),
         # Access logging is ours (api/middleware.AccessLogMiddleware), and uvicorn's
         # would be a second, differently-shaped line for every request.
         access_log=False,

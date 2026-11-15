@@ -42,7 +42,9 @@ class AppSettings(BaseModel):
     #: 8080 is air-infra, the store/secrets broker this service calls for
     #: Redis/Postgres/Mongo credentials; 8083 is air-model-gateway.
     port: int = Field(default=8081, ge=1, le=65535)
-    workers: int = Field(default=2, ge=1, le=64)
+    #: One while sessions are in-process: each worker would hold its own sessions
+    #: (spec 0015). :func:`effective_workers` enforces it whatever this says.
+    workers: int = Field(default=1, ge=1, le=64)
     root_path: str = ""
     docs_enabled: bool = True
     max_body_bytes: int = Field(default=1_048_576, ge=1024)
@@ -450,8 +452,9 @@ class PlannerSettings(BaseModel):
     enabled: bool = False
     model_class: ModelClass = ModelClass.CLOUD
     #: Planning precedes everything slow, so it must leave room for lookups and
-    #: synthesis (``REQ-PLN-005``).
-    deadline_share: float = Field(default=0.15, gt=0, le=0.5)
+    #: synthesis (``REQ-PLN-005``). 0.3 of the default 15 s turn is 4.5 s: an uncached
+    #: ``cloud`` planning call takes over 2 s, so less would fall back on most turns.
+    deadline_share: float = Field(default=0.3, gt=0, le=0.5)
     max_tokens: int = Field(default=400, ge=100, le=2000)
     #: Schema-enforced: the round-1 schema's ``reads`` has this ``maxItems``.
     max_reads: int = Field(default=3, ge=1, le=5)
@@ -692,6 +695,33 @@ class Settings(BaseSettings):
         if self.cache.enabled and self.cache.backend == "redis" and not self.cache.redis_url:
             raise ValueError("cache.redis_url is required when cache.backend is redis")
         return self
+
+
+def session_store_is_shared(settings: Settings) -> bool:
+    """Whether every process sees the same sessions. Not yet for any backend:
+    ``redis`` is not built and falls back to memory (spec 0002), and memory is one
+    dict per process. Spec 0002 changes this when Redis lands."""
+    return False
+
+
+def effective_workers(settings: Settings) -> int:
+    """The worker count to start (spec 0015, ``REQ-SPS-001``): ``app.workers`` when
+    sessions are shared across processes, else one, logged when that is fewer than
+    configured. With two workers on in-process sessions, a follow-up that reaches the
+    other worker is a ``404 No such session``."""
+    configured = settings.app.workers
+    if configured == 1 or session_store_is_shared(settings):
+        return configured
+    from air_orchestrator_service.observability.logging import get_logger
+
+    get_logger(__name__).warning(
+        "app.workers_reduced",
+        configured=configured,
+        used=1,
+        reason="sessions are held in-process, so each worker would have its own",
+        session_backend=settings.session.backend,
+    )
+    return 1
 
 
 @lru_cache(maxsize=1)

@@ -385,6 +385,11 @@ async def _validation_error_handler(request: Request, exc: Exception) -> Respons
         return await _app_error_handler(
             request, MissingApiKeyError("A valid X-API-Key header is required.")
         )
+    if any(raw.get("type") == "json_invalid" for raw in exc.errors()):
+        # REQ-VAL-008: not a field's error; the body could not be read at all.
+        return await _app_error_handler(
+            request, MalformedRequestError("The request body is not valid JSON.")
+        )
     field_errors = [_as_field_error(raw) for raw in exc.errors()]
     first = field_errors[0] if field_errors else None
     detail = f"{first.field}: {first.message}" if first and first.message else None
