@@ -721,7 +721,7 @@
           "risk": {
             "type": "string",
             "title": "Risk",
-            "description": "air-action's own assessment: low | medium | high."
+            "description": "The gateway's own assessment: low | medium | high."
           },
           "summary": {
             "type": "string",
@@ -743,7 +743,7 @@
           "expires_at"
         ],
         "title": "Proposal",
-        "description": "A mutation air-action has validated and priced but **not** performed."
+        "description": "A mutation prepared but **not** performed.\n\nFor an air-tools-gateway capability, the gateway has validated it and ``summary``\nand ``risk`` are its own (spec 0012, ``REQ-TGW-014``). ``proposal_id`` is always\nthis service's ``prop_`` id; the gateway's id never leaves the server\n(``REQ-TGW-013``). Executing it needs a second turn carrying this id as\n``confirm.proposal_id``."
       },
       "QueryRequest": {
         "properties": {

@@ -58,16 +58,23 @@ detail joins the parts, e.g. `sources=2 dropped=0; orders.list_recent ok; orders
 the detail names both. That limit is the event model's, recorded in §8.
 
 **Proposing.** When the plan carries a write step:
-- the principal's `allow_actions` must be true (`REQ-TGW-020`), else the turn routes `direct`
-  with reason "this key may not propose changes";
+- the principal's `allow_actions` must be true (`REQ-TGW-020`), else the write step is
+  dropped before the `route` event, which then reads as the plan without it. Silently, as
+  `REQ-MUT-012` decided (spec 0001 Q1): a reason naming the key would tell a prober which
+  keys can write;
 - the step is checked like a read, against `write` entries;
 - then `ToolsGatewayClient.propose()` is called.
 
 A good response becomes a `PendingProposal` carrying the gateway's id, the creating `key_id`
 and `subject`, the capability, the arguments, risk and summary. `expires_at` is
 `min(gateway, session TTL)` (`REQ-TGW-013`, `014`, `019`). The published `Proposal` uses this
-service's `prop_` id as today. A `422` problem maps its `code` to a fixed answer, and a
-failure (timeout or 5xx) to the "could not prepare that change now" answer, per spec §7.
+service's `prop_` id as today. A problem with one of the four refusal codes maps to a fixed
+answer and is not a breaker failure (`REQ-TGW-028`): the base client takes a set of codes
+that are answers, so the four-reason taxonomy (spec 0010) still covers every real failure.
+Anything else (timeout, 5xx, another code, an unreadable body) gets the "could not prepare
+that change now" answer, per spec §7. The propose call runs inside `GATHER`, beside the
+lookups, so its outcome is that stage's detail and a failure degrades it naming
+`air-tools-gateway`; a proposing turn calls no model.
 
 **Executing.** `_resolve_confirmation()` still consumes the pending proposal first
 (`REQ-MUT-006`, `010`). It now also compares `key_id` and `subject`, so a mismatch is consumed
@@ -83,7 +90,24 @@ picks one of five fixed answer texts:
 - not done, for an open breaker.
 
 It also writes one `action.executed` audit line (`REQ-TGW-017`, `021`). A pending proposal
-without a gateway id, made by the `/propose` stand-in, keeps today's canned path unchanged.
+without a gateway id, made by the `/propose` stand-in, keeps today's canned path, and now
+records its `key_id` and `subject` too, so one ownership check covers both kinds.
+
+As built (T9):
+- **Ownership is checked twice.** The in-memory session store already refuses another key's
+  session with the same 404 an unknown session gets. The engine's `key_id`/`subject` check is
+  what holds where a store does not, for example a shared Redis backend, and it is the only
+  check that tells two customers on one key apart.
+- **Execute's bound** is `execute_timeout_ms`, narrowed only by what is left of the turn,
+  not by `deadline_share`: a confirmation turn calls nothing else.
+- **Unknown versus not done.** Any failure after the request was sent is unknown: a timeout, an
+  unreachable gateway, a 5xx, a problem response such as `409 proposal_expired`, or an
+  unreadable body. Not done is used only when no request went out: an open breaker, a turn
+  deadline too close (under 100 ms), or no gateway keys for the tenant.
+- **A `rejected` code** outside the four answer texts gets one generic "could not be made"
+  text, and the detail and audit line say `other`.
+- **The executor's HTTP client has no default key**, so no execute request can fall back to
+  the read key.
 
 **Answers on proposal and confirmation turns stay canned**, as today. The proposal turn's
 text is built from the gateway's `summary`. Having the model word them is spec 0013's call.

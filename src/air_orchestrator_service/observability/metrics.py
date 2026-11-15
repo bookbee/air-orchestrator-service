@@ -188,13 +188,15 @@ def record_guardrail_block(*, direction: str, rule: str, channel: Channel) -> No
 
 
 def record_downstream_call(*, service: DownstreamService, outcome: str) -> None:
-    """``ok`` | ``timeout`` | ``error`` | ``breaker_open`` | ``unavailable``."""
+    """``ok`` | ``timeout`` | ``error`` | ``breaker_open`` | ``unavailable``, or
+    ``refused``: the service answered no with a code the caller treats as an answer
+    (spec 0012, ``REQ-TGW-028``)."""
     _DOWNSTREAM_CALLS.labels(service.value, outcome).inc()
 
 
 def record_capability_call(*, capability: str, kind: str, outcome: str) -> None:
-    """``kind`` is ``read`` | ``write``; ``outcome`` is ``ok`` or one of spec 0010's
-    four reasons."""
+    """``kind`` is ``read`` | ``write``; ``outcome`` is ``ok``, ``refused``
+    (``REQ-TGW-028``) or one of spec 0010's four reasons."""
     _CAPABILITY_CALLS.labels(capability, kind, outcome).inc()
 
 

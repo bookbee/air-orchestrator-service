@@ -160,12 +160,19 @@ class Citation(BaseModel):
 
 
 class Proposal(BaseModel):
-    """A mutation air-action has validated and priced but **not** performed."""
+    """A mutation prepared but **not** performed.
+
+    For an air-tools-gateway capability, the gateway has validated it and ``summary``
+    and ``risk`` are its own (spec 0012, ``REQ-TGW-014``). ``proposal_id`` is always
+    this service's ``prop_`` id; the gateway's id never leaves the server
+    (``REQ-TGW-013``). Executing it needs a second turn carrying this id as
+    ``confirm.proposal_id``.
+    """
 
     proposal_id: str
     action: str
     arguments: dict[str, Any] = Field(default_factory=dict)
-    risk: str = Field(description="air-action's own assessment: low | medium | high.")
+    risk: str = Field(description="The gateway's own assessment: low | medium | high.")
     summary: str = Field(description="What executing this would do, in the user's terms.")
     expires_at: str = Field(description="ISO-8601. After this the proposal cannot be confirmed.")
 

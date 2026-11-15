@@ -129,6 +129,7 @@ planner (spec 0013, to follow).
 | `REQ-TGW-025` | MUST NOT | The `route` event lists any capability the turn's plan did not use. The inventory is reconnaissance, which `/v1/capabilities` already gates behind `admin:read`; a customer-channel event stream must not hand it to every caller. |
 | `REQ-TGW-026` | MUST NOT | A `write` capability is offered to the planner or proposed on the business channel, whatever its allow-list admits. |
 | `REQ-TGW-027` | MUST | The rules for using lookup results — state facts exactly as given and nothing they lack, say when a block is partial, never mention the mechanism, and say it could not check when a lookup failed — travel in the lookups message, which is present only on a turn whose plan had lookups. The channel prompt is not changed for them, so a turn without lookups is synthesised with the same prompt as before this spec. A rule that applies only when lookups are present then costs nothing on a turn without them, and that turn needs no new prompt review. |
+| `REQ-TGW-028` | MUST | A propose answered with a problem whose `code` is `not_found`, `invalid_state`, `not_permitted` or `limit_exceeded` is a refusal, not a failure: it does not count toward the breaker, it is recorded with outcome `refused` on both call metrics, the turn status is `ok`, and the answer is the fixed text for that code. Any other non-2xx, or another code, is a failure as spec 0010 defines it. |
 
 ## 6. Acceptance criteria
 
@@ -273,19 +274,20 @@ only by tests.
 | `REQ-TGW-009` | `tests/unit/test_tools_stage.py::test_a_result_is_screened_delimited_and_cut` |
 | `REQ-TGW-010` | `tests/unit/test_tools_stage.py::test_reads_run_concurrently_and_a_failure_degrades_gather` |
 | `REQ-TGW-011` | `tests/unit/test_tools_stage.py::test_a_failed_read_puts_a_notice_in_the_prompt` |
-| `REQ-TGW-012` | DEFERRED — Phase 4 · `tests/unit/test_action_execution.py::test_a_proposing_turn_sends_no_execute_request` |
-| `REQ-TGW-013` | DEFERRED — Phase 4 · `tests/unit/test_action_execution.py::test_the_gateway_proposal_id_never_reaches_the_caller` |
-| `REQ-TGW-014` | DEFERRED — Phase 4 · `tests/unit/test_action_execution.py::test_the_proposal_takes_the_earlier_expiry_and_a_known_risk` |
-| `REQ-TGW-015` | DEFERRED — Phase 4 · `tests/unit/test_action_execution.py::test_the_idempotency_key_is_derived_from_the_proposal_id` |
-| `REQ-TGW-016` | DEFERRED — Phase 4 · `tests/unit/test_tools_gateway_client.py::test_only_the_execute_request_carries_the_execute_key` |
-| `REQ-TGW-017` | DEFERRED — Phase 4 · `tests/unit/test_action_execution.py::test_the_answer_follows_the_execute_outcome` |
-| `REQ-TGW-018` | DEFERRED — Phase 4 · `tests/unit/test_action_execution.py::test_an_execute_failure_is_never_retried` |
-| `REQ-TGW-019` | DEFERRED — Phase 4 · `tests/unit/test_action_execution.py::test_a_confirmation_from_another_key_or_subject_executes_nothing` |
-| `REQ-TGW-020` | DEFERRED — Phase 4 · `tests/unit/test_action_execution.py::test_a_key_without_allow_actions_sends_no_propose_request` |
-| `REQ-TGW-021` | DEFERRED — Phase 4 · `tests/unit/test_action_execution.py::test_an_execution_writes_one_audit_line_without_arguments` |
+| `REQ-TGW-012` | `tests/unit/test_action_execution.py::test_a_proposing_turn_sends_no_execute_request` |
+| `REQ-TGW-013` | `tests/unit/test_action_execution.py::test_the_gateway_proposal_id_never_reaches_the_caller` |
+| `REQ-TGW-014` | `tests/unit/test_action_execution.py::test_the_proposal_takes_the_earlier_expiry_and_a_known_risk` |
+| `REQ-TGW-015` | `tests/unit/test_action_execution.py::test_the_idempotency_key_is_derived_from_the_proposal_id` |
+| `REQ-TGW-016` | `tests/unit/test_tools_gateway_client.py::test_only_the_execute_request_carries_the_execute_key` |
+| `REQ-TGW-017` | `tests/unit/test_action_execution.py::test_the_answer_follows_the_execute_outcome` |
+| `REQ-TGW-018` | `tests/unit/test_action_execution.py::test_an_execute_failure_is_never_retried` |
+| `REQ-TGW-019` | `tests/unit/test_action_execution.py::test_a_confirmation_from_another_key_or_subject_executes_nothing` |
+| `REQ-TGW-020` | `tests/unit/test_action_execution.py::test_a_key_without_allow_actions_sends_no_propose_request` |
+| `REQ-TGW-021` | `tests/unit/test_action_execution.py::test_an_execution_writes_one_audit_line_without_arguments` |
 | `REQ-TGW-022` | `tests/unit/test_tools_gateway_client.py::test_every_capability_call_is_counted` |
 | `REQ-TGW-023` | `tests/unit/test_system_routes.py::test_the_gateway_is_labelled_air_tools_gateway` |
-| `REQ-TGW-024` | DEFERRED — Phase 3 · `tests/integration/test_tools_gateway_contract.py::test_the_double_refuses_what_the_contract_refuses` |
+| `REQ-TGW-024` | `tests/integration/test_tools_gateway_contract.py::test_the_double_refuses_what_the_contract_refuses` |
 | `REQ-TGW-025` | `tests/unit/test_tools_stage.py::test_the_route_event_names_only_the_capabilities_used` |
-| `REQ-TGW-026` | DEFERRED — Phase 4 · `tests/unit/test_action_execution.py::test_the_business_channel_is_never_offered_a_write` |
+| `REQ-TGW-026` | `tests/unit/test_action_execution.py::test_the_business_channel_is_never_offered_a_write` |
 | `REQ-TGW-027` | `tests/unit/test_tools_stage.py::test_the_rules_for_lookups_travel_only_with_lookups` with `tests/unit/test_prompts.py::test_the_lookups_message_carries_the_rules_for_using_them` |
+| `REQ-TGW-028` | `tests/unit/test_action_execution.py::test_a_refused_proposal_is_an_answer_not_a_failure` with `tests/unit/test_client_base.py::test_a_refusal_code_is_an_answer_and_nothing_else_is` |

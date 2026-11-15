@@ -30,7 +30,7 @@ from air_orchestrator_service.clients.classifier import ClassifierClient
 from air_orchestrator_service.clients.infra import InfraClient
 from air_orchestrator_service.clients.model_gateway import ModelGatewayClient
 from air_orchestrator_service.clients.rag import RagClient
-from air_orchestrator_service.clients.tools_gateway import ToolsGatewayClient
+from air_orchestrator_service.clients.tools_gateway import ActionExecutor, ToolsGatewayClient
 from air_orchestrator_service.config import Settings
 from air_orchestrator_service.constants import Channel
 from air_orchestrator_service.engine.plan import Planner, RulePlanner
@@ -77,6 +77,11 @@ class AppState:
     #: ``None`` unless ``downstream.tools_gateway`` is configured (spec 0012). The
     #: read-key client only: it has no execute-shaped method.
     tools_gateway: ToolsGatewayClient | None = None
+    #: The execute-key half, built alongside ``tools_gateway`` (spec 0012 plan §2).
+    #: Kept out of :meth:`optional_clients`, so ``/v1/capabilities`` never probes on
+    #: it and nothing iterating the optional clients can reach it: only
+    #: ``/v1/chat``'s engine is handed it, for confirmation turns.
+    action_executor: ActionExecutor | None = None
     #: Decides each turn's routes and steps (spec 0012 T5). One per app, so a test
     #: swaps it with ``dataclasses.replace`` on an otherwise real app.
     planner: Planner = field(default_factory=RulePlanner)

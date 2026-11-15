@@ -44,7 +44,7 @@ from air_orchestrator_service.clients.classifier import ClassifierClient
 from air_orchestrator_service.clients.infra import InfraClient
 from air_orchestrator_service.clients.model_gateway import ModelGatewayClient
 from air_orchestrator_service.clients.rag import RagClient
-from air_orchestrator_service.clients.tools_gateway import ToolsGatewayClient
+from air_orchestrator_service.clients.tools_gateway import ActionExecutor, ToolsGatewayClient
 from air_orchestrator_service.config import Settings, get_settings
 from air_orchestrator_service.memory.session import build_session_store
 from air_orchestrator_service.observability.logging import configure_logging, get_logger
@@ -152,6 +152,8 @@ def _build_lifespan(state: AppState) -> Any:
             await state.model_gateway.aclose()
             for client in state.optional_clients():
                 await client.aclose()
+            if state.action_executor is not None:
+                await state.action_executor.aclose()
             _log.info("shutdown.complete")
 
     return lifespan
@@ -196,6 +198,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         rag=RagClient(resolved.downstream.rag) if resolved.downstream.rag.configured else None,
         tools_gateway=(
             ToolsGatewayClient(resolved.downstream.tools_gateway)
+            if resolved.downstream.tools_gateway.configured
+            else None
+        ),
+        action_executor=(
+            ActionExecutor(resolved.downstream.tools_gateway)
             if resolved.downstream.tools_gateway.configured
             else None
         ),

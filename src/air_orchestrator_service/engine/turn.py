@@ -32,6 +32,15 @@ does not, so it plans no air-tools-gateway step; spec 0013's model planner will.
 numbered and delimited, and each one the answer cites by ``[n]`` becomes a
 ``citation``.
 
+**A change is proposed on one turn and executed on another.** A planned
+air-tools-gateway ``write`` is prepared by the gateway in ``GATHER`` and published as
+a ``prop_`` proposal; nothing changes (spec 0012). Only a later turn whose structured
+``confirm`` names that proposal, from the same key and customer, executes it, again
+in ``GATHER``'s slot, through :class:`ActionExecutor` alone. The pending proposal is
+consumed before anything is sent, so the execute happens at most once from here
+(``REQ-TGW-018``). Both turns answer with fixed text: the execute outcome picks one
+of five, and only ``done``'s says the change was made (``REQ-TGW-017``).
+
 **Status vocabulary is load-bearing.** ``TurnStatus.DEGRADED`` covers a provider
 failure — the model gateway being slow, down, or refusing this service's
 credentials is the system coping, and the turn still answers; the degraded stage
@@ -55,6 +64,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterable
+from dataclasses import replace
 from typing import Any, Final
 
 import orjson
@@ -75,7 +85,9 @@ from air_orchestrator_service.clients.model_gateway import (
 from air_orchestrator_service.clients.rag import MIN_CALL_MS as RAG_MIN_CALL_MS
 from air_orchestrator_service.clients.rag import Passage, RagClient, RagError, safe_title, safe_uri
 from air_orchestrator_service.clients.tools_gateway import (
+    ActionExecutor,
     Capability,
+    GatewayProposal,
     Inventory,
     ToolResult,
     ToolsGatewayClient,
@@ -93,7 +105,7 @@ from air_orchestrator_service.constants import (
     StageStatus,
     TurnStatus,
 )
-from air_orchestrator_service.engine.plan import PlanContext, Planner, RulePlanner, Step
+from air_orchestrator_service.engine.plan import Plan, PlanContext, Planner, RulePlanner, Step
 from air_orchestrator_service.guardrails.boundary import delimit
 from air_orchestrator_service.guardrails.escalation import wants_human
 from air_orchestrator_service.guardrails.injection import screen_input
@@ -184,6 +196,72 @@ _LOOKUP_FAILURE: Final[dict[str, str]] = {
     "error": "failed",
     "breaker_open": "circuit open",
 }
+#: Spec 0012 §7: what a proposing turn says. Fixed text, never synthesised: a turn that
+#: proposes a change calls no model, and the gateway's ``summary`` is the only
+#: downstream text in it (cleaned, and capped at 500 characters by the contract).
+_PROPOSAL_READY: Final[str] = (
+    "{summary}\n\nNothing has been changed yet. If you would like to go ahead, please confirm."
+)
+_PROPOSE_FAILED: Final[str] = (
+    "I couldn't prepare that change just now. Please try again in a little while, or ask "
+    "to speak to a person."
+)
+#: ``REQ-TGW-028``: a refusal is answered from its code, by fixed text.
+_PROPOSE_REFUSED: Final[dict[str, str]] = {
+    "not_found": (
+        "I couldn't find that on your account, so I can't prepare that change. Could you "
+        "check the order number?"
+    ),
+    "invalid_state": (
+        "That change isn't possible in the order's current state, for example once it has "
+        "shipped. If you need more help, you can ask to speak to a person."
+    ),
+    "not_permitted": (
+        "That change can't be made here. If you need it, you can ask to speak to a person."
+    ),
+    "limit_exceeded": (
+        "That change can't be made right now because a limit has been reached. You can ask "
+        "to speak to a person for help."
+    ),
+}
+#: Spec 0012 ``REQ-TGW-017``: what a confirmed turn says, by the execute outcome. Only
+#: ``done``'s text says the change was made. None names the change, so none can say
+#: "cancelled" when it was not.
+_EXECUTE_DONE: Final[str] = "Done: the change you confirmed has been made."
+_EXECUTE_PENDING: Final[str] = (
+    "That change needs an approval first, so it has not been made yet. You can ask me "
+    "again later to check whether it has gone through."
+)
+#: ``rejected``, worded from the gateway's closed-set ``code``, never its free text.
+_EXECUTE_REJECTED: Final[dict[str, str]] = {
+    "invalid_state": (
+        "That change could not be made in the order's current state, for example once it "
+        "has shipped, so nothing has been changed."
+    ),
+    "not_found": "I couldn't find that on your account, so nothing has been changed.",
+    "not_permitted": (
+        "That change can't be made here, so nothing has been changed. You can ask to "
+        "speak to a person."
+    ),
+    "limit_exceeded": (
+        "That change could not be made because a limit has been reached, so nothing has "
+        "been changed. You can ask to speak to a person for help."
+    ),
+}
+_EXECUTE_REJECTED_OTHER: Final[str] = (
+    "That change could not be made, so nothing has been changed. You can ask to speak to "
+    "a person for help."
+)
+#: A request was sent and no outcome came back: it may or may not have happened.
+_EXECUTE_UNKNOWN: Final[str] = (
+    "I couldn't confirm whether that change went through. Please don't ask for it again "
+    "yet: ask me to check on it in a little while, or ask to speak to a person."
+)
+#: No request was sent (an open circuit, no time left, no gateway).
+_EXECUTE_NOT_DONE: Final[str] = (
+    "I couldn't make that change just now, so nothing has been changed. Please try again "
+    "in a little while, or ask to speak to a person."
+)
 #: The shortest bound worth a lookup; below it the turn reports the deadline instead.
 _LOOKUP_MIN_MS: Final[int] = 100
 
@@ -272,6 +350,7 @@ class TurnEngine:
         rag: RagClient | None = None,
         planner: Planner | None = None,
         tools_gateway: ToolsGatewayClient | None = None,
+        action_executor: ActionExecutor | None = None,
     ) -> None:
         self._settings = settings
         #: Decides the routes and steps at ``PLAN`` (spec 0012 T5). Today's rule
@@ -294,6 +373,14 @@ class TurnEngine:
         #: and what it could not. Per request, like `_sources`.
         self._lookups: list[tuple[str, str, bool]] = []
         self._lookup_notices: list[str] = []
+        #: What `GATHER`'s propose call produced, and the fixed answer for the
+        #: turn when it planned a change (spec 0012). Per request.
+        self._gateway_proposal: tuple[Capability, Step, GatewayProposal] | None = None
+        self._proposal_answer: str | None = None
+        #: The execute-key client, reached only from a confirmation turn (spec 0012
+        #: plan §2), and the fixed answer its outcome chose. Per request.
+        self._executor = action_executor
+        self._execution_answer: str | None = None
         self._prompts = PromptRegistry(settings)
         #: Set by `_pipeline` when it degrades a turn — an async generator has
         #: no return value, so this is how `run()` learns the outcome once
@@ -506,7 +593,7 @@ class TurnEngine:
         # A confirmation is resolved before anything else looks at the text, so the
         # decision to execute depends on the structured field alone, never on what
         # the accompanying message happens to say.
-        confirmed = await self._resolve_confirmation(request, session)
+        confirmed = await self._resolve_confirmation(request, session, principal)
 
         async for event in self._stage(Stage.CONTEXT):
             yield event
@@ -539,8 +626,17 @@ class TurnEngine:
                 offered=offered,
             )
         )
+        if plan.write is not None and (
+            not principal.allow_actions or principal.channel is Channel.BUSINESS
+        ):
+            # REQ-TGW-020/026: dropped before the route event, silently, so the turn
+            # reads as one that never planned a change (REQ-MUT-012, spec 0001 Q1).
+            plan = _without_write(plan)
+        write = plan.write if confirmed is None else None
         propose = plan.stand_in_proposal
-        needs_model = confirmed is None and not propose
+        # A proposing turn's answer is fixed text, so it needs no model, no
+        # retrieval and no lookups.
+        needs_model = confirmed is None and not propose and write is None
         retrieve = needs_model and plan.retrieve
         yield RouteEvent(
             routes=list(plan.routes),
@@ -560,14 +656,18 @@ class TurnEngine:
             retrieve=retrieve,
             needs_model=needs_model,
             reads=plan.reads if needs_model else (),
+            write=write,
             offered=offered,
+            execute=confirmed,
             deadline_at=turn_started + deadline_s,
             deadline_s=deadline_s,
         ):
             yield event
 
         if propose:
-            yield ProposalEvent(proposal=await self._propose(session))
+            yield ProposalEvent(proposal=await self._propose(session, principal))
+        elif self._gateway_proposal is not None:
+            yield ProposalEvent(proposal=await self._propose_gateway(session, principal))
 
         # ── Deadline check, right before the expensive part. A canned
         # confirm/propose reply never calls the model, so the deadline is
@@ -887,7 +987,9 @@ class TurnEngine:
         retrieve: bool,
         needs_model: bool,
         reads: tuple[Step, ...],
+        write: Step | None,
         offered: Inventory,
+        execute: PendingProposal | None,
         deadline_at: float,
         deadline_s: float,
     ) -> AsyncIterator[Event]:
@@ -895,12 +997,16 @@ class TurnEngine:
 
         Retrieval and the plan's lookups run concurrently, each bounded by its own
         share of the turn's deadline (``REQ-RAG-004``, ``REQ-TGW-010``), and the one
-        event reports both. With no lookups planned, the event is retrieval's alone,
-        exactly as before spec 0012. ``StageEvent.downstream`` is one field, so when
-        both fail it names air-rag first and the detail names both.
+        event reports both. A planned change is prepared here too, by the gateway's
+        propose call, so its outcome is this stage's to report (a proposing turn
+        retrieves and looks up nothing). A confirmed one is executed here as well, on
+        a turn that does nothing else (plan §1, no new ``Stage``). With none of them, the event is
+        retrieval's alone, exactly as before spec 0012. ``StageEvent.downstream`` is
+        one field, so when several fail it names air-rag first and the detail names
+        them all.
         """
         started = time.perf_counter()
-        retrieval, lookups = await asyncio.gather(
+        retrieval, lookups, proposal, execution = await asyncio.gather(
             self._retrieval_part(
                 masked_text,
                 principal,
@@ -912,8 +1018,12 @@ class TurnEngine:
             self._lookup_part(
                 principal, reads, offered, deadline_at=deadline_at, deadline_s=deadline_s
             ),
+            self._proposal_part(
+                principal, write, offered, deadline_at=deadline_at, deadline_s=deadline_s
+            ),
+            self._execution_part(principal, execute, deadline_at=deadline_at),
         )
-        status, detail, downstream = _combine(retrieval, lookups)
+        status, detail, downstream = _combine(retrieval, lookups, proposal, execution)
         latency_ms = round((time.perf_counter() - started) * 1000, 3)
         metrics.record_stage(stage=Stage.GATHER, status=status, duration_s=latency_ms / 1000)
         yield StageEvent(
@@ -1095,6 +1205,150 @@ class TurnEngine:
                 DownstreamService.TOOLS_GATEWAY if gateway_failed else None,
             )
         return StageStatus.OK, "; ".join(parts), None
+
+    async def _proposal_part(
+        self,
+        principal: Principal,
+        write: Step | None,
+        offered: Inventory,
+        *,
+        deadline_at: float,
+        deadline_s: float,
+    ) -> _Part | None:
+        """The planned change, prepared by air-tools-gateway (spec 0012), or ``None``
+        when the plan has none. The gateway changes nothing on propose; only its
+        answer is kept, server-side (``REQ-TGW-012``, ``013``).
+
+        The step is checked like a lookup, against ``write`` entries of the turn's
+        inventory, which already holds none on the business channel
+        (``REQ-TGW-026``). A refusal is an answer (``REQ-TGW-028``); any failure is
+        ``degraded`` naming the gateway. Either way the turn's answer is fixed text.
+        """
+        if write is None:
+            return None
+        self._proposal_answer = _PROPOSE_FAILED
+        gateway = self._tools_gateway
+        if gateway is None:
+            return StageStatus.SKIPPED, "air-tools-gateway is not configured", None
+        if not offered.available:
+            self._last_status = TurnStatus.DEGRADED
+            return (
+                StageStatus.DEGRADED,
+                "air-tools-gateway is unavailable",
+                DownstreamService.TOOLS_GATEWAY,
+            )
+        capability = offered.get(write.capability)
+        if capability is None or capability.kind != "write":
+            return StageStatus.OK, f"{_label(write.capability)} dropped: not offered", None
+        name = capability.name
+        if capability.argument_errors(write.arguments):
+            return StageStatus.OK, f"{name} dropped: invalid arguments", None
+        bound_s = gateway.bound_s(_remaining(deadline_at), deadline_s=deadline_s)
+        if bound_s * 1000 < _LOOKUP_MIN_MS:
+            self._last_status = TurnStatus.DEGRADED
+            return StageStatus.DEGRADED, f"{name} skipped: turn deadline too close", None
+        try:
+            proposal = await gateway.propose(
+                capability,
+                write.arguments,
+                tenant=principal.tenant,
+                subject=principal.subject,
+                timeout_s=bound_s,
+            )
+        except ToolsGatewayError as exc:
+            if exc.reason == "refused" and exc.code in _PROPOSE_REFUSED:
+                self._proposal_answer = _PROPOSE_REFUSED[exc.code]
+                return StageStatus.OK, f"{name} refused: {exc.code}", None
+            self._last_status = TurnStatus.DEGRADED
+            return (
+                StageStatus.DEGRADED,
+                f"{name} {_LOOKUP_FAILURE.get(exc.reason, 'failed')}",
+                DownstreamService.TOOLS_GATEWAY,
+            )
+        self._gateway_proposal = (capability, write, proposal)
+        self._proposal_answer = _PROPOSAL_READY.format(summary=_clean(proposal.summary))
+        return StageStatus.OK, f"{name} proposed", None
+
+    async def _execution_part(
+        self, principal: Principal, pending: PendingProposal | None, *, deadline_at: float
+    ) -> _Part | None:
+        """Execute a confirmed air-tools-gateway proposal (spec 0012), or ``None`` when
+        the turn confirmed nothing, or only the ``/propose`` stand-in.
+
+        One request, never retried (``REQ-TGW-018``), on the execute key with an
+        idempotency key derived from the ``prop_`` id (``REQ-TGW-015``, ``016``). The
+        answer follows the outcome (``REQ-TGW-017``): a request that went out and
+        brought nothing back is *unknown*; one that never went out is *not done*.
+        Either is ``degraded``; ``done``, ``pending_approval`` and ``rejected`` are the
+        gateway answering, so ``ok``. One ``action.executed`` line is written whatever
+        happened, without arguments (``REQ-TGW-021``).
+        """
+        if pending is None or pending.gateway_proposal_id is None:
+            return None
+        name = pending.action
+        self._execution_answer = _EXECUTE_NOT_DONE
+        executor = self._executor
+        if executor is None or not executor.settings.serves(principal.tenant):
+            self._audit(pending, principal, "not_done")
+            return StageStatus.SKIPPED, "air-tools-gateway is not configured", None
+        bound_s = executor.bound_s(_remaining(deadline_at))
+        if bound_s * 1000 < _LOOKUP_MIN_MS:
+            self._last_status = TurnStatus.DEGRADED
+            self._audit(pending, principal, "not_done")
+            return StageStatus.DEGRADED, f"{name} skipped: turn deadline too close", None
+        try:
+            outcome = await executor.execute(
+                name,
+                proposal_id=pending.proposal_id,
+                gateway_proposal_id=pending.gateway_proposal_id,
+                tenant=principal.tenant,
+                subject=pending.subject,
+                timeout_s=bound_s,
+            )
+        except ToolsGatewayError as exc:
+            self._last_status = TurnStatus.DEGRADED
+            sent = exc.reason != "breaker_open"
+            self._execution_answer = _EXECUTE_UNKNOWN if sent else _EXECUTE_NOT_DONE
+            self._audit(pending, principal, "unknown" if sent else "not_done")
+            return (
+                StageStatus.DEGRADED,
+                f"{name} {_LOOKUP_FAILURE.get(exc.reason, 'failed')}",
+                DownstreamService.TOOLS_GATEWAY,
+            )
+        code: str | None = None
+        if outcome.status == "done":
+            self._execution_answer = _EXECUTE_DONE
+            detail = f"{name} done"
+        elif outcome.status == "pending_approval":
+            self._execution_answer = _EXECUTE_PENDING
+            detail = f"{name} pending_approval"
+        else:
+            code = outcome.code if outcome.code in _EXECUTE_REJECTED else "other"
+            self._execution_answer = _EXECUTE_REJECTED.get(code, _EXECUTE_REJECTED_OTHER)
+            detail = f"{name} rejected: {code}"
+        self._audit(pending, principal, outcome.status, code=code)
+        return StageStatus.OK, detail, None
+
+    def _audit(
+        self,
+        pending: PendingProposal,
+        principal: Principal,
+        outcome: str,
+        *,
+        code: str | None = None,
+    ) -> None:
+        """``REQ-TGW-021``: one line per execution. This service's ``prop_`` id, not
+        the gateway's (``REQ-TGW-013``), and no argument values: they came from a model
+        reading customer text."""
+        _log.info(
+            "action.executed",
+            proposal_id=pending.proposal_id,
+            capability=pending.action,
+            outcome=outcome,
+            code=code,
+            key_id=principal.key_id,
+            tenant=principal.tenant,
+        )
 
     async def _lookup(
         self,
@@ -1303,8 +1557,12 @@ class TurnEngine:
         return existing
 
     async def _resolve_confirmation(
-        self, request: TurnRequest, session: Session
+        self, request: TurnRequest, session: Session, principal: Principal
     ) -> PendingProposal | None:
+        """The pending proposal this turn confirms, consumed, or ``None``. A proposal
+        made by another key, or for another customer, is consumed and confirms
+        nothing, exactly as an unknown id does (spec 0012 ``REQ-TGW-019``, spec 0001
+        ``REQ-MUT-008``): the answer must not tell a prober the id was real."""
         confirm = request.confirm
         if confirm is None:
             await self._sessions.clear_pending(session)
@@ -1316,23 +1574,60 @@ class TurnEngine:
         if pending is None:
             metrics.record_proposal(outcome="expired")
             return None
-        if not approved:
+        owner = (pending.key_id, pending.subject) == (principal.key_id, principal.subject)
+        if not approved or not owner:
             metrics.record_proposal(outcome="rejected")
             return None
         metrics.record_proposal(outcome="confirmed")
         return pending
 
-    async def _propose(self, session: Session) -> Proposal:
+    async def _propose(self, session: Session, principal: Principal) -> Proposal:
         pending = PendingProposal.create(
             proposal_id=f"{_PROPOSAL_ID_PREFIX}{uuid.uuid4().hex[:12]}",
             action="echo.noop",
-            arguments={"note": "no air-action client exists yet — nothing executes"},
+            arguments={"note": "a stand-in: nothing executes"},
             risk="low",
             summary=(
-                "A stand-in mutation, so the confirm path can be exercised before "
-                "air-action exists."
+                "A stand-in mutation, so the confirm path can be exercised without "
+                "changing anything."
             ),
             ttl_seconds=self._settings.session.proposal_ttl_seconds,
+            key_id=principal.key_id,
+            subject=principal.subject,
+        )
+        await self._sessions.set_pending(session, pending)
+        metrics.record_proposal(outcome="created")
+        return Proposal(
+            proposal_id=pending.proposal_id,
+            action=pending.action,
+            arguments=pending.arguments,
+            risk=pending.risk,
+            summary=pending.summary,
+            expires_at=pending.expires_at.isoformat(),
+        )
+
+    async def _propose_gateway(self, session: Session, principal: Principal) -> Proposal:
+        """Hold the gateway's proposal on the session and publish this service's own.
+
+        The published :class:`Proposal` carries a ``prop_`` id; the gateway's id is
+        kept on the pending proposal only (``REQ-TGW-013``). ``summary`` and ``risk``
+        are the gateway's, and the expiry is the earlier of its and this service's
+        proposal TTL (``REQ-TGW-014``). The creating key and customer are kept so a
+        confirmation can be checked against them at execute (``REQ-TGW-019``).
+        """
+        assert self._gateway_proposal is not None
+        capability, step, offered = self._gateway_proposal
+        pending = PendingProposal.create(
+            proposal_id=f"{_PROPOSAL_ID_PREFIX}{uuid.uuid4().hex[:12]}",
+            action=capability.name,
+            arguments=dict(step.arguments),
+            risk=offered.risk,
+            summary=_clean(offered.summary),
+            ttl_seconds=self._settings.session.proposal_ttl_seconds,
+            not_after=offered.expires_at,
+            gateway_proposal_id=offered.proposal_id,
+            key_id=principal.key_id,
+            subject=principal.subject,
         )
         await self._sessions.set_pending(session, pending)
         metrics.record_proposal(outcome="created")
@@ -1361,19 +1656,23 @@ class TurnEngine:
         when the caller is streaming (an async generator has no return value, hence
         the holder).
 
-        Confirmation/proposal replies stay canned — there is no model call to make
-        for a scripted stand-in mutation that touches nothing real, so the deadline
-        and the prompt registry are irrelevant to those two branches.
+        Confirmation and proposal replies are fixed text, never synthesised: the
+        execute outcome or the gateway's summary decides them (spec 0012 plan §1),
+        so the deadline and the prompt registry are irrelevant to those branches.
 
         Raises `ModelGatewayError` on a real synthesis failure, and `TimeoutError`
         when the turn's deadline passes mid-stream — the caller decides the degraded
         fallback; this method's job is only to try.
         """
         if confirmed is not None:
-            outcome.text = (
-                f"Executed {confirmed.action} "
-                "(no air-action client exists yet — nothing actually changed)."
+            # The gateway's outcome, chosen in `GATHER`; the stand-in's own text
+            # otherwise, since it has nothing to execute.
+            outcome.text = self._execution_answer or (
+                f"Executed {confirmed.action} (a stand-in: nothing actually changed)."
             )
+            return
+        if self._proposal_answer is not None:
+            outcome.text = self._proposal_answer
             return
         if proposed:
             outcome.text = (
@@ -1573,20 +1872,41 @@ def _structured_messages(masked_text: str) -> list[dict[str, str]]:
 _Part = tuple[StageStatus, str | None, DownstreamService | None]
 
 
-def _combine(retrieval: _Part, lookups: _Part | None) -> _Part:
-    """One ``GATHER`` event from its two halves. With no lookups, retrieval's own;
-    with retrieval not in play, the lookups' own; else the worse status, both
-    details, and air-rag named first."""
-    if lookups is None:
+def _combine(retrieval: _Part, *others: _Part | None) -> _Part:
+    """One ``GATHER`` event from its parts. With nothing else planned, retrieval's
+    own; with retrieval not in play, the others' own; else the worst status, every
+    detail, and the first service to blame (air-rag first)."""
+    planned = [part for part in others if part is not None]
+    if not planned:
         return retrieval
-    if retrieval[0] is StageStatus.SKIPPED:
-        return lookups
-    degraded = StageStatus.DEGRADED in (retrieval[0], lookups[0])
-    return (
-        StageStatus.DEGRADED if degraded else StageStatus.OK,
-        f"{retrieval[1]}; {lookups[1]}",
-        retrieval[2] or lookups[2],
+    parts = planned if retrieval[0] is StageStatus.SKIPPED else [retrieval, *planned]
+    if len(parts) == 1:
+        return parts[0]
+    statuses = [part[0] for part in parts]
+    status = (
+        StageStatus.DEGRADED
+        if StageStatus.DEGRADED in statuses
+        else StageStatus.OK
+        if StageStatus.OK in statuses
+        else StageStatus.SKIPPED
     )
+    return (
+        status,
+        "; ".join(part[1] for part in parts if part[1]),
+        next((part[2] for part in parts if part[2] is not None), None),
+    )
+
+
+def _without_write(plan: Plan) -> Plan:
+    """The plan as if it had never planned a change."""
+    routes = tuple(route for route in plan.routes if route is not Route.ACTION) or (Route.DIRECT,)
+    reason = "direct answer" if routes == (Route.DIRECT,) else plan.reason
+    return replace(plan, routes=routes, reason=reason, write=None)
+
+
+def _clean(text: str) -> str:
+    """Downstream text for the customer's eyes: no control characters, one line."""
+    return " ".join(_CONTROL_CHARS.sub(" ", text).split())
 
 
 def _label(name: str) -> str:

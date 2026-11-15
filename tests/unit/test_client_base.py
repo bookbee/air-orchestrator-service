@@ -341,3 +341,40 @@ async def test_an_open_breaker_is_reported_without_a_probe(
     assert status.reachable is False
     assert status.detail == "circuit open"
     assert health.call_count == 0
+
+
+async def test_a_refusal_code_is_an_answer_and_nothing_else_is(
+    client: DownstreamClient, mock: respx.MockRouter
+) -> None:
+    """Spec 0012 ``REQ-TGW-028`` at the base: a named problem code raises
+    ``refused`` with the code, records ``refused`` and leaves the breaker closed, however
+    many arrive. An unnamed code, or a body that is not JSON, is still ``error``."""
+    mock.post(_URL).mock(
+        side_effect=[httpx.Response(422, json={"code": "invalid_state"})] * 5
+        + [httpx.Response(422, json={"code": "other"}), httpx.Response(422, text="no")]
+    )
+    before = _count("refused")
+
+    for _ in range(5):
+        with pytest.raises(DownstreamError) as caught:
+            await client.post_json(
+                "/v1/thing",
+                {},
+                timeout_s=1.0,
+                parse=lambda body: body,
+                refusal_codes=frozenset({"invalid_state"}),
+            )
+        assert (caught.value.reason, caught.value.code) == ("refused", "invalid_state")
+    for _ in range(2):
+        with pytest.raises(DownstreamError) as caught:
+            await client.post_json(
+                "/v1/thing",
+                {},
+                timeout_s=1.0,
+                parse=lambda body: body,
+                refusal_codes=frozenset({"invalid_state"}),
+            )
+        assert (caught.value.reason, caught.value.code) == ("error", None)
+
+    assert _count("refused") == before + 5
+    assert client.breaker.state is BreakerState.CLOSED

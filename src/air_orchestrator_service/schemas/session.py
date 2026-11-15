@@ -47,6 +47,15 @@ class PendingProposal(BaseModel):
     risk: str = "low"
     summary: str = ""
     expires_at: datetime
+    #: The air-tools-gateway proposal this one stands for, or ``None`` for the
+    #: ``/propose`` stand-in. Held here and nowhere else: the caller only ever sees
+    #: ``proposal_id`` (spec 0012, ``REQ-TGW-013``). Out of ``repr`` so a log line
+    #: or traceback that prints the model does not carry it either.
+    gateway_proposal_id: str | None = Field(default=None, repr=False)
+    #: Who created it, so only the same key and customer can confirm it (spec 0012
+    #: ``REQ-TGW-019``, enforced at execute).
+    key_id: str | None = None
+    subject: str | None = Field(default=None, repr=False)
 
     def is_expired(self, *, at: datetime | None = None) -> bool:
         return (at or _now()) >= self.expires_at
@@ -61,14 +70,26 @@ class PendingProposal(BaseModel):
         risk: str,
         summary: str,
         ttl_seconds: int,
+        not_after: datetime | None = None,
+        gateway_proposal_id: str | None = None,
+        key_id: str | None = None,
+        subject: str | None = None,
     ) -> PendingProposal:
+        """``not_after`` caps the expiry: the earlier of it and ``ttl_seconds`` from now
+        wins (spec 0012, ``REQ-TGW-014``)."""
+        expires_at = _now() + timedelta(seconds=ttl_seconds)
+        if not_after is not None:
+            expires_at = min(expires_at, not_after)
         return cls(
             proposal_id=proposal_id,
             action=action,
             arguments=arguments,
             risk=risk,
             summary=summary,
-            expires_at=_now() + timedelta(seconds=ttl_seconds),
+            expires_at=expires_at,
+            gateway_proposal_id=gateway_proposal_id,
+            key_id=key_id,
+            subject=subject,
         )
 
 

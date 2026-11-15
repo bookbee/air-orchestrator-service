@@ -77,6 +77,9 @@ async def chat(
         state.rag,
         planner=state.planner,
         tools_gateway=state.tools_gateway,
+        # Only the customer channel can hold a gateway proposal (REQ-TGW-026), so
+        # only its engine is handed the execute key's client.
+        action_executor=state.action_executor,
     )
 
     streaming = wants_stream(accept)

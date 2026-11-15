@@ -1,9 +1,10 @@
-"""air-tools-gateway client calls: per-tenant keys, the envelope, the metric
-(spec 0012, ``REQ-TGW-007``/``022``)."""
+"""air-tools-gateway client calls: per-tenant keys, the envelope, the metric, and
+which key each request carries (spec 0012, ``REQ-TGW-007``/``016``/``022``)."""
 
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator, Iterator
 
 import httpx
@@ -11,6 +12,7 @@ import pytest
 import respx
 
 from air_orchestrator_service.clients.tools_gateway import (
+    ActionExecutor,
     Capability,
     ToolsGatewayClient,
     ToolsGatewayError,
@@ -26,6 +28,7 @@ from tests.unit._tools_gateway_support import (
     READ_B,
     Clock,
     gateway_client,
+    gateway_settings,
     inventory_body,
     read_entry,
     write_entry,
@@ -33,6 +36,7 @@ from tests.unit._tools_gateway_support import (
 
 _LOOKUP_URL = f"{TOOLS_GATEWAY_BASE_URL}/v1/tools/orders.list_recent"
 _PROPOSE_URL = f"{TOOLS_GATEWAY_BASE_URL}/v1/actions/orders.cancel/propose"
+_EXECUTE_URL = f"{TOOLS_GATEWAY_BASE_URL}/v1/actions/orders.cancel/execute"
 
 
 @pytest.fixture
@@ -192,3 +196,87 @@ async def test_arguments_are_checked_against_the_schema_without_echoing_them(
     errors = cancel.argument_errors({"order_id": "DROP TABLE", "subject": "cust_999"})
     assert errors
     assert not any("DROP" in e or "cust_999" in e for e in errors)
+
+
+async def test_only_the_execute_request_carries_the_execute_key(
+    mock: respx.MockRouter, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``REQ-TGW-016``. With the single-tenant pair, so the read key is also the HTTP
+    client's default header: inventory, lookup and propose carry the read key, and
+    execute the execute key alone. Neither key reaches a log line, a ``repr`` or an
+    error. The read client has no way to execute, and the executor none to look up."""
+    settings = gateway_settings(tenant_keys={}, api_key=READ_A, execute_key=EXECUTE_A)
+    reader = ToolsGatewayClient(settings, clock=Clock())
+    executor = ActionExecutor(settings, clock=Clock())
+    mock.get(INVENTORY_URL).mock(
+        return_value=httpx.Response(
+            200, json=inventory_body(read_entry("orders.list_recent"), write_entry("orders.cancel"))
+        )
+    )
+    mock.post(_LOOKUP_URL).mock(
+        return_value=httpx.Response(200, json=_result("orders.list_recent"))
+    )
+    mock.post(_PROPOSE_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "proposal_id": "gp_1",
+                "capability": "orders.cancel",
+                "risk": "low",
+                "summary": "Cancel order 55120.",
+                "expires_at": "2026-11-14T10:12:11Z",
+            },
+        )
+    )
+    mock.post(_EXECUTE_URL).mock(
+        side_effect=[
+            httpx.Response(
+                200, json={"status": "done", "execution_id": "gx_1", "capability": "orders.cancel"}
+            ),
+            httpx.Response(503),
+        ]
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        lookup = await _capability(reader, "orders.list_recent")
+        change = await _capability(reader, "orders.cancel")
+        await reader.run(lookup, {}, tenant="tenant-a", subject="cust_123", timeout_s=1.0)
+        await reader.propose(
+            change, {"order_id": "55120"}, tenant="tenant-a", subject="cust_123", timeout_s=1.0
+        )
+        done = await executor.execute(
+            "orders.cancel",
+            proposal_id="prop_0123456789ab",
+            gateway_proposal_id="gp_1",
+            tenant="tenant-a",
+            subject="cust_123",
+            timeout_s=1.0,
+        )
+        with pytest.raises(ToolsGatewayError) as failed:
+            await executor.execute(
+                "orders.cancel",
+                proposal_id="prop_0123456789ab",
+                gateway_proposal_id="gp_1",
+                tenant="tenant-a",
+                subject="cust_123",
+                timeout_s=1.0,
+            )
+    await reader.aclose()
+    await executor.aclose()
+
+    assert done.status == "done"
+    assert len(mock.calls) == 5  # the inventory is fetched once, then cached
+    for call in mock.calls:
+        executes = call.request.url.path.endswith("/execute")
+        assert call.request.headers.get_list(HEADER_API_KEY) == [EXECUTE_A if executes else READ_A]
+        if executes:
+            assert call.request.headers["Idempotency-Key"] == "airo-prop_0123456789ab"
+            assert json.loads(call.request.content) == {
+                "proposal_id": "gp_1",
+                "subject": "cust_123",
+            }
+    assert not hasattr(reader, "execute")
+    assert not hasattr(executor, "run") and not hasattr(executor, "propose")
+    rendered = (caplog.text, repr(reader), repr(executor), str(failed.value), repr(failed.value))
+    for text in rendered:
+        assert READ_A not in text and EXECUTE_A not in text

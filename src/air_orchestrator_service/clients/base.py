@@ -36,6 +36,14 @@ audit which key a request carried (``REQ-TGW-016``), and the request id is the t
 the caller's. Naming one is a programming error, raised before any request or breaker
 change.
 
+**Why a refusal is not a failure.** A caller may name problem ``code`` values that are
+answers rather than faults: air-tools-gateway refusing a change because the order has
+shipped is a healthy gateway saying no (spec 0012, ``REQ-TGW-028``). Such a response
+records outcome ``refused``, counts as a success for the breaker, and raises a
+:class:`DownstreamError` with ``reason="refused"`` and the ``code``, so five customers
+asking to cancel shipped orders cannot take lookups down. The code is read only when it
+is in the caller's set, so nothing else from the body is ever kept.
+
 **Why cancellation is not a failure.** A customer closing the tab cancels the turn's task,
 and with it the downstream call. That says nothing about the downstream's health.
 ``asyncio.CancelledError`` is a ``BaseException``, and only ``Exception`` counts.
@@ -89,9 +97,10 @@ class DownstreamError(Exception):
     """An optional downstream produced nothing usable.
 
     ``reason`` is one of ``timeout`` | ``unavailable`` | ``error`` | ``breaker_open``,
-    the same word as the metric's outcome label. The message is built here from the
-    service's name and, for ``error``, the status code. It never contains a URL, a
-    key or a body (``REQ-CLB-003``).
+    the same word as the metric's outcome label, or ``refused`` for a problem code the
+    caller named as an answer, which then sits in ``code``. The message is built here
+    from the service's name and, for ``error``, the status code. It never contains a
+    URL, a key or a body (``REQ-CLB-003``).
     """
 
     def __init__(
@@ -101,11 +110,13 @@ class DownstreamError(Exception):
         service: DownstreamService,
         reason: str,
         status: int | None = None,
+        code: str | None = None,
     ) -> None:
         super().__init__(message)
         self.service = service
         self.reason = reason
         self.status = status
+        self.code = code
 
 
 class BreakerState(StrEnum):
@@ -256,13 +267,16 @@ class DownstreamClient:
         parse: Callable[[Any], T],
         api_key: SecretStr | None = None,
         headers: Mapping[str, str] | None = None,
+        refusal_codes: frozenset[str] = frozenset(),
     ) -> T:
         """POST ``body`` and return ``parse(response JSON)``, or raise
         :class:`DownstreamError`. ``parse`` runs inside the breaker's verdict: a body
         that does not validate is a failure like a 500 (``REQ-CLB-002``). ``api_key``
         replaces the configured key for this call only: a service that scopes by key
         (air-rag-service, air-tools-gateway) is called with the caller's tenant's key.
-        ``headers`` are added to this request and may not name a reserved header."""
+        ``headers`` are added to this request and may not name a reserved header.
+        ``refusal_codes``: problem codes that are answers, not failures (see the module
+        docstring)."""
         return await self._request(
             "POST",
             path,
@@ -271,6 +285,7 @@ class DownstreamClient:
             parse=parse,
             api_key=api_key,
             headers=headers,
+            refusal_codes=refusal_codes,
         )
 
     async def get_json[T](
@@ -292,6 +307,7 @@ class DownstreamClient:
             parse=parse,
             api_key=api_key,
             headers=headers,
+            refusal_codes=frozenset(),
         )
 
     async def _request[T](
@@ -304,6 +320,7 @@ class DownstreamClient:
         parse: Callable[[Any], T],
         api_key: SecretStr | None,
         headers: Mapping[str, str] | None,
+        refusal_codes: frozenset[str],
     ) -> T:
         sent = dict(headers or {})
         if reserved := {name for name in sent if name.lower() in _RESERVED_HEADERS}:
@@ -325,6 +342,8 @@ class DownstreamClient:
             except httpx.HTTPError as exc:
                 raise self._failed("unavailable", f"{self._service.value} is unreachable") from exc
             if not response.is_success:
+                if (code := _problem_code(response, refusal_codes)) is not None:
+                    raise self._refused(code, status=response.status_code)
                 raise self._failed(
                     "error",
                     f"{self._service.value} returned HTTP {response.status_code}",
@@ -377,6 +396,18 @@ class DownstreamClient:
             detail=detail,
         )
 
+    def _refused(self, code: str, *, status: int) -> DownstreamError:
+        self.breaker.succeeded()
+        metrics.record_downstream_call(service=self._service, outcome="refused")
+        logger.info(
+            "downstream.call_refused", service=self._service.value, code=code, status=status
+        )
+        error = self._error(
+            f"{self._service.value} refused the request", reason="refused", status=status
+        )
+        error.code = code
+        return error
+
     def _failed(self, reason: str, message: str, *, status: int | None = None) -> DownstreamError:
         if reason != "breaker_open":
             self.breaker.failed()
@@ -395,3 +426,17 @@ class DownstreamClient:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+
+
+def _problem_code(response: httpx.Response, accepted: frozenset[str]) -> str | None:
+    """The problem body's ``code`` when it is one the caller accepts as an answer, else
+    ``None``. Nothing else is read from the body, and a body that does not parse is
+    simply not a refusal."""
+    if not accepted:
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    code = body.get("code") if isinstance(body, dict) else None
+    return code if isinstance(code, str) and code in accepted else None
