@@ -46,10 +46,12 @@ from air_orchestrator_service.clients.model_gateway import ModelGatewayClient
 from air_orchestrator_service.clients.rag import RagClient
 from air_orchestrator_service.clients.tools_gateway import ActionExecutor, ToolsGatewayClient
 from air_orchestrator_service.config import Settings, get_settings
+from air_orchestrator_service.engine.plan import ModelPlanner, RulePlanner
 from air_orchestrator_service.memory.session import build_session_store
 from air_orchestrator_service.observability.logging import configure_logging, get_logger
 from air_orchestrator_service.prompts.registry import PromptRegistry
 from air_orchestrator_service.security.api_keys import ApiKeyStore
+from air_orchestrator_service.security.customer_token import CustomerTokenVerifier
 
 __all__ = ["OrjsonResponse", "app", "create_app"]
 
@@ -184,11 +186,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             replacement="downstream.tools_gateway",
         )
 
+    model_gateway = ModelGatewayClient(resolved)
     state = AppState(
         settings=resolved,
         key_store=key_store,
         infra=InfraClient(resolved),
-        model_gateway=ModelGatewayClient(resolved),
+        model_gateway=model_gateway,
+        # Spec 0013: the model planner when enabled; otherwise the rule, which keeps
+        # the `/propose` stand-in (REQ-PLN-010). It shares the one gateway client.
+        planner=(
+            ModelPlanner(resolved, model_gateway, PromptRegistry(resolved))
+            if resolved.planner.enabled
+            else RulePlanner()
+        ),
         sessions=build_session_store(resolved),
         classifier=(
             ClassifierClient(resolved.downstream.classifier)
@@ -201,6 +211,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if resolved.downstream.tools_gateway.configured
             else None
         ),
+        customer_tokens=CustomerTokenVerifier(resolved.security.customer_tokens),
         action_executor=(
             ActionExecutor(resolved.downstream.tools_gateway)
             if resolved.downstream.tools_gateway.configured

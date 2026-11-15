@@ -85,6 +85,7 @@ from air_orchestrator_service.clients.model_gateway import (
 from air_orchestrator_service.clients.rag import MIN_CALL_MS as RAG_MIN_CALL_MS
 from air_orchestrator_service.clients.rag import Passage, RagClient, RagError, safe_title, safe_uri
 from air_orchestrator_service.clients.tools_gateway import (
+    EXECUTE_NOT_DONE_CODES,
     ActionExecutor,
     Capability,
     GatewayProposal,
@@ -105,7 +106,15 @@ from air_orchestrator_service.constants import (
     StageStatus,
     TurnStatus,
 )
-from air_orchestrator_service.engine.plan import Plan, PlanContext, Planner, RulePlanner, Step
+from air_orchestrator_service.engine.cost import estimate_cost
+from air_orchestrator_service.engine.plan import (
+    FollowUp,
+    Plan,
+    PlanContext,
+    Planner,
+    RulePlanner,
+    Step,
+)
 from air_orchestrator_service.guardrails.boundary import delimit
 from air_orchestrator_service.guardrails.escalation import wants_human
 from air_orchestrator_service.guardrails.injection import screen_input
@@ -189,6 +198,13 @@ _LOOKUPS_FAILED: Final[str] = (
     "them, say briefly that you could not check just now, and do not guess. Offer to try "
     "again in a little while, or tell the customer they can ask to speak to a person."
 )
+#: Spec 0013 §7: round 2 of planning failed, so a change the customer asked for was
+#: not prepared. The answer says so rather than implying it was.
+_CHANGE_NOT_PREPARED: Final[str] = (
+    "A change the customer may have asked for could not be prepared just now. If they asked "
+    "for one, say briefly that you could not prepare it, that nothing has been changed, and "
+    "that they can try again in a little while."
+)
 #: How a failed lookup reads in `GATHER`'s detail, by spec 0010's reason word.
 _LOOKUP_FAILURE: Final[dict[str, str]] = {
     "timeout": "timed out",
@@ -261,6 +277,13 @@ _EXECUTE_UNKNOWN: Final[str] = (
 _EXECUTE_NOT_DONE: Final[str] = (
     "I couldn't make that change just now, so nothing has been changed. Please try again "
     "in a little while, or ask to speak to a person."
+)
+#: The gateway answered that it acted on nothing: it does not know the proposal, or it
+#: expired (``REQ-TGW-017``). Confirming again cannot help; asking afresh can.
+_EXECUTE_NOT_DONE_STALE: Final[str] = (
+    "That change wasn't made, because it could no longer be carried out as confirmed, so "
+    "nothing has been changed. If you still want it, ask me again and I'll prepare it "
+    "afresh."
 )
 #: The shortest bound worth a lookup; below it the turn reports the deadline instead.
 _LOOKUP_MIN_MS: Final[int] = 100
@@ -392,6 +415,14 @@ class TurnEngine:
         #: What air-classifier reported spending on this turn (spec 0008,
         #: ``REQ-COST-005``). Per request, like `_last_status`.
         self._classifier_cost_usd = 0.0
+        #: air-classifier's slug-checked labels, shown to the planner (spec 0013,
+        #: ``REQ-PLN-002``). Per request.
+        self._intent: str | None = None
+        self._sentiment: str | None = None
+        #: What planning spent, both rounds (spec 0013, ``REQ-PLN-005``). Per request.
+        self._planning_usage = Usage(model_calls=0, cost_usd=0.0, cache_hit=False)
+        #: Round 2 could not run, so the answer says the change was not prepared.
+        self._change_not_prepared = False
         #: Set by `open()`: the turn's clock and its session.
         self._opened: tuple[float, Session] | None = None
 
@@ -609,23 +640,43 @@ class TurnEngine:
         ):
             yield event
 
-        async for event in self._stage(Stage.PLAN):
-            yield event
+        plan_started = time.perf_counter()
         offered = await self._turn_inventory(
             principal,
             confirming=confirmed is not None,
             deadline_at=turn_started + deadline_s,
             deadline_s=deadline_s,
         )
-        plan = await self._planner.plan(
-            PlanContext(
-                text=masked_text,
-                principal=principal,
-                confirming=confirmed is not None,
-                rag_serves=self._rag is not None and self._rag.settings.serves(principal.tenant),
-                offered=offered,
-            )
+        plan_ctx = PlanContext(
+            text=masked_text,
+            principal=principal,
+            confirming=confirmed is not None,
+            rag_serves=self._rag is not None and self._rag.settings.serves(principal.tenant),
+            offered=offered,
+            history=tuple((turn.role, turn.content) for turn in session.turns),
+            intent=self._intent,
+            sentiment=self._sentiment,
+            deadline_s=deadline_s,
+            deadline_at=turn_started + deadline_s,
+            max_cost_usd=self._planning_allowance(request, principal, session, masked_text),
         )
+        planned = await self._planner.plan(plan_ctx)
+        self._add_planning(planned.usage)
+        if planned.status is StageStatus.DEGRADED:
+            self._last_status = TurnStatus.DEGRADED
+        plan_ms = round((time.perf_counter() - plan_started) * 1000, 3)
+        metrics.record_stage(stage=Stage.PLAN, status=planned.status, duration_s=plan_ms / 1000)
+        yield StageEvent(
+            stage=Stage.PLAN,
+            status=planned.status,
+            latency_ms=plan_ms,
+            detail=planned.detail,
+            downstream=planned.downstream,
+        )
+        plan = planned.plan
+        if planned.prompt_ref is not None:
+            # REQ-PLN-009: the planner prompt's version, with every planned turn.
+            _log.info("turn.planned", planner_prompt=planned.prompt_ref, status=planned.status)
         if plan.write is not None and (
             not principal.allow_actions or principal.channel is Channel.BUSINESS
         ):
@@ -656,6 +707,7 @@ class TurnEngine:
             retrieve=retrieve,
             needs_model=needs_model,
             reads=plan.reads if needs_model else (),
+            follow_up=(plan_ctx, plan) if needs_model and plan.needs_results else None,
             write=write,
             offered=offered,
             execute=confirmed,
@@ -674,7 +726,7 @@ class TurnEngine:
         # irrelevant to it — only a real synthesis call is bounded. ──
         remaining_s = deadline_s - (time.perf_counter() - turn_started)
 
-        if needs_model and remaining_s <= 0:
+        if needs_model and self._proposal_answer is None and remaining_s <= 0:
             self._last_status = TurnStatus.DEGRADED
             yield StageEvent(
                 stage=Stage.SYNTHESISE,
@@ -875,6 +927,20 @@ class TurnEngine:
         session.append(Turn(turn_id=turn_id, role="user", content=masked_text), window=window)
         session.append(Turn(turn_id=turn_id, role="assistant", content=text), window=window)
         resolved_usage = usage or Usage(model_calls=0, cost_usd=0.0, cache_hit=False)
+        planning = self._planning_usage
+        if planning.model_calls:
+            # Spec 0013 §8: planning's calls, tokens and cost, attributed as planning.
+            resolved_usage = resolved_usage.model_copy(
+                update={
+                    "model_calls": resolved_usage.model_calls + planning.model_calls,
+                    "prompt_tokens": resolved_usage.prompt_tokens + planning.prompt_tokens,
+                    "completion_tokens": resolved_usage.completion_tokens
+                    + planning.completion_tokens,
+                    "total_tokens": resolved_usage.total_tokens + planning.total_tokens,
+                    "cost_usd": resolved_usage.cost_usd + planning.cost_usd,
+                    "planning_cost_usd": planning.cost_usd,
+                }
+            )
         if self._classifier_cost_usd or self._retrieval_cost_usd:
             # Every path that ran `CLASSIFY` or `GATHER` passes through here, so their
             # spend is reported even on a turn that degraded afterwards (REQ-COST-005,
@@ -960,6 +1026,8 @@ class TurnEngine:
                 else:
                     status, detail = StageStatus.OK, verdict.summary()
                     self._classifier_cost_usd = verdict.usage.est_cost_usd
+                    self._sentiment = label_slug(verdict.sentiment.label)
+                    self._intent = label_slug(verdict.intent.label) if verdict.intent else None
                     _log.info(
                         "classifier.verdict",
                         sentiment=label_slug(verdict.sentiment.label),
@@ -992,6 +1060,7 @@ class TurnEngine:
         execute: PendingProposal | None,
         deadline_at: float,
         deadline_s: float,
+        follow_up: tuple[PlanContext, Plan] | None = None,
     ) -> AsyncIterator[Event]:
         """The ``GATHER`` stage (specs 0011, 0012): one stage event, whatever happens.
 
@@ -1004,9 +1073,14 @@ class TurnEngine:
         retrieval's alone, exactly as before spec 0012. ``StageEvent.downstream`` is
         one field, so when several fail it names air-rag first and the detail names
         them all.
+
+        A plan that asked to see its reads' results (spec 0013) gets one more planning
+        round once they are back, and only then its proposal, so that chain runs as one
+        part beside retrieval. Round 2 reports here, never as a second ``PLAN`` event,
+        so stage events keep ``Stage`` order (``REQ-PLN-011``).
         """
         started = time.perf_counter()
-        retrieval, lookups, proposal, execution = await asyncio.gather(
+        retrieval, (lookups, second, proposal), execution = await asyncio.gather(
             self._retrieval_part(
                 masked_text,
                 principal,
@@ -1015,15 +1089,18 @@ class TurnEngine:
                 deadline_at=deadline_at,
                 deadline_s=deadline_s,
             ),
-            self._lookup_part(
-                principal, reads, offered, deadline_at=deadline_at, deadline_s=deadline_s
-            ),
-            self._proposal_part(
-                principal, write, offered, deadline_at=deadline_at, deadline_s=deadline_s
+            self._tools_parts(
+                principal,
+                reads,
+                write,
+                offered,
+                follow_up,
+                deadline_at=deadline_at,
+                deadline_s=deadline_s,
             ),
             self._execution_part(principal, execute, deadline_at=deadline_at),
         )
-        status, detail, downstream = _combine(retrieval, lookups, proposal, execution)
+        status, detail, downstream = _combine(retrieval, lookups, second, proposal, execution)
         latency_ms = round((time.perf_counter() - started) * 1000, 3)
         metrics.record_stage(stage=Stage.GATHER, status=status, duration_s=latency_ms / 1000)
         yield StageEvent(
@@ -1033,6 +1110,75 @@ class TurnEngine:
             detail=detail,
             downstream=downstream,
         )
+
+    async def _tools_parts(
+        self,
+        principal: Principal,
+        reads: tuple[Step, ...],
+        write: Step | None,
+        offered: Inventory,
+        follow_up: tuple[PlanContext, Plan] | None,
+        *,
+        deadline_at: float,
+        deadline_s: float,
+    ) -> tuple[_Part | None, _Part | None, _Part | None]:
+        """Lookups, then round 2 when the plan asked for it, then the proposal: the
+        parts of ``GATHER`` that run one after another."""
+        lookups = await self._lookup_part(
+            principal, reads, offered, deadline_at=deadline_at, deadline_s=deadline_s
+        )
+        second: _Part | None = None
+        if follow_up is not None and reads:
+            second, write = await self._second_round(follow_up)
+        proposal = await self._proposal_part(
+            principal, write, offered, deadline_at=deadline_at, deadline_s=deadline_s
+        )
+        return lookups, second, proposal
+
+    async def _second_round(self, follow_up: tuple[PlanContext, Plan]) -> tuple[_Part, Step | None]:
+        """Round 2 (spec 0013, ``REQ-PLN-007``): one call, after the reads, shown their
+        results exactly as the answer prompt will be. It may propose, and nothing more.
+        Its step goes through the same checks as a round-1 one (``REQ-PLN-008``)."""
+        ctx, first = follow_up
+        if not self._lookups:
+            return (StageStatus.OK, "round 2: skipped: no lookup results", None), None
+        remaining_cost = self._turn_ceiling_left(ctx)
+        answer: FollowUp = await self._planner.follow_up(
+            replace(ctx, max_cost_usd=remaining_cost), first, self._lookup_blocks()
+        )
+        self._add_planning(answer.usage)
+        if answer.failed:
+            self._last_status = TurnStatus.DEGRADED
+            self._change_not_prepared = True
+            return (StageStatus.DEGRADED, answer.detail, answer.downstream), None
+        return (StageStatus.OK, answer.detail, None), answer.write
+
+    def _add_planning(self, usage: Usage | None) -> None:
+        if usage is None:
+            return
+        total = self._planning_usage
+        total.model_calls += usage.model_calls
+        total.prompt_tokens += usage.prompt_tokens
+        total.completion_tokens += usage.completion_tokens
+        total.total_tokens += usage.total_tokens
+        total.cost_usd += usage.cost_usd
+        total.planning_cost_usd += usage.cost_usd
+
+    def _planning_allowance(
+        self, request: TurnRequest, principal: Principal, session: Session, masked_text: str
+    ) -> float:
+        """What the turn ceiling leaves for planning once the answer is reserved, as
+        ``CLASSIFY`` reserves it (``REQ-PLN-005``, ``REQ-CLS-015``)."""
+        _, messages = self._prose_messages(principal, session, masked_text)
+        return (
+            self._turn_ceiling(request)
+            - self._classifier_cost_usd
+            - self._estimate(messages, _SYNTHESIS_MAX_TOKENS)
+        )
+
+    def _turn_ceiling_left(self, ctx: PlanContext) -> float:
+        """Round 2's allowance: round 1's, less what round 1 spent."""
+        return ctx.max_cost_usd - self._planning_usage.cost_usd
 
     async def _retrieval_part(
         self,
@@ -1279,9 +1425,11 @@ class TurnEngine:
         idempotency key derived from the ``prop_`` id (``REQ-TGW-015``, ``016``). The
         answer follows the outcome (``REQ-TGW-017``): a request that went out and
         brought nothing back is *unknown*; one that never went out is *not done*.
-        Either is ``degraded``; ``done``, ``pending_approval`` and ``rejected`` are the
-        gateway answering, so ``ok``. One ``action.executed`` line is written whatever
-        happened, without arguments (``REQ-TGW-021``).
+        Either is ``degraded``. An execute the gateway answers with ``not_found`` or
+        ``proposal_expired`` acted on nothing: *not done*, and ``ok``. ``done``,
+        ``pending_approval`` and ``rejected`` are the gateway answering, so ``ok``.
+        One ``action.executed`` line is written whatever happened, without arguments
+        (``REQ-TGW-021``).
         """
         if pending is None or pending.gateway_proposal_id is None:
             return None
@@ -1306,6 +1454,11 @@ class TurnEngine:
                 timeout_s=bound_s,
             )
         except ToolsGatewayError as exc:
+            if exc.reason == "refused" and exc.code in EXECUTE_NOT_DONE_CODES:
+                # The gateway answering, not failing: nothing was done.
+                self._execution_answer = _EXECUTE_NOT_DONE_STALE
+                self._audit(pending, principal, "not_done", code=exc.code)
+                return StageStatus.OK, f"{name} not done: {exc.code}", None
             self._last_status = TurnStatus.DEGRADED
             sent = exc.reason != "breaker_open"
             self._execution_answer = _EXECUTE_UNKNOWN if sent else _EXECUTE_NOT_DONE
@@ -1405,21 +1558,27 @@ class TurnEngine:
         """The system message that carries ``GATHER``'s lookups into the prompt, or
         ``None`` when none were planned (``REQ-TGW-009``/``011``). Each result is its
         own delimited block, so a value inside one cannot pose as another's."""
-        if not self._lookups and not self._lookup_notices:
+        if not self._lookups and not self._lookup_notices and not self._change_not_prepared:
             return None
         sections: list[str] = []
         if self._lookups:
-            blocks = "\n\n".join(
-                delimit(
-                    f"{name}{' (partial: not every record is shown)' if partial else ''}\n{text}",
-                    source="tool_result",
-                )
-                for name, text, partial in self._lookups
-            )
-            sections.append(f"{_LOOKUPS_HEADER}\n\n{blocks}")
+            sections.append(f"{_LOOKUPS_HEADER}\n\n{self._lookup_blocks()}")
         if self._lookup_notices:
             sections.append(_LOOKUPS_FAILED.format(names=", ".join(self._lookup_notices)))
+        if self._change_not_prepared:
+            sections.append(_CHANGE_NOT_PREPARED)
         return {"role": "system", "content": "\n\n".join(sections)}
+
+    def _lookup_blocks(self) -> str:
+        """Each lookup result in its own delimited block: what the answer prompt
+        carries, and what round 2 of planning is shown (spec 0013 plan §1)."""
+        return "\n\n".join(
+            delimit(
+                f"{name}{' (partial: not every record is shown)' if partial else ''}\n{text}",
+                source="tool_result",
+            )
+            for name, text, partial in self._lookups
+        )
 
     def _sources_message(self) -> dict[str, str] | None:
         """The system message that carries ``GATHER``'s result into the prompt, or
@@ -1488,15 +1647,9 @@ class TurnEngine:
         return configured if requested is None else min(requested, configured)
 
     def _estimate(self, messages: list[dict[str, str]], max_tokens: int) -> float:
-        """An upper bound on what one call could cost (``REQ-COST-004``): the
-        prompt counted generously from its characters, and the whole ``max_tokens``
-        assumed spent."""
-        rates = self._settings.turn.estimate
-        chars = sum(len(message["content"]) for message in messages)
-        prompt_tokens = chars / rates.chars_per_token
-        return (
-            prompt_tokens * rates.input_usd_per_mtok + max_tokens * rates.output_usd_per_mtok
-        ) / 1_000_000
+        """An upper bound on what one call could cost (``REQ-COST-004``), priced by
+        ``engine/cost.py`` so the planner prices its calls the same way."""
+        return estimate_cost(self._settings, messages, max_tokens)
 
     def _check_ceiling(
         self, request: TurnRequest, call: str, estimate: float, spent: float
@@ -1687,7 +1840,7 @@ class TurnEngine:
             request,
             "prose",
             self._estimate(messages, _SYNTHESIS_MAX_TOKENS),
-            spent=self._classifier_cost_usd,
+            spent=self._classifier_cost_usd + self._planning_usage.cost_usd,
         )
         if reason is not None:
             raise _CostCeilingError(reason)
@@ -1736,7 +1889,9 @@ class TurnEngine:
             request,
             "structured",
             self._estimate(_structured_messages(masked_text), _SYNTHESIS_MAX_TOKENS),
-            spent=self._classifier_cost_usd + outcome.usage.cost_usd,
+            spent=self._classifier_cost_usd
+            + self._planning_usage.cost_usd
+            + outcome.usage.cost_usd,
         ):
             # REQ-COST-003: the answer was given, so only this field narrows, and
             # the turn's status is unaffected.

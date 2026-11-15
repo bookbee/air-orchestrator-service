@@ -222,7 +222,14 @@ async def test_the_gateway_proposal_id_never_reaches_the_caller(
     assert event["proposal"]["proposal_id"].startswith("prop_")
 
     state = getattr(app.state, STATE_ATTR)
-    owner = Principal(key_id="customer", name="test", channel=Channel.CUSTOMER, tenant="tenant-a")
+    # Read as its owner: a session belongs to the customer who started it (REQ-CTK-007).
+    owner = Principal(
+        key_id="customer",
+        name="test",
+        channel=Channel.CUSTOMER,
+        tenant="tenant-a",
+        subject=_SUBJECT,
+    )
     session = await state.sessions.get(session_id, owner)
     assert session is not None
     pending = session.pending
@@ -465,6 +472,26 @@ _OUTCOMES = {
         "degraded",
         "orders.cancel unreachable",
     ),
+    # The gateway answering that it acted on nothing: not done, and ok.
+    "404_not_found": (
+        _problem("not_found", 404),
+        "That change wasn't made",
+        "ok",
+        "orders.cancel not done: not_found",
+    ),
+    "409_proposal_expired": (
+        _problem("proposal_expired", 409),
+        "That change wasn't made",
+        "ok",
+        "orders.cancel not done: proposal_expired",
+    ),
+    # It may have been made under another key: unknown, as any other failure.
+    "409_already_executed": (
+        _problem("already_executed", 409),
+        "I couldn't confirm whether",
+        "degraded",
+        "orders.cancel failed",
+    ),
     "breaker_open": (
         None,
         "I couldn't make that change just now",
@@ -481,7 +508,9 @@ async def test_the_answer_follows_the_execute_outcome(
     """``REQ-TGW-017``, AC-8. Each outcome gives its own fixed text; only ``done``'s
     says it was done, and none says "cancelled". A request that went out and came
     back with nothing is *unknown*; an open circuit, which sends nothing, is *not
-    done*. Both of those are ``degraded`` naming the gateway."""
+    done*. Both of those are ``degraded`` naming the gateway. An execute answered
+    ``not_found`` or ``proposal_expired`` acted on nothing: *not done*, ``ok``, and not
+    a breaker failure; ``already_executed`` stays *unknown*."""
     calls = _gateway(app)
     response, starts, status, detail = _OUTCOMES[case]
     execute = mock.post(_EXECUTE)
@@ -490,8 +519,13 @@ async def test_the_answer_follows_the_execute_outcome(
     else:
         execute.mock(return_value=response)
     session_id, proposal_id = await _proposed(app, mock)
+    breaker = getattr(app.state, STATE_ATTR).action_executor.breaker
+    threshold = settings.downstream.tools_gateway.breaker_threshold
     if response is None:
-        _open(getattr(app.state, STATE_ATTR).action_executor.breaker, settings)
+        _open(breaker, settings)
+    else:
+        for _ in range(threshold - 1):  # one failure short of opening
+            breaker.failed()
 
     body = await _confirm(app, session_id, proposal_id)
 
@@ -504,6 +538,9 @@ async def test_the_answer_follows_the_execute_outcome(
     assert "cancelled" not in body["answer"].lower()
     assert body["answer"].startswith("Done") is (case == "done")
     assert calls == []  # fixed text: no model call
+    if response is not None:
+        # A refusal is the gateway answering: it resets the count. A failure opens it.
+        assert breaker.is_open is (status == "degraded"), breaker.state
 
 
 async def test_an_execute_failure_is_never_retried(app: FastAPI, mock: respx.MockRouter) -> None:
@@ -548,7 +585,7 @@ async def test_a_confirmation_from_another_key_or_subject_executes_nothing(
     assert real.status_code == made_up.status_code == httpx.codes.NOT_FOUND
     assert real.json()["detail"] == made_up.json()["detail"]
 
-    monkeypatch.setattr(Session, "owned_by", lambda self, _key_id, tenant: self.tenant == tenant)
+    monkeypatch.setattr(Session, "owned_by", lambda self, who: self.tenant == who.tenant)
     _as(app)
     session_id, proposal_id = await _proposed(app, mock)
     unknown = await _confirm(app, session_id, "prop_000000000000")

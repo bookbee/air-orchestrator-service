@@ -1,6 +1,6 @@
 # 0012 — Tasks
 
-**Spec:** [`spec.md`](spec.md) · **Plan:** [`plan.md`](plan.md) · **Updated:** 2026-11-14
+**Spec:** [`spec.md`](spec.md) · **Plan:** [`plan.md`](plan.md) · **Updated:** 2026-11-15
 
 > Each task leaves the tree green (`make check`). Each names the requirement it advances and
 > the test that proves it, exactly as spec §10 names them. When a task lands, its rows in
@@ -9,7 +9,7 @@
 ## Order
 
 ```
-T1 ─┬─► T3 ─► T4 ─► T5 ─► T6 ─► T7 ─► T8 ─► T9 ─► T10 ─► T11 ─► T12
+T1 ─┬─► T3 ─► T4 ─► T5 ─► T6 ─► T7 ─► T8 ─► T9 ─► T10 ─► T10b ─► T11 ─► T12
     └─► T2 ──────────────────────────► (before T8)
 ```
 
@@ -21,11 +21,12 @@ T1 ─┬─► T3 ─► T4 ─► T5 ─► T6 ─► T7 ─► T8 ─► T9 �
 - **T3 → T4.** The inventory needs `get_json()`, and execute needs `post_json(headers=)`.
 - **T5 before T6.** `GATHER` reads its steps from a `Plan`. T5 moves today's routing behind
   the seam with no behaviour change, so its review is "nothing moved".
-- **T7 after T6.** It reuses T6's step validation, for `write` entries.
-- **T8 after T7.** Executes what T7 stores.
-- **T9 after T8.** It runs every gateway request shape through the contract double, so it
+- **T7 after T6.** The rules for lookups travel in T6's lookups message.
+- **T8 after T6.** It reuses T6's step validation, for `write` entries.
+- **T9 after T8.** Executes what T8 stores.
+- **T10 after T9.** It runs every gateway request shape through the contract double, so it
   needs them all.
-- **T10 needs a running air-tools-gateway.** The rest is hermetic.
+- **T11 needs a running air-tools-gateway.** The rest is hermetic.
 
 ## Tasks
 
@@ -246,12 +247,30 @@ T1 ─┬─► T3 ─► T4 ─► T5 ─► T6 ─► T7 ─► T8 ─► T9 �
   - all three flows pass through the double;
   - a hand-made request with an extra field, or a read key on execute, fails.
 
+### T10b — `/v1/capabilities` reports what the gateway offers
+
+Added after T10: no task advanced `REQ-TGW-005`, and T12 needs every row proved.
+
+- **Advances:** `REQ-TGW-005`
+- **Touches:**
+  - `clients/tools_gateway.py`: `Inventory.for_channel()`, the allow-list and
+    no-business-writes half of `offered_to()`, so the route and a turn share one filter;
+  - `api/v1/system.py`: `tools`/`action` kept only while the gateway is reachable and
+    the caller's tenant inventory, narrowed to the caller's channel, has a `read`/`write`
+    entry.
+- **Adds test:** `tests/unit/test_system_routes.py::test_capabilities_list_tools_and_action_only_when_the_gateway_offers_them`.
+- **Done when:** inventories with reads only, writes only and nothing each give the right
+  routes, the business channel never lists `action`, and an unreachable gateway lists
+  neither.
+
 ### T11 — SIT against the real gateway
 
 - **Advances:** none new. It proves T4–T9 against air-tools-gateway's own build.
 - **Touches:**
   - `docker-compose.yml`: `DOWNSTREAM__TOOLS_GATEWAY__BASE_URL: http://air-tools-gateway:8080`;
-  - `.env.example`: commented SIT values: brightcart key pair, `ALLOW__CUSTOMER=["orders.*"]`.
+  - `.env.example`: commented SIT values: brightcart key pair, `ALLOW__CUSTOMER=["orders.*"]`;
+  - as built: `tests/sit/test_tools_gateway_live.py` and `make sit-tools`, skipped unless
+    `AIR_TOOLS_GATEWAY_SIT_URL` is set, so `make check` stays hermetic.
 
   No debug-only path into the engine is added to drive a plan by hand. Until spec 0013's
   planner exists, SIT covers what a real turn can reach: the inventory in
@@ -278,12 +297,15 @@ T1 ─┬─► T3 ─► T4 ─► T5 ─► T6 ─► T7 ─► T8 ─► T9 �
 
 ## Definition of done
 
-- [ ] Every requirement in `spec.md` §5 traces to a passing test, or is a declared `GAP`
-- [ ] `make check` passes (ruff · mypy --strict · pytest)
-- [ ] `make trace` passes
-- [ ] `make openapi` run and `docs/openapi.json` updated (T1, T12)
-- [ ] `make prompt-review` on the no-lookups set runs v2 unchanged (T7); the `LOOKUPS=1` run is spec 0013 T7's
-- [ ] Spec status moved to `Implemented` (or `Partial`, with gaps listed)
-- [ ] Module docstrings explain the *why*: `clients/tools_gateway.py` (two objects, two keys,
+- [x] Every requirement in `spec.md` §5 traces to a passing test, or is a declared `GAP`
+- [x] `make check` passes (ruff · mypy --strict · pytest)
+- [x] `make trace` passes
+- [x] `make openapi` run and `docs/openapi.json` updated (T1, T12)
+- [x] `make prompt-review` on the no-lookups set runs v2 unchanged (T7); the `LOOKUPS=1` run is spec 0013 T7's
+- [x] Spec status moved to `Implemented` (or `Partial`, with gaps listed)
+- [x] Module docstrings explain the *why*: `clients/tools_gateway.py` (two objects, two keys,
       two breakers), `engine/plan.py` (the seam, and why `RulePlanner` never emits a gateway step)
-- [ ] `docs/02-lld.md` §15 build status updated
+- [x] `docs/02-lld.md` §15 build status updated
+- [x] T11: SIT against air-tools-gateway's own build (2026-11-15): `/v1/capabilities` lists
+      `tools`/`action` (customer) and `tools` (business) with it up, neither with it
+      unreachable; `make sit-tools` replays the double's refusals and three flows, all passing

@@ -13,7 +13,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Path
 from starlette.status import HTTP_204_NO_CONTENT
 
-from air_orchestrator_service.api.deps import AppState, get_app_state, require_principal
+from air_orchestrator_service.api.deps import (
+    CUSTOMER_TOKEN_OPENAPI,
+    AppState,
+    get_app_state,
+    require_principal,
+)
 from air_orchestrator_service.api.errors import InsufficientScopeError, SessionNotFoundError
 from air_orchestrator_service.constants import SCOPE_SESSION_READ
 from air_orchestrator_service.schemas.common import Principal
@@ -34,6 +39,7 @@ def _require_session_scope(principal: Principal) -> None:
     response_model=SessionView,
     summary="Read a session's history",
     description="Yours only. Someone else's session is indistinguishable from a missing one.",
+    openapi_extra=CUSTOMER_TOKEN_OPENAPI,
 )
 async def get_session(
     session_id: _SessionId,
@@ -52,6 +58,7 @@ async def get_session(
     status_code=HTTP_204_NO_CONTENT,
     summary="Clear a session",
     description="Drops the history and any proposal awaiting confirmation.",
+    openapi_extra=CUSTOMER_TOKEN_OPENAPI,
 )
 async def delete_session(
     session_id: _SessionId,

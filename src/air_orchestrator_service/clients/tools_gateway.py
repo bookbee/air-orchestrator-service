@@ -80,6 +80,7 @@ from air_orchestrator_service.observability.logging import get_logger
 from air_orchestrator_service.schemas.common import Principal
 
 __all__ = [
+    "EXECUTE_NOT_DONE_CODES",
     "MAX_CAPABILITIES",
     "REFUSAL_CODES",
     "ActionExecutor",
@@ -109,6 +110,10 @@ _RISKS: Final[frozenset[str]] = frozenset({"low", "medium", "high"})
 REFUSAL_CODES: Final[frozenset[str]] = frozenset(
     {"not_found", "invalid_state", "not_permitted", "limit_exceeded"}
 )
+#: Problem codes with which the gateway answers an execute that acted on nothing: the
+#: proposal is unknown to it, or expired (``REQ-TGW-017``). ``already_executed`` is
+#: deliberately absent: the change may have been made, so it stays *unknown*.
+EXECUTE_NOT_DONE_CODES: Final[frozenset[str]] = frozenset({"not_found", "proposal_expired"})
 _IDEMPOTENCY_HEADER: Final[str] = "Idempotency-Key"
 _IDEMPOTENCY_PREFIX: Final[str] = "airo-"
 _CONTROL: Final = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -170,20 +175,35 @@ class Inventory:
     def get(self, name: str) -> Capability | None:
         return next((c for c in self.capabilities if c.name == name), None)
 
-    def offered_to(self, principal: Principal, settings: ToolsGatewaySettings) -> Inventory:
-        """What this principal's turn may use: the channel's allow-list
-        (``REQ-TGW-004``), no write on the business channel (``REQ-TGW-026``), and no
-        capability that needs a customer when the turn has none."""
+    def for_channel(self, channel: Channel, settings: ToolsGatewaySettings) -> Inventory:
+        """What ``channel`` may use: its allow-list (``REQ-TGW-004``), and no write on
+        the business channel (``REQ-TGW-026``). ``/v1/capabilities`` reports from this
+        (``REQ-TGW-005``); a turn narrows it further with :meth:`offered_to`."""
         return Inventory(
             available=self.available,
             capabilities=tuple(
                 capability
                 for capability in self.capabilities
-                if settings.allow.admits(principal.channel, capability.name)
-                and not (capability.kind == "write" and principal.channel is Channel.BUSINESS)
-                and not (capability.requires_subject and principal.subject is None)
+                if settings.allow.admits(channel, capability.name)
+                and not (capability.kind == "write" and channel is Channel.BUSINESS)
             ),
         )
+
+    def offered_to(self, principal: Principal, settings: ToolsGatewaySettings) -> Inventory:
+        """What this principal's turn may use: :meth:`for_channel`, less any capability
+        that needs a customer when the turn has none."""
+        channel = self.for_channel(principal.channel, settings)
+        return Inventory(
+            available=channel.available,
+            capabilities=tuple(
+                capability
+                for capability in channel.capabilities
+                if not (capability.requires_subject and principal.subject is None)
+            ),
+        )
+
+    def has(self, kind: Kind) -> bool:
+        return any(capability.kind == kind for capability in self.capabilities)
 
 
 class ToolResult(BaseModel):
@@ -485,7 +505,10 @@ class ActionExecutor(DownstreamClient):
     ) -> ExecuteOutcome:
         """Execute a confirmed proposal, once, or raise :class:`ToolsGatewayError`.
         ``proposal_id`` is this service's id and gives the idempotency key;
-        ``gateway_proposal_id`` is what the gateway knows it by."""
+        ``gateway_proposal_id`` is what the gateway knows it by. A ``404 not_found`` or
+        ``409 proposal_expired`` raises with ``reason="refused"`` and its ``code``: the
+        gateway answering that nothing was done, which does not count against the
+        breaker."""
         if not is_capability_name(capability):
             raise ValueError("not a capability name")
         keys = self.settings.keys_for(tenant)
@@ -499,6 +522,7 @@ class ActionExecutor(DownstreamClient):
                 parse=lambda body: _executed(capability, body),
                 api_key=keys.execute,
                 headers={_IDEMPOTENCY_HEADER: idempotency_key(proposal_id)},
+                refusal_codes=EXECUTE_NOT_DONE_CODES,
             )
         except DownstreamError as exc:
             metrics.record_capability_call(capability=capability, kind="write", outcome=exc.reason)

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+import httpx
 import pytest
+import respx
 from pydantic import ValidationError
 
 from air_orchestrator_service.config import Settings
@@ -12,6 +15,7 @@ from air_orchestrator_service.main import create_app
 from air_orchestrator_service.prompts.registry import (
     BUSINESS_ANALYST,
     CUSTOMER_CARE,
+    PLANNER,
     PromptNotFoundError,
     PromptRegistry,
 )
@@ -131,3 +135,36 @@ def test_the_lookups_message_carries_the_rules_for_using_them() -> None:
     assert "ask to speak to a person" in turn._LOOKUPS_FAILED
     assert "You may say you checked" in turn._LOOKUPS_HEADER
     assert PromptRegistry(_settings()).get(CUSTOMER_CARE).ref == "customer_care:v2"
+
+
+async def test_the_planner_prompt_is_versioned_and_logged(
+    settings: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``REQ-PLN-009``. ``planner:v1`` is a registry entry, pinnable like the channel
+    prompts (a stale pin fails the boot), and a planned turn logs its version; a turn
+    the rule planned logs none."""
+    from tests.unit._tools_gateway_support import INVENTORY_URL, inventory_body, read_entry
+    from tests.unit.test_planner import planned_app
+
+    assert PromptRegistry(_settings()).get(PLANNER).ref == "planner:v1"
+    assert PromptRegistry(_settings(pins={PLANNER: "v1"})).get(PLANNER).ref == "planner:v1"
+    with pytest.raises(PromptNotFoundError):
+        create_app(_settings(pins={PLANNER: "v9"}))
+
+    with (
+        respx.mock(assert_all_called=False) as mock,
+        caplog.at_level(logging.INFO),
+    ):
+        mock.get(INVENTORY_URL).mock(
+            return_value=httpx.Response(200, json=inventory_body(read_entry("orders.list_recent")))
+        )
+        for enabled in (True, False):
+            caplog.clear()
+            app, _ = planned_app(settings, enabled=enabled)
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+                response = await http.post(
+                    "/v1/chat", headers={"X-API-Key": "airo_test_customer"}, json={"message": "hi"}
+                )
+            assert response.status_code == httpx.codes.OK
+            assert ("planner_prompt" in caplog.text and "planner:v1" in caplog.text) is enabled

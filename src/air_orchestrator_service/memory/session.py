@@ -85,7 +85,7 @@ class InMemorySessionStore:
             logger.info("session.expired", session_id=session_id)
             del self._sessions[key]
             return None
-        if not session.owned_by(principal.key_id, principal.tenant):
+        if not session.owned_by(principal):
             # Reachable only if two principals in one tenant share a session id, which
             # the id space makes vanishingly unlikely — but the check is what makes
             # ownership a property of the store rather than of the caller's diligence.
@@ -99,6 +99,7 @@ class InMemorySessionStore:
             owner_key_id=principal.key_id,
             tenant=principal.tenant,
             channel=principal.channel,
+            owner_subject=principal.subject,
         )
         await self.save(session)
         return session

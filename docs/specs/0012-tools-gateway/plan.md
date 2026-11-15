@@ -127,7 +127,7 @@ text is built from the gateway's `summary`. Having the model word them is spec 0
 | `schemas/session.py` | modified, additive | `PendingProposal`: `capability`, `gateway_proposal_id`, `key_id`, `subject`. `SessionView` unchanged, so none of them is shown |
 | `schemas/chat.py`, `schemas/events.py` | modified, docs | `Proposal` docstring names the gateway, not air-action; `RouteEvent.capabilities` description becomes "capabilities this turn's plan used" (`REQ-TGW-025`) |
 | `api/deps.py`, `main.py`, `api/v1/chat.py`, `api/v1/query.py` | modified | `AppState.tools_gateway`, `AppState.action_executor`; passed to the engine; lifespan closes both |
-| `api/v1/system.py` | modified | `/v1/capabilities` filters `tools`/`action` by the caller's channel inventory (`REQ-TGW-005`); `/v1/ready`'s not-probed list loses `TOOLS`/`ACTION` and gains `TOOLS_GATEWAY` |
+| `api/v1/system.py` | modified | `/v1/capabilities` filters `tools`/`action` by the caller's channel inventory (`REQ-TGW-005`): `Inventory.for_channel()`, the allow-list and no-business-writes rules. Not the `requires_subject` rule: the `admin:read` key reading it names no customer, so applying it would hide every customer capability. `/v1/ready`'s not-probed list loses `TOOLS`/`ACTION` and gains `TOOLS_GATEWAY` |
 | `observability/metrics.py` | modified | `record_capability_call(capability, kind, outcome)` (`REQ-TGW-022`) |
 | `prompts/registry.py` | unchanged | `customer_care` stays v2. The lookup rules travel in the engine's lookups message (`REQ-TGW-027`), so a turn without lookups keeps the reviewed prompt (tasks T7) |
 | `pyproject.toml` | modified | runtime `jsonschema>=4.23` (Draft 2020-12 validation of capability arguments); dev `pyyaml`, `types-PyYAML` (the test double loads the contract) |
@@ -229,7 +229,7 @@ was sent, so prompt content is asserted directly. Expiry uses an injected clock.
 | `REQ-TGW-014` | `…::test_the_proposal_takes_the_earlier_expiry_and_a_known_risk` | Gateway expiry before and after the TTL; `risk: "extreme"` gives no proposal |
 | `REQ-TGW-015` | `…::test_the_idempotency_key_is_derived_from_the_proposal_id` | Header equals `airo-<prop_id>` |
 | `REQ-TGW-016` | `test_tools_gateway_client.py::test_only_the_execute_request_carries_the_execute_key` | Every respx call's `X-API-Key`; `caplog` and `repr()` free of both keys |
-| `REQ-TGW-017` | `test_action_execution.py::test_the_answer_follows_the_execute_outcome` | Parametrised: `done`, `pending_approval`, `rejected/invalid_state`, 504, 503, `ConnectError`, breaker open; none of the non-done texts contains "cancelled" |
+| `REQ-TGW-017` | `test_action_execution.py::test_the_answer_follows_the_execute_outcome` | Parametrised: `done`, `pending_approval`, `rejected/invalid_state`, 504, 503, `ConnectError`, breaker open, `404 not_found`, `409 proposal_expired` (not done), `409 already_executed` (unknown); none of the non-done texts contains "cancelled" |
 | `REQ-TGW-018` | `…::test_an_execute_failure_is_never_retried` | 504, then the same confirmation again: one execute call in total |
 | `REQ-TGW-019` | `…::test_a_confirmation_from_another_key_or_subject_executes_nothing` | AC-7, answer compared with confirming an unknown id |
 | `REQ-TGW-020` | `…::test_a_key_without_allow_actions_sends_no_propose_request` | Key record `allow_actions: false` |

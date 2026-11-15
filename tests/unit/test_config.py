@@ -363,3 +363,67 @@ def test_gateway_keys_never_render() -> None:
     rendered = repr(gateway) + str(gateway.model_dump())
     assert "r-secret" not in rendered
     assert "x-secret" not in rendered
+
+
+def test_customer_token_keys_are_validated_at_startup() -> None:
+    """``REQ-CTK-010``. A good key list loads, including two ``kid``s for one issuer (the
+    rotation case). Startup is refused for a private key (PEM or JWK), a curve ``ES256``
+    cannot use, a duplicate ``kid``, an algorithm outside the allowed set, or garbage."""
+    from tests.unit._customer_token_support import (
+        key_record,
+        private_key,
+        private_pem,
+        public_pem,
+    )
+
+    rotating = [
+        key_record(),
+        key_record(kid="brightcart-dev-2", public_key=public_pem(private_key("next"))),
+    ]
+    loaded = _settings(security={"customer_tokens": rotating})
+    assert [k.kid for k in loaded.security.customer_tokens] == [
+        "brightcart-dev-1",
+        "brightcart-dev-2",
+    ]
+    assert "BEGIN PUBLIC KEY" not in repr(loaded.security.customer_tokens[0])
+
+    secret = private_key().private_numbers().private_value
+    bad = {
+        "private PEM": [key_record(public_key=private_pem(private_key()))],
+        "private JWK": [
+            key_record(
+                public_key={"kty": "EC", "crv": "P-256", "x": "AA", "y": "AA", "d": str(secret)}
+            )
+        ],
+        "P-384": [key_record(public_key=public_pem(private_key("p384", curve="P-384")))],
+        "duplicate kid": [key_record(), key_record()],
+        "RS256": [key_record(alg="RS256")],
+        "HS256": [key_record(alg="HS256")],
+        "garbage": [
+            key_record(public_key="-----BEGIN PUBLIC KEY-----\nnope\n-----END PUBLIC KEY-----")
+        ],
+    }
+    for what, records in bad.items():
+        with pytest.raises(ValidationError):
+            _settings(security={"customer_tokens": records})
+        assert what  # named, so a failure says which case
+
+
+def test_planner_settings_are_off_by_default_and_bounded() -> None:
+    """Spec 0013 plan §4 (``REQ-PLN-014``): off, ``cloud``, and each knob bounded."""
+    planner = Settings().planner
+    assert (planner.enabled, planner.model_class) == (False, ModelClass.CLOUD)
+    assert (planner.deadline_share, planner.max_tokens, planner.max_reads) == (0.15, 400, 3)
+    assert planner.history_turns == 6
+    for field, value in [
+        ("deadline_share", 0),
+        ("deadline_share", 0.6),
+        ("max_tokens", 99),
+        ("max_tokens", 2001),
+        ("max_reads", 0),
+        ("max_reads", 6),
+        ("history_turns", 21),
+        ("model_class", "generative"),
+    ]:
+        with pytest.raises(ValidationError):
+            Settings.model_validate({"planner": {field: value}})

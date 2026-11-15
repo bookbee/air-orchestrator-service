@@ -1,6 +1,6 @@
 # 0014 — The customer token: who the customer is
 
-**Status:** Accepted · **Area:** `CTK` · **Phase:** 3 · **Updated:** 2026-11-14
+**Status:** Implemented · **Area:** `CTK` · **Phase:** 3 · **Updated:** 2026-11-15
 **Derives from:** spec [0012](../0012-tools-gateway/spec.md) §9 Q1 (decided) · [Plan §4 "Customer identity"](../../00-plan.md) ·
 [HLD §3](../../01-hld.md) · constitution Articles I, IV, IX
 **Supersedes:** —
@@ -173,19 +173,20 @@ token long-lived.
 
 ## 10. Traceability
 
-> Forward spec: every row is `DEFERRED` until the tasks land.
+> Every requirement is proved by the named test. Checked against air-web-console's token
+> format, development key and test modes (tasks.md T4).
 
 | Id | Proof |
 | --- | --- |
-| `REQ-CTK-001` | DEFERRED — Phase 3 · `tests/unit/test_customer_token.py::test_a_valid_token_sets_the_subject` |
-| `REQ-CTK-002` | DEFERRED — Phase 3 · `tests/unit/test_customer_token.py::test_each_failed_check_refuses_the_token` |
-| `REQ-CTK-003` | DEFERRED — Phase 3 · `tests/unit/test_customer_token.py::test_the_algorithm_is_pinned_by_the_key` |
-| `REQ-CTK-004` | DEFERRED — Phase 3 · `tests/unit/test_customer_token.py::test_no_token_is_an_anonymous_customer` |
-| `REQ-CTK-005` | DEFERRED — Phase 3 · `tests/unit/test_customer_token.py::test_every_refusal_is_one_401_before_any_event` |
-| `REQ-CTK-006` | DEFERRED — Phase 3 · `tests/unit/test_customer_token.py::test_the_business_channel_ignores_the_token` |
-| `REQ-CTK-007` | DEFERRED — Phase 3 · `tests/unit/test_session_store.py::test_a_session_is_invisible_to_another_subject` |
-| `REQ-CTK-008` | DEFERRED — Phase 3 · `tests/unit/test_customer_token.py::test_the_token_never_appears_in_logs_or_responses` |
-| `REQ-CTK-009` | DEFERRED — Phase 3 · `tests/unit/test_customer_token.py::test_the_subject_has_no_other_source` |
-| `REQ-CTK-010` | DEFERRED — Phase 3 · `tests/unit/test_config.py::test_customer_token_keys_are_validated_at_startup` |
-| `REQ-CTK-011` | DEFERRED — Phase 3 · `tests/unit/test_customer_token.py::test_verification_makes_no_network_call` |
-| `REQ-CTK-012` | DEFERRED — Phase 3 · `tests/unit/test_customer_token.py::test_every_outcome_is_counted` |
+| `REQ-CTK-001` | `tests/unit/test_customer_token.py::test_a_valid_token_sets_the_subject` |
+| `REQ-CTK-002` | `tests/unit/test_customer_token.py::test_each_failed_check_refuses_the_token` |
+| `REQ-CTK-003` | `tests/unit/test_customer_token.py::test_the_algorithm_is_pinned_by_the_key` |
+| `REQ-CTK-004` | `tests/unit/test_customer_token.py::test_no_token_is_an_anonymous_customer` |
+| `REQ-CTK-005` | `tests/unit/test_customer_token.py::test_every_refusal_is_one_401_before_any_event` |
+| `REQ-CTK-006` | `tests/unit/test_customer_token.py::test_the_business_channel_ignores_the_token` |
+| `REQ-CTK-007` | `tests/unit/test_session_store.py::test_a_session_is_invisible_to_another_subject` |
+| `REQ-CTK-008` | `tests/unit/test_customer_token.py::test_the_token_never_appears_in_logs_or_responses` |
+| `REQ-CTK-009` | `tests/unit/test_customer_token.py::test_the_subject_has_no_other_source` |
+| `REQ-CTK-010` | `tests/unit/test_config.py::test_customer_token_keys_are_validated_at_startup` |
+| `REQ-CTK-011` | `tests/unit/test_customer_token.py::test_verification_makes_no_network_call` |
+| `REQ-CTK-012` | `tests/unit/test_customer_token.py::test_every_outcome_is_counted` |

@@ -56,6 +56,8 @@ services:
       # too (as `air-rag-service`), but its seeded SIT run (`make run-sit`) is on the
       # host, and the host route reaches it either way.
       AIR_ORCHESTRATOR_SERVICE__DOWNSTREAM__RAG__BASE_URL: http://host.docker.internal:8087
+      # air-tools-gateway is on air-net as `air-tools-gateway`, on its container port.
+      AIR_ORCHESTRATOR_SERVICE__DOWNSTREAM__TOOLS_GATEWAY__BASE_URL: http://air-tools-gateway:8080
       # air-model-gateway is reached over the host — see the header above.
       AIR_ORCHESTRATOR_SERVICE__MODEL_GATEWAY__BASE_URL: http://host.docker.internal:8083
       # The gateway's own .env.example issues this exact token to this service

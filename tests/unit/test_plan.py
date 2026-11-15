@@ -6,7 +6,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from air_orchestrator_service.constants import Channel, Route
+from air_orchestrator_service.constants import Channel, Route, StageStatus
 from air_orchestrator_service.engine.plan import Plan, PlanContext, RulePlanner, Step
 from air_orchestrator_service.schemas.common import Principal
 from tests.conftest import CUSTOMER_KEY, FixedPlanner, auth, use_planner
@@ -58,13 +58,20 @@ async def test_the_rule_planner_reproduces_todays_routes(
 ) -> None:
     """The routing block that lived in ``TurnEngine._pipeline``, case by case — and,
     on every input, no air-tools-gateway step (Article V)."""
-    plan = await RulePlanner().plan(
+    outcome = await RulePlanner().plan(
         PlanContext(
             text=text,
             principal=_principal(channel, allow_actions=allow),
             confirming=confirming,
             rag_serves=rag,
         )
+    )
+    plan = outcome.plan
+
+    assert (outcome.status, outcome.detail, outcome.usage) == (
+        StageStatus.SKIPPED,
+        "planner disabled",
+        None,
     )
 
     assert plan.routes == (route,)

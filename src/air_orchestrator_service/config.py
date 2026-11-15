@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from air_orchestrator_service.constants import Channel, DownstreamService, ModelClass, Route
+from air_orchestrator_service.security.customer_token import CustomerTokenKey
 
 # ── Application ───────────────────────────────────────────────────────────────
 
@@ -434,6 +435,30 @@ class TurnSettings(BaseModel):
     window_turns: int = Field(default=12, ge=1, le=200)
 
 
+class PlannerSettings(BaseModel):
+    """The model planner (spec 0013): which capabilities a turn uses, decided by one
+    schema-constrained call through air-model-gateway.
+
+    Off by default, so a fresh checkout makes no planning calls, and ``/propose`` stays
+    the rule planner's stand-in. Turning it on retires that stand-in
+    (``REQ-PLN-010``). ``model_class`` is independent of the synthesis class
+    (``REQ-PLN-014``), so a cheaper class can plan once ``make planner-eval`` shows it
+    plans as well. The two-round limit is a constant in ``engine/plan.py``, not a
+    setting: a third round needs a spec change (spec 0013 §9 Q4).
+    """
+
+    enabled: bool = False
+    model_class: ModelClass = ModelClass.CLOUD
+    #: Planning precedes everything slow, so it must leave room for lookups and
+    #: synthesis (``REQ-PLN-005``).
+    deadline_share: float = Field(default=0.15, gt=0, le=0.5)
+    max_tokens: int = Field(default=400, ge=100, le=2000)
+    #: Schema-enforced: the round-1 schema's ``reads`` has this ``maxItems``.
+    max_reads: int = Field(default=3, ge=1, le=5)
+    #: Stored session messages shown to the planner, newest last.
+    history_turns: int = Field(default=6, ge=0, le=20)
+
+
 # ── Guardrails ────────────────────────────────────────────────────────────────
 
 
@@ -556,6 +581,20 @@ class SecuritySettings(BaseModel):
     default_burst: int = Field(default=20, ge=1)
     #: Deliberate opt-in. When false, only a hash and length of user text is logged.
     log_raw_text: bool = False
+    #: Public keys that verify the ``air-token`` customer token (spec 0014), as JSON:
+    #: ``[{"issuer": …, "tenant": …, "kid": …, "alg": "ES256", "public_key": "<PEM>"}]``.
+    #: Empty: every presented token is refused (``unknown_key``), and a request without
+    #: one is served as an anonymous customer. Two ``kid``s per issuer while rotating.
+    customer_tokens: list[CustomerTokenKey] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _unique_token_kids(self) -> Self:
+        """``REQ-CTK-010``: a ``kid`` names exactly one key. Each key's own checks (a
+        public P-256 key, a permitted algorithm) run as it is parsed."""
+        kids = [key.kid for key in self.customer_tokens]
+        if duplicated := sorted({kid for kid in kids if kids.count(kid) > 1}):
+            raise ValueError(f"duplicate customer token kid(s): {duplicated}")
+        return self
 
 
 # ── Observability ─────────────────────────────────────────────────────────────
@@ -606,6 +645,7 @@ class Settings(BaseSettings):
     session: SessionSettings = Field(default_factory=SessionSettings)
     cache: CacheSettings = Field(default_factory=CacheSettings)
     prompts: PromptSettings = Field(default_factory=PromptSettings)
+    planner: PlannerSettings = Field(default_factory=PlannerSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     obs: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
 

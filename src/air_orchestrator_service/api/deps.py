@@ -2,7 +2,11 @@
 
 The single most important function here is :func:`require_principal`. It is the
 one place a request becomes an identity, and therefore the one place a channel is
-decided (docs/01-hld.md §3). Everything downstream — guardrail profile, output
+decided (docs/01-hld.md §3), and the one place a customer is: on the customer channel
+it also verifies the ``air-token`` header and sets ``Principal.subject`` from it, and
+from nothing else (spec 0014). It runs as a dependency, so a bad token is refused
+before a handler runs, and therefore before any SSE byte, on every route that needs a
+principal, the session routes included. Everything downstream — guardrail profile, output
 contract, audit sink, tool allow-list — reads the channel off the
 :class:`~air_orchestrator_service.schemas.common.Principal` this produces.
 
@@ -15,13 +19,14 @@ they used rather than at the scopes they granted.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Annotated, Final
+from typing import Annotated, Any, Final
 
 from fastapi import Depends, Header, Request
 
 from air_orchestrator_service.api.errors import (
     ChannelMismatchError,
     InsufficientScopeError,
+    InvalidCustomerTokenError,
     MissingApiKeyError,
 )
 from air_orchestrator_service.api.middleware import KEY_ID_ATTR
@@ -38,6 +43,14 @@ from air_orchestrator_service.memory.session import InMemorySessionStore
 from air_orchestrator_service.observability.logging import bind_request_context, get_logger
 from air_orchestrator_service.schemas.common import Principal
 from air_orchestrator_service.security.api_keys import ApiKeyStore
+from air_orchestrator_service.security.customer_token import (
+    HEADER as CUSTOMER_TOKEN_HEADER,
+)
+from air_orchestrator_service.security.customer_token import (
+    CustomerTokenRejectedError,
+    CustomerTokenVerifier,
+    subject_hash,
+)
 
 __all__ = [
     "AppState",
@@ -82,9 +95,15 @@ class AppState:
     #: it and nothing iterating the optional clients can reach it: only
     #: ``/v1/chat``'s engine is handed it, for confirmation turns.
     action_executor: ActionExecutor | None = None
-    #: Decides each turn's routes and steps (spec 0012 T5). One per app, so a test
+    #: Decides each turn's routes and steps (spec 0012 T5): ``ModelPlanner`` when
+    #: ``planner.enabled`` (spec 0013), the rule otherwise. One per app, so a test
     #: swaps it with ``dataclasses.replace`` on an otherwise real app.
     planner: Planner = field(default_factory=RulePlanner)
+    #: Verifies the ``air-token`` customer token (spec 0014). With no keys configured,
+    #: every presented token is refused and a request without one is anonymous.
+    customer_tokens: CustomerTokenVerifier = field(
+        default_factory=lambda: CustomerTokenVerifier(())
+    )
 
     def optional_clients(self) -> list[DownstreamClient]:
         """The optional downstreams this deployment has clients for (spec 0010)."""
@@ -144,7 +163,49 @@ async def require_principal(
         tenant=principal.tenant,
         channel=principal.channel.value,
     )
+    if principal.channel is Channel.CUSTOMER:
+        # The business channel never reads the header (REQ-CTK-006): analysts are not
+        # customers, and an unread header cannot change a business response.
+        token = request.headers.get(CUSTOMER_TOKEN_HEADER)
+        try:
+            subject = state.customer_tokens.resolve(token, tenant=principal.tenant)
+        except CustomerTokenRejectedError as exc:
+            assert token is not None
+            _log.info(
+                "customer_token.rejected",
+                outcome=exc.outcome,
+                kid=state.customer_tokens.kid_of(token),
+                key_id=principal.key_id,
+            )
+            raise InvalidCustomerTokenError(
+                "The air-token header is not a valid customer token."
+            ) from None
+        if subject is not None:
+            principal = principal.model_copy(update={"subject": subject})
+            bind_request_context(subject_hash=subject_hash(subject))
     return principal
+
+
+#: How the ``air-token`` header is documented, on the routes where it matters
+#: (``/v1/chat`` and the session routes). It is read in :func:`require_principal`
+#: rather than declared as a parameter, so it does not appear on ``/v1/query``, which
+#: never reads it (``REQ-CTK-006``).
+CUSTOMER_TOKEN_OPENAPI: Final[dict[str, Any]] = {
+    "parameters": [
+        {
+            "name": CUSTOMER_TOKEN_HEADER,
+            "in": "header",
+            "required": False,
+            "description": (
+                "Customer channel only. A short-lived ES256 JWT (typ air-customer+jwt) naming "
+                "the signed-in shopper; its sub becomes the turn's customer (spec 0014). "
+                "Absent: an anonymous customer. Present but invalid: 401 "
+                "invalid-customer-token. A session belongs to the customer who started it."
+            ),
+            "schema": {"type": "string", "maxLength": 4096},
+        }
+    ]
+}
 
 
 def require_scope(scope: str) -> object:

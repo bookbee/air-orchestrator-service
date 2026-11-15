@@ -45,7 +45,7 @@ from air_orchestrator_service.constants import (
     SCOPE_SESSION_READ,
     DownstreamService,
 )
-from air_orchestrator_service.engine.plan import Plan, PlanContext, Planner
+from air_orchestrator_service.engine.plan import FollowUp, Plan, PlanContext, Planner, PlanOutcome
 from air_orchestrator_service.main import create_app
 from air_orchestrator_service.schemas.common import DependencyStatus
 
@@ -162,13 +162,19 @@ class FixedPlanner:
     let a planner see.
     """
 
-    def __init__(self, plan: Plan) -> None:
+    def __init__(self, plan: Plan, *, follow_up: FollowUp | None = None) -> None:
         self._plan = plan
+        self._follow_up = follow_up or FollowUp(None, "round 2: no change")
         self.seen: list[PlanContext] = []
+        self.follow_ups: list[str] = []
 
-    async def plan(self, ctx: PlanContext) -> Plan:
+    async def plan(self, ctx: PlanContext) -> PlanOutcome:
         self.seen.append(ctx)
-        return self._plan
+        return PlanOutcome(self._plan, detail="fixed plan")
+
+    async def follow_up(self, ctx: PlanContext, first: Plan, results: str) -> FollowUp:
+        self.follow_ups.append(results)
+        return self._follow_up
 
 
 def use_planner(app: FastAPI, planner: Planner) -> None:
@@ -297,6 +303,7 @@ async def _canned_generate(
     json_schema: dict[str, Any] | None = None,
     schema_name: str | None = None,
     timeout: float | None = None,  # noqa: ASYNC109 — mirrors ModelGatewayClient.generate
+    model_class: Any = None,
 ) -> Any:
     """A deterministic stand-in for ``ModelGatewayClient.generate`` — see the
     ``app`` fixture. A schema-constrained call (``json_schema`` set) gets one

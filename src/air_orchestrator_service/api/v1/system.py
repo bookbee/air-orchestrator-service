@@ -23,7 +23,11 @@ stays in rotation while broken:
   route that probes the optional services (spec 0010, ``REQ-CLB-007``), concurrently and
   on their health timeouts: it is admin-scoped and called by people, not by load
   balancers, so its cost is paid rarely. A route whose service does not answer, or
-  whose breaker is open, is left out.
+  whose breaker is open, is left out. ``tools`` and ``action`` are also judged by
+  air-tools-gateway's inventory for the caller's tenant, narrowed to the caller's
+  channel: ``tools`` needs a ``read`` entry and ``action`` a ``write`` one (spec 0012,
+  ``REQ-TGW-005``). Not narrowed by customer: the admin key asking names none, and a
+  customer turn would.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ from starlette.status import HTTP_503_SERVICE_UNAVAILABLE
 from air_orchestrator_service import __version__
 from air_orchestrator_service.api.deps import AppState, get_app_state, require_principal
 from air_orchestrator_service.api.errors import InsufficientScopeError
+from air_orchestrator_service.clients.tools_gateway import Inventory
 from air_orchestrator_service.constants import SCOPE_ADMIN_READ, DownstreamService, Route
 from air_orchestrator_service.observability import metrics
 from air_orchestrator_service.schemas.common import (
@@ -134,6 +139,17 @@ def _configured_downstreams(state: AppState) -> list[DependencyStatus]:
     return statuses
 
 
+async def _gateway_offer(state: AppState, principal: Principal, *, reachable: bool) -> Inventory:
+    """air-tools-gateway's inventory for the caller's tenant and channel, or empty
+    when there is no gateway, it is down, or the tenant has no keys. Never raises."""
+    gateway = state.tools_gateway
+    if gateway is None or not reachable or not gateway.settings.serves(principal.tenant):
+        return Inventory(available=False)
+    timeout_s = gateway.settings.health_timeout_ms / 1000
+    inventory = await gateway.inventory(principal.tenant, timeout_s=timeout_s)
+    return inventory.for_channel(principal.channel, gateway.settings)
+
+
 @router.get(
     "/capabilities",
     response_model=CapabilitiesResponse,
@@ -162,6 +178,13 @@ async def capabilities(
     routes = {
         route for route in settings.downstream.routes() if _ROUTE_SERVICE.get(route) not in down
     }
+    offered = await _gateway_offer(
+        state, principal, reachable=DownstreamService.TOOLS_GATEWAY not in down
+    )
+    if not offered.has("read"):
+        routes.discard(Route.TOOLS)
+    if not offered.has("write"):
+        routes.discard(Route.ACTION)
 
     return CapabilitiesResponse(
         service=settings.obs.service_name,

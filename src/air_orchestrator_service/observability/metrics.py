@@ -30,6 +30,7 @@ __all__ = [
     "CONTENT_TYPE",
     "REGISTRY",
     "record_capability_call",
+    "record_customer_token",
     "record_downstream_call",
     "record_escalation",
     "record_guardrail_block",
@@ -121,6 +122,20 @@ _DOWNSTREAM_CALLS = Counter(
 
 #: ``capability`` is bounded: only names from a checked air-tools-gateway
 #: inventory reach it, at most 64 per tenant (spec 0012, ``REQ-TGW-002``/``022``).
+_CUSTOMER_TOKENS = Counter(
+    "air_orchestrator_service_customer_tokens_total",
+    "Customer-channel requests, by what their air-token header was (spec 0014).",
+    ["outcome"],
+    registry=REGISTRY,
+)
+
+_PLANNER_CALLS = Counter(
+    "air_orchestrator_service_planner_calls_total",
+    "Planning calls (spec 0013), by round and what came of them.",
+    ["round", "outcome"],
+    registry=REGISTRY,
+)
+
 _CAPABILITY_CALLS = Counter(
     "air_orchestrator_service_capability_calls_total",
     "Calls to air-tools-gateway capabilities, by capability, kind and outcome.",
@@ -192,6 +207,19 @@ def record_downstream_call(*, service: DownstreamService, outcome: str) -> None:
     ``refused``: the service answered no with a code the caller treats as an answer
     (spec 0012, ``REQ-TGW-028``)."""
     _DOWNSTREAM_CALLS.labels(service.value, outcome).inc()
+
+
+def record_customer_token(*, outcome: str) -> None:
+    """One per customer-channel request: ``absent``, ``valid``, or why the token was
+    refused. The set is closed (``security.customer_token.OUTCOMES``, ``REQ-CTK-012``),
+    so the label cannot grow with traffic."""
+    _CUSTOMER_TOKENS.labels(outcome).inc()
+
+
+def record_planner_call(*, round: int, outcome: str) -> None:
+    """``round`` is 1 or 2; ``outcome`` is ``ok``, ``invalid``, ``timeout``, ``error`` or
+    ``skipped_budget`` (``REQ-PLN-012``). Both sets are closed."""
+    _PLANNER_CALLS.labels(str(round), outcome).inc()
 
 
 def record_capability_call(*, capability: str, kind: str, outcome: str) -> None:

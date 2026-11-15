@@ -45,7 +45,7 @@ nothing is trusted before the signature except the fields used to choose the key
    (`bad_subject`); `air_tenant` equal to the key's tenant and to the principal's tenant
    (`wrong_tenant`).
 
-Every failure raises `CustomerTokenRejected(outcome)`. The dependency turns it into
+Every failure raises `CustomerTokenRejectedError(outcome)`. The dependency turns it into
 `InvalidCustomerTokenError`, one fixed body, and logs `customer_token.rejected` with the
 outcome and `key_id` only. The token string is never passed to a logger, an exception
 message or a repr: the exception carries the outcome alone (`REQ-CTK-008`).
@@ -75,7 +75,7 @@ more stored field.
 
 | Path | Change | Notes |
 | --- | --- | --- |
-| `security/customer_token.py` | new | `CustomerTokenKey`, `CustomerTokenVerifier`, `CustomerTokenRejected`, the outcome set |
+| `security/customer_token.py` | new | `CustomerTokenKey`, `CustomerTokenVerifier`, `CustomerTokenRejectedError`, the outcome set |
 | `config.py` | modified | `SecuritySettings.customer_tokens: list[CustomerTokenKey]` with the startup validator |
 | `api/deps.py` | modified | `require_principal` verifies on the customer channel; `AppState.customer_tokens`; `subject_hash` bound |
 | `api/errors.py` | modified, additive | `InvalidCustomerTokenError` (`invalid-customer-token`, 401) in the §12 catalogue |

@@ -347,9 +347,10 @@ class ModelGatewayClient:
         max_tokens: int,
         json_schema: dict[str, Any] | None,
         schema_name: str | None,
+        model_class: ModelClass | None = None,
     ) -> dict[str, Any]:
         return _GenerateBody(
-            model=self._config.model_class,
+            model=model_class or self._config.model_class,
             messages=[_Message(**m) for m in messages],
             max_tokens=max_tokens,
             json_schema=json_schema,
@@ -371,6 +372,7 @@ class ModelGatewayClient:
         json_schema: dict[str, Any] | None = None,
         schema_name: str | None = None,
         timeout: float | None = None,  # noqa: ASYNC109 — httpx's own per-call override
+        model_class: ModelClass | None = None,
     ) -> GenerateResult:
         """One non-streaming generation. Raises :class:`ModelGatewayError`.
 
@@ -380,9 +382,11 @@ class ModelGatewayClient:
 
         ``timeout`` overrides the configured ``timeout_s``: once a turn has spent part
         of its deadline on earlier stages, the remainder is what bounds this call.
+        ``model_class`` overrides the configured class for this one call: the planner
+        asks for its own (spec 0013, ``REQ-PLN-014``).
         """
         client = await self._http()
-        body = self._body(messages, max_tokens, json_schema, schema_name)
+        body = self._body(messages, max_tokens, json_schema, schema_name, model_class)
         call_timeout = self._config.timeout_s if timeout is None else timeout
         try:
             response = await client.post(

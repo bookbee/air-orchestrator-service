@@ -150,6 +150,16 @@
               ],
               "title": "X-Api-Key"
             }
+          },
+          {
+            "name": "air-token",
+            "in": "header",
+            "required": false,
+            "description": "Customer channel only. A short-lived ES256 JWT (typ air-customer+jwt) naming the signed-in shopper; its sub becomes the turn's customer (spec 0014). Absent: an anonymous customer. Present but invalid: 401 invalid-customer-token. A session belongs to the customer who started it.",
+            "schema": {
+              "type": "string",
+              "maxLength": 4096
+            }
           }
         ],
         "requestBody": {
@@ -300,6 +310,16 @@
               ],
               "title": "X-Api-Key"
             }
+          },
+          {
+            "name": "air-token",
+            "in": "header",
+            "required": false,
+            "description": "Customer channel only. A short-lived ES256 JWT (typ air-customer+jwt) naming the signed-in shopper; its sub becomes the turn's customer (spec 0014). Absent: an anonymous customer. Present but invalid: 401 invalid-customer-token. A session belongs to the customer who started it.",
+            "schema": {
+              "type": "string",
+              "maxLength": 4096
+            }
           }
         ],
         "responses": {
@@ -359,6 +379,16 @@
                 }
               ],
               "title": "X-Api-Key"
+            }
+          },
+          {
+            "name": "air-token",
+            "in": "header",
+            "required": false,
+            "description": "Customer channel only. A short-lived ES256 JWT (typ air-customer+jwt) naming the signed-in shopper; its sub becomes the turn's customer (spec 0014). Absent: an anonymous customer. Present but invalid: 401 invalid-customer-token. A session belongs to the customer who started it.",
+            "schema": {
+              "type": "string",
+              "maxLength": 4096
             }
           }
         ],
@@ -1216,7 +1246,7 @@
           "cost_usd": {
             "type": "number",
             "title": "Cost Usd",
-            "description": "Everything the turn spent, `classifier_cost_usd` and `retrieval_cost_usd` included.",
+            "description": "Everything the turn spent, `classifier_cost_usd`, `retrieval_cost_usd` and `planning_cost_usd` included.",
             "default": 0.0
           },
           "classifier_cost_usd": {
@@ -1229,6 +1259,12 @@
             "type": "number",
             "title": "Retrieval Cost Usd",
             "description": "What air-rag-service reported spending on this turn.",
+            "default": 0.0
+          },
+          "planning_cost_usd": {
+            "type": "number",
+            "title": "Planning Cost Usd",
+            "description": "What planning this turn's capabilities cost (spec 0013); its calls and tokens are in the counts above.",
             "default": 0.0
           },
           "cache_hit": {

@@ -68,6 +68,13 @@ The whole `/v1` surface is seven routes: `POST /v1/chat`, `POST /v1/query`,
 `/v1/capabilities`. Streaming is content-negotiated on `Accept: text/event-stream`; the same
 engine serves both shapes.
 
+**The customer is a second credential, on the customer channel only** (spec 0014). An optional
+`air-token` header carries a short-lived ES256 JWT, verified locally in `require_principal`
+(`security/customer_token.py`: the key pins the algorithm, public keys only, one uniform `401
+invalid-customer-token`). Its `sub` is `Principal.subject`, which nothing else may set, and a
+session is owned by key, tenant **and** subject. Without the header the caller is an anonymous
+customer, and per-customer capabilities are not offered.
+
 Four invariants shape most of the code. Breaking any of them is a design change, not a
 refactor:
 
@@ -105,15 +112,23 @@ spec 0004), `CLASSIFY` via air-classifier when configured (customer channel, fai
 delimited into the prompt, cited answers emitted as `citation` events — spec 0011), per-turn
 and per-session cost ceilings, and a turn deadline that bounds every downstream call. Every
 optional client builds on `clients/base.py` (one attempt, four failure reasons, a
-per-service circuit breaker — spec 0010). Stubbed: `CACHE` (Phase 5). Routing is still a rule
-(customer → `rag` when configured) plus the literal `/propose` trigger — a stand-in must not
-appear to understand intent it does not.
+per-service circuit breaker — spec 0010). air-tools-gateway (spec 0012) is built end to end:
+`PLAN` asks a `Planner` (`engine/plan.py`) for a plan, lookups run in `GATHER` beside
+retrieval, a `write` is proposed there, and a confirmed proposal is executed there by
+`ActionExecutor` on the execute key. With `planner.enabled` (spec 0013, **off by default**)
+the `ModelPlanner` plans it: one `json_schema` call through air-model-gateway with a per-turn
+`enum` of offered names, and a second, propose-only round when a change needs a lookup's
+result. Every failure falls back to the rule and the turn still answers. With it off,
+`RulePlanner` plans no gateway step, reports `PLAN` `skipped: planner disabled`, and keeps
+the literal `/propose` stand-in: a stand-in must not appear to understand intent it does not.
+Tests inject plans with `FixedPlanner`/`use_planner`. Stubbed: `CACHE` (Phase 5).
 
 ### Wiring (`main.py` + `api/deps.py`)
 
 Nothing is a module-level singleton. `create_app` assembles one frozen `AppState` dataclass —
-settings, `ApiKeyStore`, `InfraClient`, `ModelGatewayClient`, the session store, and a
-`ClassifierClient` and a `RagClient`, each `None` unless configured — and hangs it on
+settings, `ApiKeyStore`, `InfraClient`, `ModelGatewayClient`, the session store, the `Planner`,
+and a `ClassifierClient`, a `RagClient`, a `ToolsGatewayClient` and an `ActionExecutor`, each
+`None` unless configured — and hangs it on
 `app.state.air_state` (`deps.STATE_ATTR`). Routes reach it via `Depends(get_app_state)` and
 take settings from `get_settings_dep`, never the `get_settings()` process singleton. It is a
 dataclass rather than loose `app.state` attributes so a misspelled field fails at import
@@ -215,17 +230,20 @@ The near-term work, in order:
   Spec `0002-durable-sessions` is still **Draft**, and its `tasks.md` T0 gates all code on
   resolving open questions Q1/Q2 (which change `REQ-SESS-007`/`008`). Start there, not in
   `memory/`.
-- **Phase 3 — read path.** air-classifier's and air-rag-service's clients exist on the shared
-  `clients/base.py` (specs 0005, 0010, 0011). Next: air-tools-gateway behind the same base
-  (spec 0012, **Accepted**, plan and tasks written, with inventory discovery from its
-  `/v1/capabilities` and parallel fan-out in `GATHER`), the planner (spec 0013, **Accepted**:
-  schema-constrained JSON decomposition, HLD §9 item 2) and the customer token that names the
-  shopper (spec 0014, **Accepted**). All three have `plan.md` and `tasks.md`; 0013 builds on 0012's T5/T6, and 0014's T2 and T3 ship together. air-rag-service scopes by key, so
+- **Phase 3 — read path.** air-classifier's, air-rag-service's and air-tools-gateway's clients
+  exist on the shared `clients/base.py` (specs 0005, 0010, 0011, 0012). Spec 0012 is
+  **Implemented**, proved against the contract double in `tests/integration/` and replayed
+  against a running air-tools-gateway by `make sit-tools` (`tests/sit/`, skipped otherwise). The
+  planner (spec 0013) and the customer token that names the shopper (spec 0014) are
+  **Implemented**. Before `planner.enabled` is set anywhere, **`make planner-eval`** (live,
+  paid, not in `make check`) must run over `evals/planner/cases.json` and its result be
+  recorded in 0013's `tasks.md`; then `make prompt-review LOOKUPS=1` (spec 0012 T7). air-rag-service scopes by key, so
   `RagSettings.tenant_keys` picks the air-rag-service key by the principal's tenant (`REQ-RAG-016`).
   Spec 0011's open gap is the grounding check (`REQ-RAG-014`).
-- **Phase 4 — write path.** air-tools-gateway's propose/execute (spec 0012) behind the
-  propose→confirm→execute gate that already exists and is tested. The execute key lives only on
-  the confirmation path; the read-side client has no execute method.
+- **Phase 4 — write path.** Built (spec 0012): propose in `GATHER`, execute on a confirmed turn
+  through `ActionExecutor` alone, which holds the execute key, has its own breaker and sits
+  outside `optional_clients()`; the read-side client has no execute method. Reachable from a
+  real turn with `planner.enabled` and a verified customer (`air-token`, spec 0014).
 
 Cross-repo: air-model-gateway's `/v1/generate` has no `tools` field, tracked in
 `docs/01-hld.md` §9; it does not block the phases as ordered.

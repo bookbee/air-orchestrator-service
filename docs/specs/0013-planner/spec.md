@@ -1,6 +1,6 @@
 # 0013 — The planner: choosing capabilities for a turn
 
-**Status:** Accepted · **Area:** `PLN` · **Phase:** 3 · **Updated:** 2026-11-14
+**Status:** Implemented · **Area:** `PLN` · **Phase:** 3 · **Updated:** 2026-11-15
 **Derives from:** [Plan §4 resolved item 1 (LLM-based decomposition)](../../00-plan.md) · [HLD §4 step 6, §9 item 2](../../01-hld.md) ·
 spec [0012](../0012-tools-gateway/spec.md) (the `Planner` seam, inventory, steps) · spec [0008](../0008-turn-cost-ceiling/spec.md) (cost) ·
 spec [0006](../0006-channel-prompts/spec.md) (versioned prompts)
@@ -105,7 +105,7 @@ its own evaluation set. Once it is enabled, `/propose` is only text.
 
 | Id | Level | Requirement |
 | --- | --- | --- |
-| `REQ-PLN-011` | MUST | `PLAN` reports round 1: `ok` with `reads=M propose=yes/no needs_results=yes/no` for a model plan; `skipped` with the reason for a rule plan (`planner disabled`, `no capabilities offered`, `nothing to plan: a confirmation turn`); or `degraded` per `REQ-PLN-004`. Round 2 runs after `GATHER` has started, and stage events keep `Stage` order, so it is reported in `GATHER`'s detail (`round 2: propose <capability>` or `round 2: no change`, or its failure), never as a second `PLAN` event. |
+| `REQ-PLN-011` | MUST | `PLAN` reports round 1: `ok` with `reads=M propose=yes/no needs_results=yes/no` for a model plan; `skipped` with the reason for a rule plan (`planner disabled`, `no capabilities offered`, `nothing to plan: a confirmation turn`); or `degraded` per `REQ-PLN-004`. Round 2 runs after `GATHER` has started, and stage events keep `Stage` order, so it is reported in `GATHER`'s detail (`round 2: propose <capability>` or `round 2: no change`, or its failure; `round 2: skipped: no lookup results` when no read returned anything to show it), never as a second `PLAN` event. |
 | `REQ-PLN-012` | MUST | Each planning call is counted in `air_orchestrator_service_planner_calls_total{round,outcome}`, outcome one of `ok`, `invalid`, `timeout`, `error`, `skipped_budget`. |
 | `REQ-PLN-013` | MUST NOT | The planner's raw output, its `reason`, or the capability catalogue reaches the client. The client sees the `route` event (`REQ-TGW-025`) and stage details only. |
 | `REQ-PLN-014` | MUST | The planner asks air-model-gateway for its own model class, `planner.model_class`, defaulting to `cloud` and independent of the synthesis class. |
@@ -189,21 +189,21 @@ does.
 
 ## 10. Traceability
 
-> Forward spec: every row is `DEFERRED` until the tasks land.
+> Every row proved. `REQ-PLN-001` and `011` are also proved by `tests/unit/test_planner.py::test_a_confirmation_turn_is_not_planned`; `REQ-PLN-009`'s evaluation half by `tests/unit/test_planner_eval.py`.
 
 | Id | Proof |
 | --- | --- |
-| `REQ-PLN-001` | DEFERRED — Phase 3 · `tests/unit/test_planner.py::test_a_turn_with_capabilities_is_planned_by_one_structured_call` |
-| `REQ-PLN-002` | DEFERRED — Phase 3 · `tests/unit/test_planner.py::test_the_planner_prompt_holds_no_identity_and_only_offered_capabilities` |
-| `REQ-PLN-003` | DEFERRED — Phase 3 · `tests/unit/test_planner.py::test_the_plan_is_validated_against_its_schema` |
-| `REQ-PLN-004` | DEFERRED — Phase 3 · `tests/unit/test_planner.py::test_an_invalid_plan_falls_back_and_the_turn_answers` |
-| `REQ-PLN-005` | DEFERRED — Phase 3 · `tests/unit/test_planner.py::test_planning_is_bounded_and_counted_against_the_ceiling` |
-| `REQ-PLN-006` | DEFERRED — Phase 3 · `tests/unit/test_planner.py::test_the_planner_cannot_widen_the_offered_capabilities` |
-| `REQ-PLN-007` | DEFERRED — Phase 3 · `tests/unit/test_planner.py::test_a_dependent_proposal_takes_exactly_two_rounds` |
-| `REQ-PLN-008` | DEFERRED — Phase 3 · `tests/unit/test_planner.py::test_round_two_arguments_must_validate` |
-| `REQ-PLN-009` | DEFERRED — Phase 3 · `tests/unit/test_prompts.py::test_the_planner_prompt_is_versioned_and_logged` |
-| `REQ-PLN-010` | DEFERRED — Phase 3 · `tests/unit/test_planner.py::test_the_propose_trigger_is_inert_when_the_planner_is_enabled` |
-| `REQ-PLN-011` | DEFERRED — Phase 3 · `tests/unit/test_planner.py::test_the_plan_stage_reports_what_ran` |
-| `REQ-PLN-012` | DEFERRED — Phase 3 · `tests/unit/test_planner.py::test_every_planning_call_is_counted` |
-| `REQ-PLN-013` | DEFERRED — Phase 3 · `tests/unit/test_planner.py::test_the_plan_never_reaches_the_client` |
-| `REQ-PLN-014` | DEFERRED — Phase 3 · `tests/unit/test_planner.py::test_the_planner_uses_its_own_model_class` |
+| `REQ-PLN-001` | `tests/unit/test_planner.py::test_a_turn_with_capabilities_is_planned_by_one_structured_call` |
+| `REQ-PLN-002` | `tests/unit/test_planner.py::test_the_planner_prompt_holds_no_identity_and_only_offered_capabilities` |
+| `REQ-PLN-003` | `tests/unit/test_planner.py::test_the_plan_is_validated_against_its_schema` |
+| `REQ-PLN-004` | `tests/unit/test_planner.py::test_an_invalid_plan_falls_back_and_the_turn_answers` |
+| `REQ-PLN-005` | `tests/unit/test_planner.py::test_planning_is_bounded_and_counted_against_the_ceiling` |
+| `REQ-PLN-006` | `tests/unit/test_planner.py::test_the_planner_cannot_widen_the_offered_capabilities` |
+| `REQ-PLN-007` | `tests/unit/test_planner.py::test_a_dependent_proposal_takes_exactly_two_rounds` |
+| `REQ-PLN-008` | `tests/unit/test_planner.py::test_round_two_arguments_must_validate` |
+| `REQ-PLN-009` | `tests/unit/test_prompts.py::test_the_planner_prompt_is_versioned_and_logged` |
+| `REQ-PLN-010` | `tests/unit/test_planner.py::test_the_propose_trigger_is_inert_when_the_planner_is_enabled` |
+| `REQ-PLN-011` | `tests/unit/test_planner.py::test_the_plan_stage_reports_what_ran` |
+| `REQ-PLN-012` | `tests/unit/test_planner.py::test_every_planning_call_is_counted` |
+| `REQ-PLN-013` | `tests/unit/test_planner.py::test_the_plan_never_reaches_the_client` |
+| `REQ-PLN-014` | `tests/unit/test_planner.py::test_the_planner_uses_its_own_model_class` |

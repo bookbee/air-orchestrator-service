@@ -55,7 +55,8 @@ class Usage(BaseModel):
     cost_usd: float = Field(
         default=0.0,
         description=(
-            "Everything the turn spent, `classifier_cost_usd` and `retrieval_cost_usd` included."
+            "Everything the turn spent, `classifier_cost_usd`, `retrieval_cost_usd` and "
+            "`planning_cost_usd` included."
         ),
     )
     classifier_cost_usd: float = Field(
@@ -63,6 +64,13 @@ class Usage(BaseModel):
     )
     retrieval_cost_usd: float = Field(
         default=0.0, description="What air-rag-service reported spending on this turn."
+    )
+    planning_cost_usd: float = Field(
+        default=0.0,
+        description=(
+            "What planning this turn's capabilities cost (spec 0013); its calls and tokens "
+            "are in the counts above."
+        ),
     )
     cache_hit: bool = False
 

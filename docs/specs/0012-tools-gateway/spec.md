@@ -1,6 +1,6 @@
 # 0012 — air-tools-gateway: lookups and proposed mutations through one gateway
 
-**Status:** Accepted · **Area:** `TGW` · **Phase:** 3 (read) / 4 (write) · **Updated:** 2026-11-14
+**Status:** Implemented · **Area:** `TGW` · **Phase:** 3 (read) / 4 (write) · **Updated:** 2026-11-15
 **Derives from:** [Plan §1, §4 "Decided: one tools gateway"](../../00-plan.md) · [HLD §1, §4, §6, §7](../../01-hld.md) ·
 spec [0001](../0001-mutation-gate/spec.md) (the gate) · spec [0010](../0010-downstream-client-base/spec.md) (client base) ·
 spec [0011](../0011-retrieval-grounding/spec.md) (how downstream text enters a prompt)
@@ -113,7 +113,7 @@ planner (spec 0013, to follow).
 | `REQ-TGW-014` | MUST | The published proposal's `summary` and `risk` come from the gateway's propose response, and its `expires_at` is the earlier of the gateway's and `session.proposal_ttl_seconds`. A propose response with a risk outside `low`/`medium`/`high` produces no proposal. |
 | `REQ-TGW-015` | MUST | An execute request carries an `Idempotency-Key` derived from this service's proposal id, so that the same proposal always produces the same key. |
 | `REQ-TGW-016` | MUST | The execute request alone carries the tenant's **execute** key. Inventory, read and propose requests carry the **read** key and never the execute key. Neither key appears in a log line, repr, error message or response. |
-| `REQ-TGW-017` | MUST | The answer to a confirmed turn follows the execute outcome. `done` says it was done. `pending_approval` says it is awaiting approval, is not yet done, and that the customer can ask again later to check. `rejected` says it was not done, worded from the gateway's closed-set `code`, never its free text. A timeout, unreachable gateway or error says the outcome is **unknown**, and never that it was done. An open circuit, which sends no request at all, says it was **not done** and may be tried again later. |
+| `REQ-TGW-017` | MUST | The answer to a confirmed turn follows the execute outcome. `done` says it was done. `pending_approval` says it is awaiting approval, is not yet done, and that the customer can ask again later to check. `rejected` says it was not done, worded from the gateway's closed-set `code`, never its free text. A timeout, unreachable gateway or error says the outcome is **unknown**, and never that it was done. An open circuit, which sends no request at all, says it was **not done** and may be tried again later. An execute the gateway answers with `404 not_found` or `409 proposal_expired` acted on nothing, so it also says **not done**, and that the change can be asked for afresh; it is the gateway answering, not failing, so it does not count against the circuit. `409 already_executed` and any other refusal stay **unknown**, because the change may already have been made. |
 | `REQ-TGW-018` | MUST NOT | An execute request is retried, automatically or on a later turn, by this service. |
 | `REQ-TGW-019` | MUST | A pending proposal records the `key_id` and `subject` that created it. A confirmation from a principal with a different `key_id` or `subject` executes nothing and answers normally, as `REQ-MUT-008`. |
 | `REQ-TGW-020` | MUST NOT | A propose request is sent for a principal whose key record sets `allow_actions: false`. This closes the gap recorded against `REQ-MUT-012` before any real mutation is reachable. |
@@ -172,6 +172,7 @@ planner (spec 0013, to follow).
 - **Given** a confirmed proposal
 - **When** execute returns `pending_approval`, or `rejected` with code `invalid_state`, or fails with a 503
 - **Then** the answer says awaiting approval, not done because of its state, or outcome unknown, respectively, and none of them says "cancelled"
+- **And when** execute returns `404 not_found` or `409 proposal_expired`, the answer says not done; with `409 already_executed` it says outcome unknown
 
 **AC-9 — The gateway down narrows the turn** (`REQ-TGW-003`, `005`, `010`, `011`)
 - **Given** the gateway is unreachable
@@ -258,8 +259,10 @@ only by tests.
 
 ## 10. Traceability
 
-> Forward spec: nothing is proved yet. Every row is `DEFERRED` until the tasks land, and each
-> names the test that will prove it.
+> Every requirement is proved by the named test, against the contract double
+> (`REQ-TGW-024`), and the double's flows pass against air-tools-gateway's own build too
+> (`make sit-tools`, tasks.md T11).
+> No production turn reaches a lookup or a change until spec 0013's planner plans one.
 
 | Id | Proof |
 | --- | --- |
@@ -267,7 +270,7 @@ only by tests.
 | `REQ-TGW-002` | `tests/unit/test_tools_inventory.py::test_a_malformed_entry_is_dropped_and_the_rest_kept` |
 | `REQ-TGW-003` | `tests/unit/test_tools_inventory.py::test_a_failed_fetch_leaves_no_capabilities_and_the_turn_answers` (the cache and grace) with `tests/unit/test_tools_stage.py::test_the_gateway_down_degrades_gather_and_the_turn_answers` (the turn) |
 | `REQ-TGW-004` | `tests/unit/test_tools_stage.py::test_a_capability_outside_the_channel_allow_list_is_never_called` |
-| `REQ-TGW-005` | DEFERRED — Phase 3 · `tests/unit/test_system_routes.py::test_capabilities_list_tools_and_action_only_when_the_gateway_offers_them` |
+| `REQ-TGW-005` | `tests/unit/test_system_routes.py::test_capabilities_list_tools_and_action_only_when_the_gateway_offers_them` |
 | `REQ-TGW-006` | `tests/unit/test_tools_stage.py::test_an_unknown_name_or_invalid_arguments_are_never_sent` |
 | `REQ-TGW-007` | `tests/unit/test_tools_gateway_client.py::test_each_tenant_is_called_with_its_own_key` |
 | `REQ-TGW-008` | `tests/unit/test_tools_stage.py::test_the_subject_comes_only_from_the_principal` with `tests/unit/test_tools_stage.py::test_a_capability_that_needs_a_customer_is_not_offered_without_one`. The principal is injected with a subject; a verified token supplies it from spec 0014 |

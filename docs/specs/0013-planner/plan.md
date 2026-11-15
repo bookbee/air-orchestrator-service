@@ -1,6 +1,6 @@
 # 0013 — Implementation plan
 
-**Spec:** [`spec.md`](spec.md) · **Status:** Ready · **Updated:** 2026-11-14
+**Spec:** [`spec.md`](spec.md) · **Status:** Built · **Updated:** 2026-11-15
 
 > Builds on spec 0012's planner seam (its T5: `engine/plan.py`, `Planner`, `Plan`, `Step`,
 > `RulePlanner`) and its turn inventory (its T6). Nothing here starts before those land.
@@ -69,6 +69,21 @@ the "never a third round" rule.
 **What the client sees** is unchanged from spec 0012: `route` with the capabilities used,
 stage details, `proposal`, `answer`. `PlanOutput.reason` goes to the log only
 (`REQ-PLN-013`).
+
+**As built, four details differ from the sketch above.**
+- `PlanContext` keeps `principal`, because the rule routes on channel and
+  `allow_actions`. The prompt builder, `planning_messages()`, takes the text, history,
+  classifier labels and menu as separate arguments and never the context, so it still has
+  no way to render an identity (`REQ-PLN-002`).
+- `follow_up(ctx, first, results)` takes `results` as the delimited blocks the answer
+  prompt carries (`TurnEngine._lookup_blocks()`), not a list of results. That makes "as
+  the answer prompt will see them" literal.
+- Round 2 is not called when no read returned anything: `GATHER` says `round 2: skipped:
+  no lookup results`. Its failure leaves the reads in the answer prompt with a notice that
+  the change could not be prepared (spec §7).
+- The model planner also drops writes from its menu for a key without `allow_actions` and
+  on the business channel, so `propose` is `null`-only for them, as step 1 says. The engine
+  still drops such a write afterwards (`REQ-TGW-020`, `026`).
 
 ## 2. Modules touched
 

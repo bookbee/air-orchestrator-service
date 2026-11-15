@@ -61,7 +61,10 @@ air-orchestrator-service/
     ├── engine/
     │   ├── turn.py                 # TurnEngine.run() — the pipeline in HLD §4.
     │   │                           #   Budget (§7) is enforced inline here today
-    │   ├── planner.py            ○ # route selection + capability binding  (Phase 3)
+    │   ├── plan.py                 # Plan, Step, the Planner seam, RulePlanner (spec 0012);
+    │   │                           #   ModelPlanner, two rounds at most          (spec 0013)
+    │   ├── planner_schema.py       # the planner's per-turn JSON schemas      (spec 0013)
+    │   ├── cost.py                 # estimate_cost: one call priced before it is made (0008)
     │   └── budget.py             ○ # extracted TurnBudget, once fan-out needs it
     │
     ├── guardrails/
@@ -86,9 +89,11 @@ air-orchestrator-service/
     │   ├── classifier.py           # air-classifier — the CLASSIFY stage (spec 0005)
     │   ├── base.py                 # shared headers/failures/metric/breaker  (spec 0010)
     │   ├── rag.py                  # air-rag-service retrieval for GATHER           (spec 0011)
-    │   ├── tools_gateway.py      ○ # air-tools-gateway: read + propose / execute (spec 0012)
+    │   ├── tools_gateway.py        # air-tools-gateway: inventory, lookups, propose
+    │   │                           #   (read key) and ActionExecutor (execute key) (spec 0012)
     │   ├── recommender.py        ○                                     (Phase 3)
-    │   └── discovery.py          ○ # /v1/capabilities polling → live inventory (Phase 3)
+    │   └── discovery.py          ○ # inventory polling for other services; air-tools-gateway's
+    │                               #   per-tenant inventory cache is in tools_gateway.py
     │
     ├── prompts/
     │   └── registry.py             # versioned, pinned prompt lookup; built-in defaults
@@ -162,9 +167,19 @@ returns the terminal `TurnResult` as one JSON body. Same engine, same events —
 non-streaming path collects them. This is what keeps `air-client`, curl, and a batch caller
 on the same contract.
 
+**Principal resolution** (`api/deps.require_principal`, spec 0014). The API key gives the
+key id, tenant and channel. On the customer channel the optional `air-token` header is then
+verified locally (`security/customer_token.py`: an ES256 JWT, algorithm pinned by the
+configured key, `air_tenant` equal to the key's tenant), and its `sub` becomes
+`Principal.subject`. No header: an anonymous customer. A header that fails any check: `401
+invalid-customer-token`, before the handler runs, so before any SSE byte. The business channel
+never reads it. Nothing else sets `subject`: not a body field, header, parameter or session.
+
 **Session ownership** is checked exactly as `shopassist-service` does it: a session belonging
 to a different principal 404s identically to one that does not exist, so the response cannot
-be used to probe for session ids.
+be used to probe for session ids. A principal is the key, the tenant *and* the customer
+(`Session.owned_by`, `REQ-CTK-007`): two shoppers behind one storefront key cannot read or
+continue each other's conversation, and an anonymous caller cannot continue a signed-in one.
 
 ## 4. The SSE event contract
 
@@ -268,17 +283,19 @@ endpoint is the adapter, rather than the reverse.
 Ordering is [HLD §4](01-hld.md) exactly. Notes on the parts that are not obvious:
 
 - **The engine holds no state across requests.** One `TurnEngine` is built per request; the
-  session comes from `SessionStore`, and capabilities will come from `discovery` (○ Phase 3).
+  session comes from `SessionStore`, and air-tools-gateway's capabilities from its per-tenant
+  inventory cache, fetched at `PLAN` (spec 0012).
   Two replicas serving alternating turns of one conversation must be indistinguishable
   (review item 03) — true by construction today, and actually testable from Phase 2b.
-- **Fan-out is `asyncio.gather(..., return_exceptions=True)`** under one deadline (○ Phase 3).
-  A client that raises contributes a `degraded` entry and a `stage` event with
-  `status=degraded`; it never propagates.
+- **Fan-out is one `asyncio.gather` in `GATHER`** under one deadline (spec 0012): retrieval,
+  the plan's lookups, a proposal and a confirmed execute run concurrently, each bounded by its
+  own share. Each part catches its own client's failure and reports a status, so one `stage`
+  event covers them all and a failure never propagates; `degraded` names the service.
 - **Synthesis sees only what step 7 gathered**, plus the session window. Untrusted content is
   wrapped in explicit delimiters and labelled as data by `guardrails/boundary.py`, never
   concatenated into the instruction region — the structural half of injection defence. This
-  holds today for the customer message; it extends to retrieved passages and tool results
-  unchanged when Phase 3 produces them.
+  holds for the customer message, retrieved passages (spec 0011) and lookup results (spec
+  0012), each screened and delimited.
 - **The budget is checked between stages, not just at the start.** A turn that exhausts its
   cost ceiling stops gathering and synthesises from what it has, emitting `status=degraded`.
 
@@ -298,14 +315,16 @@ Extracting a `TurnBudget` object earns its keep once Phase 3 fans out to several
 once and the ceiling has to be enforced across concurrent calls rather than one sequential
 one. Doing it before then would be indirection without a second caller.
 
-## 8. Mutations (`clients/tools_gateway.py` ○ — Phase 4, spec 0012)
+## 8. Mutations (`clients/tools_gateway.py`, spec 0012)
 
-The propose → confirm → execute flow from [HLD §6](01-hld.md). **The gate is built and
-tested; the air-tools-gateway call behind it is not.** `engine/turn.py` proposes, stores the pending
-proposal on the session, and executes only against a matching structured `confirm` — with
-`/propose` as a literal trigger standing in for a planner decision, so the whole path is
-exercisable end to end before the gateway exists. The sketch below is the shape the client
-takes when it lands; spec 0012 is normative where they differ:
+The propose → confirm → execute flow from [HLD §6](01-hld.md). **Built and tested, against
+a contract double** (`tests/integration/tools_gateway_double.py`). A plan's `write` step is
+proposed to air-tools-gateway in `GATHER` and published as this service's `prop_` proposal;
+the gateway's own id never leaves the server. Only a later turn with a matching structured
+`confirm`, from the same key and customer, executes it. A write is planned by the model planner
+(spec 0013) when `planner.enabled`, either in round 1 or, when it needs a lookup's result
+first, in round 2; tests also inject the plan. With the planner off, `/propose` remains a
+literal stand-in that proposes a no-op; with it on, `/propose` is just text. In outline (spec 0012 is normative):
 
 ```python
 # turn N — the planner selected the action route
@@ -321,9 +340,15 @@ pending = await sessions.take_pending(session, request.confirm.proposal_id)
 if pending is None or not request.confirm.approve:
     ...                           # expired, cancelled, mismatched or declined:
                                   # a normal 200 turn that executes nothing
-result = await executor.execute(                             # execute key, this path only
-    pending, idempotency_key=f"{session_id}:{pending.proposal_id}", ctx=ctx
+if (pending.key_id, pending.subject) != (principal.key_id, principal.subject):
+    ...                           # someone else's: consumed, answered as an unknown id
+outcome = await executor.execute(                            # execute key, this path only
+    pending.action, proposal_id=pending.proposal_id,          # Idempotency-Key: airo-<prop_id>
+    gateway_proposal_id=pending.gateway_proposal_id, ...
 )                                                             # never retried (REQ-TGW-018)
+# the answer is fixed text by outcome: done · pending_approval · rejected(code) ·
+# unknown (sent, no answer) · not done (nothing sent, or    (REQ-TGW-017)
+# execute 404 not_found / 409 proposal_expired)
 ```
 
 **A stale or mismatched `proposal_id` is not a 404.** The turn answers normally and executes
@@ -343,11 +368,14 @@ Three invariants, each enforced in code rather than by prompt:
    (Plan §4 Q3). A stale "yes" has nothing left to point at.
 
 One gateway serves reads and writes (Plan §4 "Decided: one tools gateway"), so the split is
-carried by two objects and two keys. The client the planner and `GATHER` use reaches
-inventory, lookup and propose, on the tenant's **read** key, and has no `execute`-shaped
-method at all. Execution is a separate object holding the **execute** key, reachable only from
-the confirmation branch. The read/write split stays a property of the module surface, not a
-runtime check, and the gateway refuses a read key on execute as a second line.
+carried by two objects and two keys, as built. `ToolsGatewayClient` reaches inventory, lookup
+and propose on the tenant's **read** key, and has no `execute`-shaped method at all; it is the
+one in `AppState.optional_clients()`. `ActionExecutor` has only `execute`, on the **execute**
+key, with no default key on its HTTP client; it sits on `AppState.action_executor`, outside
+`optional_clients()`, and only `/v1/chat`'s engine is handed it. The two have separate
+breakers, so failing lookups cannot refuse a confirmed change. The split is a property of the
+module surface, not a runtime check, and the gateway refuses a read key on execute as a second
+line (contract rule 5, enforced by the double).
 
 ## 9. Guardrails (`guardrails/`)
 
@@ -382,9 +410,9 @@ rule that fired, so the false-refusal rate in Plan §6 is measurable.
 
 ## 10. Downstream clients (`clients/`)
 
-`DownstreamClient` base: one `httpx.AsyncClient` per service, timeout from config, bounded
-retry on idempotent calls only, a circuit breaker, and the `TurnBudget` deadline applied as
-the effective timeout. Request id and tenant propagate on every call.
+`DownstreamClient` base: one `httpx.AsyncClient` per service, timeout from config, one
+attempt and no retry, a circuit breaker, and the turn's deadline applied as the effective
+timeout. Request id and tenant propagate on every call.
 
 **Every AIR service is a service dependency, not a package one.** `clients/model_gateway.py`,
 `clients/classifier.py` and `clients/infra.py` speak HTTP over `httpx` rather than importing a
@@ -401,19 +429,24 @@ service's token, answers what readiness means here: is the token accepted, and i
 configured model class granted to this service and backed by a provider (spec 0003).
 
 `DownstreamClient` (`clients/base.py`, spec 0010) is what every optional client builds on:
-`clients/classifier.py` and `clients/rag.py` today. It makes one bounded attempt and has no
+`clients/classifier.py`, `clients/rag.py` and both air-tools-gateway clients today. It
+makes one bounded attempt and has no
 retry, because a turn's downstream calls each get a share of one deadline. It reports every
 failure as `timeout`, `unavailable`, `error` or `breaker_open`, and keeps a per-service
 circuit breaker. The breaker is lifted from air-classifier's
 [`resilience/breaker.py`](../../air-classifier-service/src/air_classifier_service/resilience/breaker.py),
 without its bulkhead and its multi-probe half-open, which one attempt per turn does not need.
 
-`discovery.py` (○ Phase 3) polls each service's `/v1/capabilities` on an interval and caches
-the result. The planner binds against **this live inventory**, which is what makes "a new
-capability in air-tools-gateway needs no release here" true, and what makes a dead service a missing capability
-rather than a failed turn. Until it exists, `/v1/capabilities` reports the configured routes
+air-tools-gateway's inventory is discovered live (spec 0012): `ToolsGatewayClient.inventory()`
+reads its `/v1/capabilities` per tenant, checks every entry, and caches the result for
+`inventory_ttl_s`, serving the last good one through failed refreshes for `inventory_grace_s`.
+The planner binds against **this live inventory**, which is what makes "a new capability in
+air-tools-gateway needs no release here" true, and what makes a dead service a missing
+capability rather than a failed turn. `discovery.py` (○) would generalise this to other
+services. This service's `/v1/capabilities` reports the configured routes
 (`DownstreamSettings.routes()`), less those whose service fails a live `/v1/health` probe or
-has an open breaker (spec 0010, `REQ-CLB-007`).
+has an open breaker (spec 0010, `REQ-CLB-007`), and lists `tools`/`action` only when the
+caller's channel is offered a `read`/`write` capability (`REQ-TGW-005`).
 
 Every client ships a **fixture-backed fake** used by the tests, so Phases 3-4 are buildable
 against services that are still empty repos (Plan §6).
@@ -432,7 +465,9 @@ than the HTTP status.
 
 ## 12. Errors (RFC 9457)
 
-`AppError(status, code, detail)` subclasses — `Unauthorized(401)`, `Forbidden(403)`,
+`AppError(status, code, detail)` subclasses — `Unauthorized(401)`,
+`InvalidCustomerToken(401, invalid-customer-token`: one body whatever the reason, spec 0014),
+`Forbidden(403)`,
 `SessionNotFound(404)`, `ProposalNotFound(404)`, `MalformedRequest(400)`, `RateLimited(429)`,
 `TurnBudgetExceeded(429)`, `DependencyUnavailable(503)` — rendering to
 `application/problem+json` with `request_id`, exactly as air-infra and air-classifier do.
@@ -517,8 +552,8 @@ table wins.
 | 1 — Contracts | **Shipped.** `/v1/chat` · `/v1/query` · `/v1/sessions/{id}` · the §4 event contract (`api/sse.py`) · every §5 schema · session store with tenant-namespaced keys · the propose → confirm → execute gate |
 | 2a — Turn engine | **Shipped.** `engine/turn.py`: guardrails in and out · prompt registry · real synthesis through air-model-gateway (spec 0003), streamed as `answer.delta` to SSE callers (spec 0004) · enforced turn deadline and per-turn/per-session cost ceilings, the turn ceiling checked against a pre-call estimate on both channels with air-classifier's spend counted (spec 0008) · payment cards masked on input (spec 0007) · an unknown `session_id` is a 404 and blank or malformed bodies are 422s after auth (spec 0009) · escalation on an explicit request for a human. **The event contract did not change** |
 | 2b — Durable sessions | **Not started.** Redis behind the existing `SessionStore` protocol; the key shape is already tenant-namespaced, so this is a backend swap |
-| 3 — Read path | **Started.** `clients/classifier.py` turns `CLASSIFY` real on the customer channel (spec 0005; acting on the verdict is deferred). The shared `clients/base.py` with a per-service breaker, and live downstream status on `/v1/capabilities` (spec 0010). `clients/rag.py` turns `GATHER` real on the customer channel: passages screened, numbered and delimited into the prompt, and cited answers as `citation` events (spec 0011; air-rag-service's key picked per tenant; the grounding check is a declared gap). Still to come: the air-tools-gateway client (spec 0012, Draft) and air-recommender, the planner, inventory discovery from `/v1/capabilities`, parallel fan-out, and grounding checks |
-| 4 — Write path | **Not started.** `clients/action.py` behind the gate that already exists |
+| 3 — Read path | **Started.** The customer token (spec 0014): `security/customer_token.py` verifies `air-token` locally and sets `Principal.subject`, and sessions are owned by key, tenant and customer.  `clients/classifier.py` turns `CLASSIFY` real on the customer channel (spec 0005; acting on the verdict is deferred). The shared `clients/base.py` with a per-service breaker, and live downstream status on `/v1/capabilities` (spec 0010). `clients/rag.py` turns `GATHER` real on the customer channel: passages screened, numbered and delimited into the prompt, and cited answers as `citation` events (spec 0011; air-rag-service's key picked per tenant; the grounding check is a declared gap). `clients/tools_gateway.py` (spec 0012): air-tools-gateway's per-tenant inventory, checked and cached, behind the `Planner` seam (`engine/plan.py`); lookups run concurrently with retrieval in `GATHER`, screened and delimited into the prompt; `/v1/capabilities` lists `tools` only when the channel is offered a lookup. The model planner (spec 0013): `ModelPlanner` behind the same seam, off by default; with `planner.enabled` a customer turn with a verified customer is planned by one structured call, and a second when a proposal needs a lookup's result. `make planner-eval` scores the planner prompt live and has not been run yet, so `planner.enabled` stays off. Still to come: air-recommender, and grounding checks |
+| 4 — Write path | **Built, not yet reachable.** air-tools-gateway propose and execute behind the gate (spec 0012): proposals held server-side with their key and customer, execute on a separate key and breaker with a derived idempotency key and no retry, an answer per outcome that never claims an unknown as done, and an `action.executed` audit line. Proved against a contract double and, through `make sit-tools`, against air-tools-gateway's own build (spec 0012 T11); reachable from a real turn with `planner.enabled` (spec 0013) and a verified customer (spec 0014) |
 | 5 — Semantic cache + business channel | **Not started.** Turns `CACHE` real; adds output-schema validation and the audit sink |
 | 6 — Evaluation, hardening & ops | **Not started.** Eval suites, OTel tracing, load test, runbook |
 
@@ -531,11 +566,15 @@ one, and this service must never be mistaken for a complete one in a demo. `_STU
 `engine/turn.py` is the single list; deleting an entry there is what "turning a stage on"
 means.
 
-Routing is likewise still a rule, not a planner. A customer turn that will be synthesised
-routes to `rag` when air-rag-service is configured, and `/propose` is a **literal trigger**, not
-intent detection. Choosing among capabilities waits for the planner (spec 0013), which
-arrives with air-tools-gateway (spec 0012), and a stand-in must not appear to understand
-intent it does not.
+Routing is a planner when `planner.enabled` and a rule otherwise. `PLAN` asks a `Planner`
+(spec 0012's seam). The default, `RulePlanner`, routes a synthesised customer turn to `rag`
+when air-rag-service is configured, treats `/propose` as a **literal trigger**, plans no
+air-tools-gateway step, and reports `PLAN` as `skipped: planner disabled`, so a stand-in
+never appears to understand intent it does not. `ModelPlanner` (spec 0013) makes one
+schema-constrained call through air-model-gateway, with a per-turn `enum` of the offered
+names, and a second, propose-only call when round 1 asks for its reads' results. Any failure
+falls back to the rule without the stand-in, and `PLAN` is `degraded`. Retrieval stays a rule
+either way (spec 0013 §9 Q3).
 
 ### Claims proved by tests, not by assertion
 
@@ -557,6 +596,11 @@ intent it does not.
   5xx (`test_turns.py`, `test_streaming.py`).
 - **The wire contract is pinned.** The integration doubles 404 the retired `/v1/inference` and
   422 any field outside each downstream's request model (`tests/integration/`).
+  air-tools-gateway's double loads its `contract.openapi.yaml` and refuses any request the
+  contract refuses, including a key used outside its scope (`REQ-TGW-024`).
+- **An execute outcome is never overstated.** Only `done` is answered as done; a timeout or
+  error is *unknown*, an open circuit *not done*, and a failed execute is never retried
+  (`test_action_execution.py`).
 
 ## 16. Marked TODOs (fill-in points for later phases)
 
@@ -564,8 +608,8 @@ intent it does not.
 - `memory/window.py` — summarisation of older turns (Phase 2 ships truncation).
 - `guardrails/injection.py` — heuristics ship first; a model-based classifier is Phase 6.
 - `observability/audit.py` — durable append-only sink for the business channel (Phase 5).
-- `engine/planner.py` — **native tool-calling, wanted from air-model-gateway ([HLD §9](01-hld.md)).**
-  Ships as schema-constrained JSON decomposition using the gateway's existing `json_schema`
+- `engine/plan.py` (`ModelPlanner`, spec 0013) — **native tool-calling, wanted from air-model-gateway ([HLD §9](01-hld.md)).**
+  Built as schema-constrained JSON decomposition using the gateway's existing `json_schema`
   support, behind the same `Planner` interface, so the migration is an implementation swap.
 - `prompts/registry.py` — file-backed versioned prompts. The registry ships built-in defaults
   so a fresh checkout answers with no prompt files configured; `PromptSettings.registry_path`

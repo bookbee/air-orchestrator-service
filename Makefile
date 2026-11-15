@@ -54,6 +54,10 @@ run: ## Run the service with reload (a real answer needs air-model-gateway on :8
 test: ## Run tests
 	$(PYTEST)
 
+.PHONY: sit-tools
+sit-tools: ## Replay the tools-gateway flows against a running air-tools-gateway (URL=http://localhost:8084)
+	AIR_TOOLS_GATEWAY_SIT_URL=$(or $(URL),http://localhost:8084) $(PYTEST) tests/sit/test_tools_gateway_live.py -v
+
 .PHONY: cov
 cov: ## Run tests with a coverage report
 	$(PYTEST) --cov=air_orchestrator_service --cov-report=term-missing
@@ -79,6 +83,10 @@ trace: ## Check every spec requirement names a test that exists
 prompt-review: ## Run the customer-care review set against a live service (paid model calls)
 	$(PY) tools/prompt_review.py --base-url $(or $(BASE_URL),http://127.0.0.1:8081) \
 		--key $(or $(KEY),airo_local_customer_key) $(if $(ONLY),--only $(ONLY)) $(if $(LOOKUPS),--lookups)
+
+.PHONY: planner-eval
+planner-eval: ## Score the planner prompt against air-model-gateway (spec 0013; paid model calls)
+	$(PY) tools/planner_eval.py $(if $(ONLY),--only $(ONLY)) $(if $(MODEL_CLASS),--model-class $(MODEL_CLASS))
 
 .PHONY: spec
 spec: ## Scaffold a new spec: make spec NAME=my-feature

@@ -1,6 +1,6 @@
 # 0014 — Tasks
 
-**Spec:** [`spec.md`](spec.md) · **Plan:** [`plan.md`](plan.md) · **Updated:** 2026-11-14
+**Spec:** [`spec.md`](spec.md) · **Plan:** [`plan.md`](plan.md) · **Updated:** 2026-11-15
 
 > Each task leaves the tree green (`make check`). When one lands, its rows in spec §10 move
 > from `DEFERRED` to the named test.
@@ -93,10 +93,17 @@ T1 → T2 → T3 → T4 → T5.
 
 ## Definition of done
 
-- [ ] Every requirement in `spec.md` §5 traces to a passing test, or is a declared `GAP`
-- [ ] `make check` passes
-- [ ] `make trace` passes
-- [ ] `make openapi` run (header doc, problem type)
-- [ ] Spec status moved to `Implemented` (or `Partial`, with gaps listed)
-- [ ] `security/customer_token.py`'s docstring explains the why: pinned algorithm, public keys only, uniform refusal
-- [ ] `docs/02-lld.md` §15 build status updated
+- [x] Every requirement in `spec.md` §5 traces to a passing test, or is a declared `GAP`
+- [x] `make check` passes
+- [x] `make trace` passes
+- [x] `make openapi` run (header doc, problem type)
+- [x] Spec status moved to `Implemented` (or `Partial`, with gaps listed)
+- [x] `security/customer_token.py`'s docstring explains the why: pinned algorithm, public keys only, uniform refusal
+- [x] `docs/02-lld.md` §15 build status updated
+- [x] T4 joint check (2026-11-15): tokens minted to air-web-console's format with its
+      development key verify (`subject_hash` on the turn's log lines), and its `expired`,
+      `wrong-tenant` and `tampered` modes each get the identical 401. Minted by a Python
+      mirror of its `mintCustomerToken`, since the running console proxies to a container
+      on an older image. Repeat through the console once that container is rebuilt
+- [x] As built, the development API keys moved from tenant `local` to `brightcart`
+      (`.env.example`), the tenant the console's tokens and the gateway's keys are for

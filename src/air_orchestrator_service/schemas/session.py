@@ -14,6 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from air_orchestrator_service.constants import Channel
+from air_orchestrator_service.schemas.common import Principal
 
 
 def _now() -> datetime:
@@ -106,6 +107,7 @@ class Session:
         "channel",
         "created_at",
         "owner_key_id",
+        "owner_subject",
         "pending",
         "session_id",
         "tenant",
@@ -121,9 +123,14 @@ class Session:
         owner_key_id: str,
         tenant: str,
         channel: Channel,
+        owner_subject: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.owner_key_id = owner_key_id
+        #: The verified customer who started it, or ``None`` for an anonymous one
+        #: (spec 0014, ``REQ-CTK-007``). Never shown: a ``SessionView`` has no field
+        #: for it.
+        self.owner_subject = owner_subject
         self.tenant = tenant
         self.channel = channel
         self.turns: list[Turn] = []
@@ -151,11 +158,18 @@ class Session:
             del self.turns[: len(self.turns) - window]
         self.updated_at = _now()
 
-    def owned_by(self, key_id: str, tenant: str) -> bool:
-        """Both halves are checked. A key id is unique, but the tenant is the
-        isolation boundary, and asserting it here means a future store that keys on
-        session id alone still cannot cross tenants."""
-        return self.owner_key_id == key_id and self.tenant == tenant
+    def owned_by(self, principal: Principal) -> bool:
+        """Key, tenant and customer must all match. A key id is unique, but the tenant
+        is the isolation boundary, and asserting it here means a future store that keys
+        on session id alone still cannot cross tenants. The subject is what tells two
+        shoppers behind one storefront key apart (spec 0014, ``REQ-CTK-007``): ``None``
+        matches only ``None``, so an anonymous caller cannot continue a signed-in
+        customer's conversation, nor the reverse."""
+        return (
+            self.owner_key_id == principal.key_id
+            and self.tenant == principal.tenant
+            and self.owner_subject == principal.subject
+        )
 
 
 class SessionView(BaseModel):

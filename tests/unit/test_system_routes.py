@@ -15,8 +15,15 @@ from tests.conftest import (
     CLASSIFIER_BASE_URL,
     CUSTOMER_KEY,
     NO_SCOPE_KEY,
+    TOOLS_GATEWAY_BASE_URL,
     auth,
     build_app,
+)
+from tests.unit._tools_gateway_support import (
+    INVENTORY_URL,
+    inventory_body,
+    read_entry,
+    write_entry,
 )
 
 
@@ -343,3 +350,62 @@ async def test_ready_does_not_probe_optional_downstreams(settings: Settings) -> 
     rag = next(d for d in response.json()["dependencies"] if d["service"] == "air-rag")
     assert rag["configured"] is True
     assert rag["reachable"] is None
+
+
+_GATEWAY_ENTRIES: dict[str, list[dict[str, object]]] = {
+    "reads only": [read_entry("orders.list_recent")],
+    "writes only": [write_entry("orders.cancel")],
+    "nothing": [],
+    "both": [read_entry("orders.list_recent"), write_entry("orders.cancel")],
+}
+
+
+@pytest.mark.parametrize(
+    ("key", "entries", "reachable", "expected"),
+    [
+        (CUSTOMER_KEY, "reads only", True, ["direct", "tools"]),
+        (CUSTOMER_KEY, "writes only", True, ["action", "direct"]),
+        (CUSTOMER_KEY, "nothing", True, ["direct"]),
+        (CUSTOMER_KEY, "both", True, ["action", "direct", "tools"]),
+        (BUSINESS_KEY, "both", True, ["direct", "tools"]),
+        (CUSTOMER_KEY, "both", False, ["direct"]),
+    ],
+    ids=["reads", "writes", "nothing", "both", "business", "unreachable"],
+)
+async def test_capabilities_list_tools_and_action_only_when_the_gateway_offers_them(
+    settings: Settings, key: str, entries: str, reachable: bool, expected: list[str]
+) -> None:
+    """``REQ-TGW-005``. ``tools`` needs a ``read`` entry and ``action`` a ``write`` one,
+    in the caller's tenant inventory narrowed to its channel. The business channel
+    never lists ``action`` (``REQ-TGW-026``), and a gateway that does not answer its
+    health check lists neither and is not asked for an inventory. Every entry needs a
+    customer, and the admin key names none: that does not hide them."""
+    gateway = settings.downstream.tools_gateway.model_validate(
+        {
+            "enabled": True,
+            "base_url": TOOLS_GATEWAY_BASE_URL,
+            "tenant_keys": {
+                "tenant-a": {"read": "airtg_read_a", "execute": "airtg_exec_a"},
+                "tenant-b": {"read": "airtg_read_b", "execute": "airtg_exec_b"},
+            },
+            "allow": {"customer": ["orders.*"], "business": ["orders.*"]},
+        }
+    )
+    downstream = settings.downstream.model_copy(update={"tools_gateway": gateway})
+    app = build_app(settings.model_copy(update={"downstream": downstream}))
+    transport = httpx.ASGITransport(app=app)
+    with respx.mock(assert_all_called=False) as mock:
+        health = mock.get(f"{TOOLS_GATEWAY_BASE_URL}/v1/health")
+        if reachable:
+            health.mock(return_value=httpx.Response(200))
+        else:
+            health.mock(side_effect=httpx.ConnectError("refused"))
+        inventory = mock.get(INVENTORY_URL).mock(
+            return_value=httpx.Response(200, json=inventory_body(*_GATEWAY_ENTRIES[entries]))
+        )
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/v1/capabilities", headers=auth(key))
+
+    assert response.status_code == httpx.codes.OK, response.text
+    assert response.json()["routes"] == expected
+    assert inventory.call_count == (1 if reachable else 0)

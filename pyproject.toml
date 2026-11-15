@@ -29,6 +29,9 @@ dependencies = [
     # each one is checked and compiled here (spec 0012, REQ-TGW-002/006). The
     # standard's reference implementation, pure Python.
     "jsonschema>=4.23",
+    # The customer token is a JWT verified locally against configured ES256 public
+    # keys (spec 0014). `crypto` brings `cryptography`, which also loads the keys.
+    "pyjwt[crypto]>=2.10",
 ]
 
 [project.optional-dependencies]
@@ -113,5 +116,8 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q"
 markers = [
-    "gateway(**fields): override air-tools-gateway settings fields in tests/unit/test_tools_stage.py",
+    "gateway(**fields): override air-tools-gateway settings fields (tests/unit/test_tools_stage.py, test_planner.py)",
+    "planner(**fields): override planner settings fields in tests/unit/test_planner.py",
+    "turn(**fields): override turn settings fields in tests/unit/test_planner.py",
+    "sit: needs a running service; skipped unless its *_SIT_URL is set (tests/sit/)",
 ]

@@ -72,12 +72,33 @@ staging and production do rather than running with auth switched off:
 
 Both are stored as `sha256(AIR_ORCHESTRATOR_SERVICE__SECURITY__HASH_SALT + raw key)`, are
 valid only against the development salt, and grant no `allow_actions` — proposing a mutation
-takes a deliberately configured key. Any real deployment overrides both halves.
+takes a deliberately configured key. Both are on tenant `brightcart`, the tenant
+air-tools-gateway's development keys and air-web-console's development customer tokens are
+for. Any real deployment overrides both halves.
+
+### Chatting as a customer
+
+A customer key names a storefront, not a shopper. To chat *as* a signed-in customer, send a
+short-lived customer token beside it in the `air-token` header (spec 0014): an ES256 JWT,
+`typ` `air-customer+jwt`, whose `sub` becomes the turn's customer. `make env` configures
+air-web-console's development public key (`SECURITY__CUSTOMER_TOKENS`), so the console's
+Customer picker (`cust_1001`, `cust_1002`) works locally with no edits.
+
+- **No header:** an anonymous customer. The turn answers; per-customer lookups are not offered.
+- **A header that fails any check** (expired, wrong tenant, tampered, unknown key): `401
+  invalid-customer-token`, one body for every reason. The reason is logged and counted
+  (`air_orchestrator_service_customer_tokens_total{outcome}`), never returned.
+- **A session belongs to the customer who started it.** Another customer, or no token, on
+  the same session gets the same `404` as a session that does not exist, so switching
+  customers mid-conversation starts a new session.
+- `/v1/query` ignores the header.
 
 ### Exercising the mutation path
 
-`/propose` in a message is a literal trigger that makes the engine propose a mutation, so the
-propose → confirm → execute path can be walked end to end before `air-tools-gateway` exists:
+`/propose` in a message is a literal trigger that makes the engine propose a no-op mutation, so
+the propose → confirm → execute gate can be walked end to end. It needs a key whose record sets
+`"allow_actions": true`: the development keys don't, and get an ordinary answer instead
+(spec 0001, `REQ-MUT-012`).
 
 ```bash
 # Turn 1 returns a proposal and changes nothing

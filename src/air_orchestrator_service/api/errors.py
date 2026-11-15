@@ -47,6 +47,7 @@ __all__ = [
     "DependencyUnavailableError",
     "InsufficientScopeError",
     "InternalError",
+    "InvalidCustomerTokenError",
     "MalformedRequestError",
     "MissingApiKeyError",
     "NotFoundError",
@@ -128,6 +129,16 @@ class MissingApiKeyError(AppError):
 
     slug = "missing-api-key"
     title = "Missing or invalid API key"
+    status = 401
+
+
+class InvalidCustomerTokenError(AppError):
+    """An ``air-token`` header was sent and failed verification (spec 0014). One body
+    for every reason, so a forger learns nothing about which check failed
+    (``REQ-CTK-005``)."""
+
+    slug = "invalid-customer-token"
+    title = "Invalid customer token"
     status = 401
 
 

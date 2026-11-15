@@ -1,6 +1,6 @@
 # 0013 — Tasks
 
-**Spec:** [`spec.md`](spec.md) · **Plan:** [`plan.md`](plan.md) · **Updated:** 2026-11-14
+**Spec:** [`spec.md`](spec.md) · **Plan:** [`plan.md`](plan.md) · **Updated:** 2026-11-15
 
 > Each task leaves the tree green (`make check`). When one lands, its rows in spec §10 move
 > from `DEFERRED` to the named test.
@@ -140,13 +140,22 @@ spec 0012 T8 (propose) ───────────────────
 - **Done when:** `make check` and `make trace` pass, and every spec 0013 row names a passing
   test.
 
+## Status (2026-11-15)
+
+T1–T6 and T8 are done, and T7's runner is built and tested hermetically
+(`tests/unit/test_planner_eval.py`, 22 cases in `evals/planner/cases.json`). **T7's live
+run has not been made**: `make planner-eval` costs real model calls, so its first run, and
+the `cloud` result this file should record, are left for the owner to start. Until then
+`planner.enabled` stays `false` everywhere, as T7 requires. The `make prompt-review
+LOOKUPS=1` pass (spec 0012 T7) waits on the same run.
+
 ## Definition of done
 
-- [ ] Every requirement in `spec.md` §5 traces to a passing test, or is a declared `GAP`
-- [ ] `make check` passes
-- [ ] `make trace` passes
-- [ ] `make openapi` run (`Usage.planning_cost_usd`)
-- [ ] `make planner-eval` run, results recorded, before `planner.enabled` is set anywhere
-- [ ] Spec status moved to `Implemented` (or `Partial`, with gaps listed)
-- [ ] Module docstrings explain the *why*: per-turn enums, two rounds, the fallback without the stand-in
-- [ ] `docs/02-lld.md` §15 build status updated
+- [x] Every requirement in `spec.md` §5 traces to a passing test, or is a declared `GAP`
+- [x] `make check` passes
+- [x] `make trace` passes
+- [x] `make openapi` run (`Usage.planning_cost_usd`)
+- [ ] `make planner-eval` run, results recorded, before `planner.enabled` is set anywhere (not yet run: live and paid; see Status)
+- [x] Spec status moved to `Implemented` (or `Partial`, with gaps listed)
+- [x] Module docstrings explain the *why*: per-turn enums, two rounds, the fallback without the stand-in
+- [x] `docs/02-lld.md` §15 build status updated

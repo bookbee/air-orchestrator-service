@@ -15,7 +15,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Header, Request, Response
 from starlette.responses import StreamingResponse
 
-from air_orchestrator_service.api.deps import AppState, get_app_state, require_customer
+from air_orchestrator_service.api.deps import (
+    CUSTOMER_TOKEN_OPENAPI,
+    AppState,
+    get_app_state,
+    require_customer,
+)
 from air_orchestrator_service.api.errors import InsufficientScopeError, MalformedRequestError
 from air_orchestrator_service.api.middleware import TURN_STATUS_ATTR
 from air_orchestrator_service.api.sse import SSE_MEDIA_TYPE, event_stream_response, wants_stream
@@ -56,6 +61,7 @@ def reject_privileged_options(body_options: object, principal: Principal) -> Non
         "execute it by sending the next turn with `confirm.proposal_id`."
     ),
     responses={200: {"content": {SSE_MEDIA_TYPE: {}, "application/json": {}}}},
+    openapi_extra=CUSTOMER_TOKEN_OPENAPI,
 )
 async def chat(
     request: Request,
