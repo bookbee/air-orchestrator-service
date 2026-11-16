@@ -165,6 +165,8 @@ _STUBBED: Final[dict[Stage, str]] = {
 
 #: A citation marker in the answer: ``[1]`` .. ``[99]`` (spec 0011, ``REQ-RAG-009``).
 _CITATION_MARKER: Final = re.compile(r"\[(\d{1,2})\]")
+#: The same marker with the space before it, so removing one leaves no gap.
+_DANGLING_MARKER: Final = re.compile(r" ?\[(\d{1,2})\]")
 #: How much of a cited passage the caller sees. The model saw the whole snippet.
 _CITATION_SNIPPET_CHARS: Final[int] = 300
 _CONTROL_CHARS: Final = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -420,6 +422,8 @@ class TurnEngine:
         #: whether air-rag-service could not be consulted. Per request, like `_last_status`.
         self._sources: list[Passage] = []
         self._kb_unavailable = False
+        #: A supplementary retrieval that failed (REQ-PLN-015): a stage-detail note.
+        self._kb_note: str | None = None
         self._retrieval_cost_usd = 0.0
         #: ``None`` when air-tools-gateway is not configured (spec 0012).
         self._tools_gateway = tools_gateway
@@ -988,6 +992,8 @@ class TurnEngine:
             stage=Stage.GUARDRAILS_OUT, status=StageStatus.OK, latency_ms=0.0, detail=out_detail
         )
         text = out_verdict.safe_text
+        if principal.channel is Channel.CUSTOMER:
+            text = self._without_dangling_markers(text)
 
         for citation in self._citations(text):
             yield CitationEvent(citation=citation)
@@ -1164,6 +1170,9 @@ class TurnEngine:
                 principal,
                 retrieve=retrieve,
                 needs_model=needs_model,
+                # REQ-PLN-015: beside lookups the knowledge base is an extra, and
+                # its failure must not degrade a turn the lookups answer.
+                supplementary=bool(reads),
                 deadline_at=deadline_at,
                 deadline_s=deadline_s,
             ),
@@ -1179,6 +1188,8 @@ class TurnEngine:
             self._execution_part(principal, execute, deadline_at=deadline_at),
         )
         status, detail, downstream = _combine(retrieval, lookups, second, proposal, execution)
+        if self._kb_note is not None:
+            detail = f"{detail}; {self._kb_note}" if detail else self._kb_note
         latency_ms = round((time.perf_counter() - started) * 1000, 3)
         metrics.record_stage(stage=Stage.GATHER, status=status, duration_s=latency_ms / 1000)
         yield StageEvent(
@@ -1279,6 +1290,7 @@ class TurnEngine:
         *,
         retrieve: bool,
         needs_model: bool,
+        supplementary: bool = False,
         deadline_at: float,
         deadline_s: float,
     ) -> _Part:
@@ -1292,6 +1304,12 @@ class TurnEngine:
         answer given without the sources it should have had is a lesser answer
         (HLD §7, ``REQ-RAG-011``). That differs from ``CLASSIFY``, whose verdict
         nothing reads yet.
+
+        ``supplementary`` is a turn whose plan also has lookups (``REQ-PLN-015``).
+        There the knowledge base adds a policy answer to what the lookups already
+        answer, so its failure is noted in the stage detail and nothing else: the
+        turn is not ``degraded`` and the prompt is not told the knowledge base
+        failed, which would put an apology into an order answer that needed none.
         """
         status, detail, downstream = StageStatus.SKIPPED, None, None
         if self._rag is None:
@@ -1306,7 +1324,9 @@ class TurnEngine:
             detail = "no knowledge base for this tenant"
         elif retrieve:
             bound_s = self._rag.bound_s(_remaining(deadline_at), deadline_s=deadline_s)
-            if bound_s * 1000 < RAG_MIN_CALL_MS:
+            if bound_s * 1000 < RAG_MIN_CALL_MS and supplementary:
+                self._kb_note = "knowledge base not consulted: turn deadline too close"
+            elif bound_s * 1000 < RAG_MIN_CALL_MS:
                 # Ours, not air-rag-service's: no `downstream` is named.
                 self._last_status = TurnStatus.DEGRADED
                 self._kb_unavailable = True
@@ -1317,6 +1337,10 @@ class TurnEngine:
                         masked_text, tenant=principal.tenant, timeout_s=bound_s
                     )
                 except RagError as exc:
+                    if supplementary:
+                        self._kb_note = f"knowledge base not consulted: {exc}"
+                        _log.warning("retrieval.supplementary_failed", error=str(exc))
+                        return status, detail, downstream
                     self._last_status = TurnStatus.DEGRADED
                     self._kb_unavailable = True
                     status, detail = StageStatus.DEGRADED, str(exc)
@@ -1724,6 +1748,20 @@ class TurnEngine:
             "role": "system",
             "content": f"{_SOURCES_HEADER}\n\n{delimit(numbered, source='knowledge_base')}",
         }
+
+    def _without_dangling_markers(self, text: str) -> str:
+        """The answer less any ``[n]`` that names no source this turn carried.
+
+        A marker is a claim that a source backs the sentence. With no sources in the
+        prompt (retrieval skipped, disallowed, or empty) the model sometimes writes
+        one anyway, from the conversation's earlier turns or from habit, and the
+        customer is shown a citation that leads nowhere. Streamed deltas may already
+        have carried it; the ``answer`` event is authoritative and replaces them.
+        """
+        limit = len(self._sources)
+        return _DANGLING_MARKER.sub(
+            lambda match: match.group(0) if 1 <= int(match.group(1)) <= limit else "", text
+        )
 
     def _citations(self, text: str) -> list[Citation]:
         """One citation per source the final answer cites by a valid ``[n]``, in order

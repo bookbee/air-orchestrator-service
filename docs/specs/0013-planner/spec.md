@@ -41,7 +41,7 @@ its own evaluation set. Once it is enabled, `/propose` is only text.
 
 - **Native tool-calling.** It waits for air-model-gateway (HLD §9 item 2). The `Planner`
   protocol is the seam it will replace behind.
-- **Deciding retrieval by model.** Retrieval stays a rule (spec 0011; §9 Q3), narrowed by `REQ-PLN-015`: the planner's schema has no retrieval field.
+- **Deciding retrieval by model.** Retrieval stays a rule (spec 0011; §9 Q3; `REQ-PLN-015`): the planner's schema has no retrieval field.
 - **The business channel.** `business_analyst` turns stay direct in v1: no capability is
   offered there yet, because its allow-list is empty (`REQ-TGW-004`). This spec applies there
   unchanged once one is.
@@ -111,7 +111,7 @@ its own evaluation set. Once it is enabled, `/propose` is only text.
 | `REQ-PLN-012` | MUST | Each planning call is counted in `air_orchestrator_service_planner_calls_total{round,outcome}`, outcome one of `ok`, `invalid`, `timeout`, `error`, `skipped_budget`. |
 | `REQ-PLN-013` | MUST NOT | The planner's raw output, its `reason`, or the capability catalogue reaches the client. The client sees the `route` event (`REQ-TGW-025`) and stage details only. |
 | `REQ-PLN-014` | MUST | The planner asks air-model-gateway for its own model class, `planner.model_class`, defaulting to `cloud` and independent of the synthesis class. |
-| `REQ-PLN-015` | MUST | A model plan with any read or a proposal does not retrieve from air-rag-service: the order lookup answers it, and a knowledge-base failure must not degrade a turn the lookups answered. Every other customer turn retrieves as spec 0011 decides, including a rule plan after a planner failure. A message that asks about an order and a policy at once is answered from the lookup alone. |
+| `REQ-PLN-015` | MUST | A model plan with reads also retrieves from air-rag-service, as spec 0011 decides for every customer turn that is synthesised, so a message that asks about an order and a policy at once gets both. Beside lookups the knowledge base is supplementary: when it fails or the deadline is too close, the turn is not `degraded` for it, the prompt is not told it was unavailable, and `GATHER`'s detail says `knowledge base not consulted: <reason>`. A plan with a proposal does not retrieve (its turn is fixed text). |
 
 ## 6. Acceptance criteria
 
@@ -187,6 +187,10 @@ planner's schema has no retrieval field. Revisit when retrieval cost or latency 
 *Revisited 2026-11-15 (product owner):* a plan with lookups or a proposal no longer
 retrieves (`REQ-PLN-015`). In SIT a knowledge-base outage degraded order questions the
 lookup had fully answered, and an order question gains nothing from policy passages.
+*Revisited 2026-11-16 (product owner, platform SIT):* a plan with lookups retrieves again,
+because "my recent orders, and how long do refunds take?" lost its policy half ("the exact
+terms are in your order confirmation"). The outage concern is kept another way: beside
+lookups a knowledge-base failure no longer degrades the turn (`REQ-PLN-015`).
 
 **Q4 — Three reads, two rounds.** Enough for "compare my last two orders" (two reads, one
 round) and "cancel whichever hasn't shipped" (round 2). Both limits are settings
@@ -213,6 +217,6 @@ does.
 | `REQ-PLN-012` | `tests/unit/test_planner.py::test_every_planning_call_is_counted` |
 | `REQ-PLN-013` | `tests/unit/test_planner.py::test_the_plan_never_reaches_the_client` |
 | `REQ-PLN-014` | `tests/unit/test_planner.py::test_the_planner_uses_its_own_model_class` |
-| `REQ-PLN-015` | `tests/unit/test_planner.py::test_a_plan_with_lookups_does_not_retrieve` |
+| `REQ-PLN-015` | `tests/unit/test_planner.py::test_a_plan_with_lookups_also_retrieves`, `tests/unit/test_planner.py::test_a_knowledge_base_failure_does_not_degrade_a_turn_with_lookups` |
 | `REQ-PLN-016` | `tests/unit/test_prompts.py::test_the_planner_prompt_proposes_a_named_change_in_round_one` |
 | `REQ-PLN-017` | `tests/unit/test_planner.py::test_a_failed_plan_tells_the_answer_nothing_was_looked_up_or_prepared` |

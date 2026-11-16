@@ -354,6 +354,31 @@ async def test_only_cited_passages_become_citations(
     assert body["grounded"] is False
 
 
+async def test_a_marker_that_names_no_source_is_removed_from_the_answer(
+    app: FastAPI, client: httpx.AsyncClient, mock: respx.MockRouter
+) -> None:
+    """SIT 2026-11-16: a ``[n]`` past the last source is a citation that leads
+    nowhere, so it is taken out of the answer; a valid one stays."""
+    _gateway(app, "Refunds take 5 to 10 working days [2]. See also [7] and again [2].")
+    _retrieved(mock, _RETURNS | {"score": 0.9}, _REFUNDS)
+
+    body = await _chat(client)
+
+    assert body["answer"] == "Refunds take 5 to 10 working days [2]. See also and again [2]."
+
+
+async def test_a_marker_is_removed_when_the_turn_had_no_sources(
+    app: FastAPI, client: httpx.AsyncClient, mock: respx.MockRouter
+) -> None:
+    _gateway(app, "You can return any item within 30 days [1].")
+    _retrieved(mock)
+
+    body = await _chat(client)
+
+    assert body["answer"] == "You can return any item within 30 days."
+    assert body["citations"] == []
+
+
 async def test_citations_stream_before_the_answer(
     app: FastAPI, client: httpx.AsyncClient, mock: respx.MockRouter
 ) -> None:

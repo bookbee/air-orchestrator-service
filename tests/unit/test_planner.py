@@ -808,12 +808,12 @@ async def test_an_unavailable_inventory_is_named_in_the_plan_stage(
     assert body["answer"] == _ANSWER
 
 
-async def test_a_plan_with_lookups_does_not_retrieve(
+async def test_a_plan_with_lookups_also_retrieves(
     settings: Settings, mock: respx.MockRouter
 ) -> None:
-    """``REQ-PLN-015``. With air-rag-service on, a model plan with a read answers from
-    the lookup alone: no retrieval, no ``rag`` route. A plan with no capability step
-    still retrieves, as spec 0011 decides."""
+    """``REQ-PLN-015``. With air-rag-service on, a model plan with a read still
+    searches the knowledge base, so a message asking about an order and a policy
+    gets both. A plan with no capability step retrieves as spec 0011 decides."""
     from tests.unit.test_gather_stage import RAG_BASE_URL
 
     rag = settings.downstream.rag.model_copy(update={"enabled": True, "base_url": RAG_BASE_URL})
@@ -829,14 +829,42 @@ async def test_a_plan_with_lookups_does_not_retrieve(
     _lookup(mock, "orders.get", {"order_id": "48213", "status": "in_transit"})
     _model(app, _plan_json(_step("orders.get", order_id="48213")), _plan_json())
 
-    looked_up = await _turn(app, "Where is order 48213?")
-    assert retrieve.call_count == 0
-    assert looked_up["routes"] == ["tools"]
-    assert _stage(looked_up, Stage.GATHER)["detail"] == "orders.get ok"
+    looked_up = await _turn(app, "Where is order 48213, and how long do refunds take?")
+    assert retrieve.call_count == 1
+    assert looked_up["routes"] == ["rag", "tools"]
+    assert _stage(looked_up, Stage.GATHER)["detail"] == "no relevant sources; orders.get ok"
 
     policy = await _turn(app, "How long do refunds take?")
-    assert retrieve.call_count == 1
+    assert retrieve.call_count == 2
     assert "rag" in policy["routes"]
+
+
+async def test_a_knowledge_base_failure_does_not_degrade_a_turn_with_lookups(
+    settings: Settings, mock: respx.MockRouter
+) -> None:
+    """``REQ-PLN-015``. Beside lookups the knowledge base is an extra: when it fails
+    the turn is still ``ok``, nothing is listed as degraded, and the stage detail
+    says it was not consulted."""
+    from tests.unit.test_gather_stage import RAG_BASE_URL
+
+    rag = settings.downstream.rag.model_copy(update={"enabled": True, "base_url": RAG_BASE_URL})
+    app = build_app(
+        settings.model_copy(
+            update={"downstream": settings.downstream.model_copy(update={"rag": rag})}
+        )
+    )
+    _as(app)
+    mock.post(f"{RAG_BASE_URL}/v1/retrieve").mock(return_value=httpx.Response(503))
+    _lookup(mock, "orders.get", {"order_id": "48213", "status": "in_transit"})
+    _model(app, _plan_json(_step("orders.get", order_id="48213")))
+
+    body = await _turn(app, "Where is order 48213?")
+
+    assert body["status"] == "ok"
+    assert body["degraded"] == []
+    gather = _stage(body, Stage.GATHER)
+    assert gather["status"] == "ok"
+    assert gather["detail"].startswith("orders.get ok; knowledge base not consulted: ")
 
 
 def _planner_count(round_no: int, outcome: str) -> float:

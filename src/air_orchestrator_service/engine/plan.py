@@ -391,8 +391,10 @@ class ModelPlanner:
 
         reads = tuple(_step(read) for read in parsed.reads)
         write = _step(parsed.propose) if parsed.propose is not None else None
-        # REQ-PLN-015: a turn the lookups answer does not also search the knowledge base.
-        retrieve = fallback.retrieve and not reads and write is None
+        # REQ-PLN-015: a plan with lookups still searches the knowledge base, so "my
+        # orders, and how do refunds work?" gets both halves. A proposal's turn is
+        # answered by fixed text and retrieves nothing.
+        retrieve = fallback.retrieve and write is None
         routes = [Route.RAG] if retrieve else []
         routes += [Route.TOOLS] if reads else []
         routes += [Route.ACTION] if write is not None else []
