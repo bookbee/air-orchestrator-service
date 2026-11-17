@@ -8,7 +8,7 @@
 # constraint (no runtime dependency on any other AIR service) — reached over the
 # host exactly like air-classifier reaches it.
 #
-#   cd ../air-infra         && make up  # redis, postgres, mongo  :8080
+#   cd ../air-infrastructure-service && make up  # redis, postgres, mongo  :8080
 #   cd ../air-model-gateway && make up  # the model gateway       :8083
 #   make up                             # this service            :8081
 #
