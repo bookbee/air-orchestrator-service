@@ -104,6 +104,8 @@ and gains `**Status:** Superseded by NNNN` — the id is a permanent address.
 | `TGW` | [0012 — air-tools-gateway](0012-tools-gateway/spec.md) |
 | `PLN` | [0013 — the planner](0013-planner/spec.md) |
 | `CTK` | [0014 — the customer token](0014-customer-token/spec.md) |
+| `SPS` | [0015 — one process while sessions are in memory](0015-single-process-sessions/spec.md) |
+| `FDR` | [0016 — the front door](0016-front-door/spec.md) |
 
 Ids are never reused or renumbered. A withdrawn requirement stays in the table marked
 `Withdrawn`, because commit messages and test docstrings still point at it.

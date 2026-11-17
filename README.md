@@ -267,8 +267,14 @@ matter most for a deployment:
 - **The container listens on 8081** and runs as uid 10001. Liveness is `/v1/health`;
   readiness is `/v1/ready`. The image has no `HEALTHCHECK` on purpose: declare probes in the
   manifest.
-- **Rate limits are configured but not enforced** (air-web-console bug OR-017). Limit at the
-  ingress until they are.
+- **Clients reach it through a front door**, never directly: an internal load balancer that
+  terminates TLS, forwards only `/v1/chat`, `/v1/query` and `/v1/sessions/*`, health-checks
+  `/v1/health`, streams without buffering and limits the request rate. Callers are the
+  shop's backends, over a private address; browsers are not clients.
+  [Spec 0016](docs/specs/0016-front-door/spec.md) is the contract;
+  air-infrastructure-service's `gke/` implements it.
+- **Rate limits are configured but not enforced** in the service itself (air-web-console bug
+  OR-017). The front door is the limit until they are.
 - **Every key in `.env.example` is a development value.** A deployment needs its own
   `HASH_SALT`, API key records, downstream keys and customer-token public keys.
   `APP__ENV=production` refuses the unauthenticated escape hatch.
